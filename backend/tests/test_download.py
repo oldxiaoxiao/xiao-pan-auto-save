@@ -207,6 +207,87 @@ async def test_no_saved_files_noop(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_aria2_status_maps_active_and_waiting(tmp_path, monkeypatch):
+    class FakeResp:
+        def __init__(self, result):
+            self._result = result
+
+        def json(self):
+            return {"result": self._result}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json):
+            if json["method"] == "aria2.tellActive":
+                return FakeResp(
+                    [
+                        {
+                            "gid": "g1",
+                            "status": "active",
+                            "totalLength": "1000",
+                            "completedLength": "250",
+                            "downloadSpeed": "50",
+                            "files": [{"path": "/d/凡人/193.mkv"}],
+                        }
+                    ]
+                )
+            return FakeResp(
+                [
+                    {
+                        "gid": "g2",
+                        "status": "waiting",
+                        "totalLength": "0",
+                        "completedLength": "0",
+                        "downloadSpeed": "0",
+                        "files": [],
+                    }
+                ]
+            )
+
+    monkeypatch.setattr(dl.httpx, "AsyncClient", FakeClient)
+    c = cfg(tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800", aria2_secret="sec")
+    jobs = await dl.aria2_status(c)
+    assert len(jobs) == 2
+    by_id = {j["id"]: j for j in jobs}
+    a = by_id["g1"]
+    assert a["status"] == "downloading" and a["total"] == 1000 and a["done"] == 250
+    assert a["speed"] == 50.0 and a["filename"] == "193.mkv" and a["taskname"] == ""
+    assert by_id["g2"]["status"] == "queued" and by_id["g2"]["filename"] == "aria2"
+
+
+@pytest.mark.asyncio
+async def test_aria2_status_disabled_returns_empty(tmp_path):
+    assert await dl.aria2_status(cfg(tmp_path)) == []  # builtin 模式
+    c = cfg(tmp_path, mode="aria2")  # 未配 RPC
+    assert await dl.aria2_status(c) == []
+
+
+@pytest.mark.asyncio
+async def test_aria2_status_unreachable_degrades(tmp_path, monkeypatch):
+    class Boom:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            raise OSError("conn refused")
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(dl.httpx, "AsyncClient", Boom)
+    c = cfg(tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800")
+    assert await dl.aria2_status(c) == []
+
+
+@pytest.mark.asyncio
 async def test_fetch_one_reports_progress_and_done(tmp_path):
     from backend.core.download_registry import registry
 

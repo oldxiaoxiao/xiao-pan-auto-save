@@ -219,6 +219,49 @@ def _rpc_url(host_port: str) -> str:
     return f"http://{host_port}/jsonrpc"
 
 
+async def aria2_status(cfg: DownloadSettings) -> list[dict]:
+    """查询 aria2 正在/排队下载，映射成与内置一致的 job 结构。
+
+    仅 aria2 模式且配了 RPC 时查询；未配置或不可达一律返回 []（不影响内置任务展示）。
+    aria2 不携带所属任务，taskname 留空；下载完成后离开 active/waiting 即不再出现。
+    """
+    if cfg.mode != "aria2" or not cfg.aria2_host_port:
+        return []
+    url = _rpc_url(cfg.aria2_host_port)
+    token = [f"token:{cfg.aria2_secret}"] if cfg.aria2_secret else []
+    keys = ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "files"]
+    out: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            for method, extra in (("aria2.tellActive", []), ("aria2.tellWaiting", [0, 20])):
+                params = token + extra + [keys]
+                resp = await client.post(
+                    url, json={"jsonrpc": "2.0", "id": "st", "method": method, "params": params}
+                )
+                for st in resp.json().get("result") or []:
+                    files = st.get("files") or []
+                    path = files[0].get("path", "") if files else ""
+                    out.append(
+                        {
+                            "id": st.get("gid") or path,
+                            "task_id": None,
+                            "taskname": "",
+                            "filename": Path(path).name or "aria2",
+                            "dest_path": path,
+                            "total": int(st.get("totalLength") or 0),
+                            "done": int(st.get("completedLength") or 0),
+                            "speed": float(st.get("downloadSpeed") or 0),
+                            "status": "downloading" if st.get("status") == "active" else "queued",
+                            "error": "",
+                            "started_at": 0.0,
+                            "updated_at": time.time(),
+                        }
+                    )
+    except Exception:  # noqa: BLE001 aria2 不可达时静默降级
+        return []
+    return out
+
+
 async def _aria2_submit(
     driver: CloudDrive, items: list[_Item], cfg: DownloadSettings, log: LogFn
 ) -> list[str]:

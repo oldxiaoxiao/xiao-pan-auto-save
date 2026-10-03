@@ -11,4 +11,9 @@ router = APIRouter(prefix="/api", tags=["downloads"])
 
 @router.get("/downloads")
 async def downloads() -> dict:
-    return {"jobs": registry.snapshot()}
+    from ..api.deps import get_setting
+    from ..services.download_service import DownloadSettings, aria2_status
+
+    jobs = registry.snapshot()
+    jobs += await aria2_status(DownloadSettings.from_dict(get_setting("download")))
+    return {"jobs": jobs}
