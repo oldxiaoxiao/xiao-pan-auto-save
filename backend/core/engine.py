@@ -19,7 +19,7 @@ from ..drivers.base import (
     ShareRef,
     ShareUnavailable,
 )
-from .magic import MagicRename
+from .magic import MagicRename, extract_episode
 
 LogFn = Callable[[str, str], None]
 
@@ -40,6 +40,27 @@ class TaskSpec:
     episode_start: int = 0
     episode_end: int = 0
     quality: str = ""
+
+
+def matches_filters(name: str, ep_start: int, ep_end: int, quality: str) -> bool:
+    """叶子文件后置过滤：画质 token（词边界、OR）+ 集数区间。
+
+    仅对非目录文件调用（目录由调用方恒放行）。ep 区间与 quality 全默认时恒 True。
+    """
+    if quality:
+        low = name.lower()
+        toks = [t.strip().lower() for t in quality.split(",") if t.strip()]
+        if toks and not any(re.search(rf"(?<![0-9a-z]){re.escape(t)}(?![0-9a-z])", low) for t in toks):
+            return False
+    if ep_start or ep_end:
+        ep = extract_episode(name)
+        if ep is None:
+            return False
+        if ep_start and ep < ep_start:
+            return False
+        if ep_end and ep > ep_end:
+            return False
+    return True
 
 
 @dataclass
@@ -159,6 +180,10 @@ async def _check_dir(
 
     need_save: list[_Plan] = []
     for share_file in share_list:
+        if not share_file.is_dir and not matches_filters(
+            share_file.name, spec.episode_start, spec.episode_end, spec.quality
+        ):
+            continue
         search_pattern = spec.update_subdir if (share_file.is_dir and spec.update_subdir) else pattern
         if re.search(search_pattern or "", share_file.name):
             if not mr.is_exists(share_file.name, dir_names, spec.ignore_extension and not share_file.is_dir):

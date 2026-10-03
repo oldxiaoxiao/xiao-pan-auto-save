@@ -6,7 +6,7 @@ import itertools
 
 import pytest
 
-from backend.core.engine import TaskSpec, run_update_task
+from backend.core.engine import TaskSpec, matches_filters, run_update_task
 from backend.drivers.base import CloudDrive, FsItem, SaveResult, ShareBanned, ShareRef
 
 
@@ -208,3 +208,48 @@ async def test_unsupported_driver():
     res = await run_update_task(drv, spec())
     assert res.status == "failed"
     assert "尚未实现" in res.message
+
+
+def test_matches_filters_quality_or():
+    assert matches_filters("剧.S02.1080p.mkv", 0, 0, "1080p,4k") is True
+    assert matches_filters("剧.4K.mkv", 0, 0, "1080p,4k") is True
+    assert matches_filters("剧.720p.mkv", 0, 0, "1080p,4k") is False
+    assert matches_filters("剧.mkv", 0, 0, "") is True  # 不限画质
+    assert matches_filters("14k.mkv", 0, 0, "4k") is False  # 词边界，不误命中
+
+
+def test_matches_filters_episode_range():
+    assert matches_filters("第05集.mp4", 1, 20, "") is True
+    assert matches_filters("第25集.mp4", 1, 20, "") is False
+    assert matches_filters("第01集.mp4", 1, 1, "") is True  # 边界含
+    assert matches_filters("第01集.mp4", 0, 0, "") is True  # 未设区间放行
+    assert matches_filters("花絮无集数.mp4", 1, 20, "") is False  # 设了区间但提不出集数
+
+
+def test_matches_filters_empty_passes_all():
+    assert matches_filters("任意文件名", 0, 0, "") is True
+
+
+@pytest.mark.asyncio
+async def test_engine_applies_quality_filter_on_files():
+    drv = FakeDriver(
+        {"": [f("1", "ep1.1080p.mp4"), f("2", "ep2.4k.mp4"), f("3", "ep3.720p.mp4")]},
+    )
+    res = await run_update_task(drv, spec(quality="1080p,4k"))
+    assert sorted(i.share_name for i in res.files) == ["ep1.1080p.mp4", "ep2.4k.mp4"]
+
+
+@pytest.mark.asyncio
+async def test_engine_episode_filter_skips_dirs():
+    # 目录名无集数，设了区间也不能误杀整棵子树。
+    # 目标已存在 4K 目录 → update_subdir 走递归比对（同 test_update_subdir_recursion）；
+    # 递归进入 /4K 后按集数区间过滤叶子文件：03 命中、30 越界、readme 无集数被过滤。
+    drv = FakeDriver(
+        {
+            "": [d("10", "4K"), f("11", "readme.mp4")],
+            "/4K": [f("1", "第03集.mp4"), f("2", "第30集.mp4")],
+        },
+        dirs={"/动漫/测试剧": [d("9", "4K")], "/动漫/测试剧/4K": []},
+    )
+    res = await run_update_task(drv, spec(update_subdir="4K", episode_start=1, episode_end=10))
+    assert [i.share_name for i in res.files] == ["第03集.mp4"]
