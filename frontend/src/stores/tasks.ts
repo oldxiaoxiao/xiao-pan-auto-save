@@ -97,6 +97,7 @@ export const useTasksStore = defineStore("tasks", () => {
         episode_start: t.episode_start,
         episode_end: t.episode_end,
         quality: t.quality,
+        schedule: t.schedule,
       };
       const updated = await api.updateTask(t.id, payload);
       replaceTask(updated);

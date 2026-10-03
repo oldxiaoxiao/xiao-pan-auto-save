@@ -44,6 +44,7 @@ function blank(): TaskPayload & { startfid_name: string } {
     episode_start: 0,
     episode_end: 0,
     quality: "",
+    schedule: "",
   };
 }
 
@@ -57,10 +58,39 @@ const qualityList = computed({
 });
 const advancedOpen = ref<string[]>([]); // 高级区默认收起
 
+// —— 更新频率 ——
+const SCHEDULE_PRESETS = [
+  { label: "继承全局", value: "" },
+  { label: "每 5 分钟", value: "interval:5" },
+  { label: "每 30 分钟", value: "interval:30" },
+  { label: "每小时", value: "interval:60" },
+  { label: "每天 9:00", value: "cron:0 9 * * *" },
+  { label: "自定义 cron", value: "__custom" },
+];
+const customCron = ref("");
+const scheduleMode = computed({
+  get: () => {
+    const s = draft.schedule;
+    if (s.startsWith("cron:") && !SCHEDULE_PRESETS.some((p) => p.value === s)) return "__custom";
+    return s;
+  },
+  set: (v: string) => {
+    if (v === "__custom") draft.schedule = `cron:${customCron.value}`;
+    else draft.schedule = v;
+  },
+});
+watch(customCron, (c) => {
+  if (scheduleMode.value === "__custom") draft.schedule = `cron:${c}`;
+});
+
 function loadFrom(task: Task | null) {
   Object.assign(draft, blank(), task ? { ...task, startfid_name: "" } : {});
   if (!task && props.prefill) Object.assign(draft, props.prefill);
   draft.runweek = [...(task?.runweek ?? [])];
+  // 若已有任务的 schedule 是不在预设里的 cron,回填自定义输入框
+  const s = task?.schedule ?? "";
+  if (s.startsWith("cron:") && !SCHEDULE_PRESETS.some((p) => p.value === s)) customCron.value = s.slice(5);
+  else customCron.value = "";
   original = snapshot();
 }
 
@@ -182,6 +212,21 @@ const hasId = computed(() => props.task?.id ?? null);
       <div class="f">
         <label class="field-label">下载到本地</label>
         <el-switch v-model="draft.auto_download" />
+      </div>
+      <div class="f f--wide">
+        <label class="field-label">更新频率</label>
+        <el-select v-model="scheduleMode" style="width: 100%">
+          <el-option v-for="p in SCHEDULE_PRESETS" :key="p.value" :label="p.label" :value="p.value" />
+        </el-select>
+        <el-input
+          v-if="scheduleMode === '__custom'"
+          v-model="customCron"
+          placeholder="标准 crontab，如 */5 17-23 * * *"
+          style="margin-top: 8px"
+        />
+        <div v-if="draft.schedule.startsWith('interval:') && Number(draft.schedule.split(':')[1]) < 5" class="hint">
+          频率过高可能触发夸克风控，建议 ≥5 分钟。
+        </div>
       </div>
     </div>
 
