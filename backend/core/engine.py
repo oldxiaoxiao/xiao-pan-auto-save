@@ -1,0 +1,259 @@
+"""追更引擎：差集比对、魔法重命名、子目录递归/重存、起始文件订阅。
+
+只依赖 CloudDrive 抽象接口，不含任何网盘专有逻辑。
+算法骨架对齐原项目已验证的行为（差集、忽略扩展名、{I} 递增、startfid 截断等）。
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..drivers.base import (
+    CloudDrive,
+    DriveError,
+    FsItem,
+    ShareBanned,
+    ShareRef,
+    ShareUnavailable,
+)
+from .magic import MagicRename
+
+LogFn = Callable[[str, str], None]
+
+_I_RE = re.compile(r"\{I+\}")
+
+
+@dataclass
+class TaskSpec:
+    taskname: str
+    shareurl: str
+    savepath: str
+    pattern: str = ""
+    replace: str = ""
+    ignore_extension: bool = False
+    startfid: str = ""
+    update_subdir: str = ""
+    update_subdir_resave: bool = False
+
+
+@dataclass
+class SavedFile:
+    share_name: str
+    final_name: str
+    new_fid: str
+    dest_path: str
+    is_dir: bool = False
+
+
+@dataclass
+class TaskRunResult:
+    status: str = "no_changes"  # updated | no_changes | banned | network | failed
+    message: str = ""
+    files: list[SavedFile] = field(default_factory=list)
+
+    def render(self) -> str:
+        lines = []
+        by_dir: dict[str, list[SavedFile]] = {}
+        for f in self.files:
+            by_dir.setdefault(f.dest_path, []).append(f)
+        for dest, files in by_dir.items():
+            lines.append(f"📁 {dest}")
+            for f in files:
+                icon = "📁" if f.is_dir else "📄"
+                renamed = f"  (原: {f.share_name})" if f.final_name != f.share_name else ""
+                lines.append(f"  {icon}{f.final_name}{renamed}")
+        return "\n".join(lines)
+
+
+@dataclass
+class _Plan:
+    """一个待转存条目：分享条目 + 计划重命名后的名字。"""
+
+    item: FsItem
+    name_re: str
+
+
+def _norm_path(path: str) -> str:
+    return re.sub(r"/{2,}", "/", f"/{path.strip('/')}") if path.strip("/") else "/"
+
+
+def _mr_view(items: list[FsItem]) -> list[dict[str, Any]]:
+    return [{"name": i.name, "is_dir": i.is_dir} for i in items]
+
+
+async def run_update_task(
+    driver: CloudDrive,
+    spec: TaskSpec,
+    magic_regex: dict[str, dict[str, str]] | None = None,
+    log: LogFn | None = None,
+) -> TaskRunResult:
+    log = log or (lambda level, msg: None)
+    result = TaskRunResult()
+
+    if not driver.supported:
+        result.status = "failed"
+        result.message = f"{driver.name} 驱动尚未实现（即将支持）"
+        return result
+
+    try:
+        ref = driver.parse_share(spec.shareurl)
+    except DriveError as exc:
+        result.status = "failed"
+        result.message = str(exc)
+        return result
+
+    try:
+        share_root = await driver.list_share(ref, "")
+        if not share_root:
+            result.status = "banned"
+            result.message = "分享为空，文件已被分享者删除"
+            return result
+        # 分享仅一个文件夹：透明下钻一层
+        if len(share_root) == 1 and share_root[0].is_dir:
+            log("info", "🧠 该分享是一个文件夹，读取文件夹内列表")
+            share_path, share_root = (
+                f"/{share_root[0].name}",
+                await driver.list_share(ref, f"/{share_root[0].name}"),
+            )
+        else:
+            share_path = ""
+        await _check_dir(driver, spec, ref, magic_regex, share_path, "", share_root, log, result)
+    except ShareBanned as exc:
+        result.status = "banned"
+        result.message = exc.message
+    except ShareUnavailable as exc:
+        result.status = "network"
+        result.message = exc.message
+    except DriveError as exc:
+        result.status = "failed"
+        result.message = exc.message
+    return result
+
+
+async def _check_dir(
+    driver: CloudDrive,
+    spec: TaskSpec,
+    ref: ShareRef,
+    magic_regex: dict | None,
+    share_path: str,
+    rel_path: str,
+    share_list: list[FsItem],
+    log: LogFn,
+    result: TaskRunResult,
+) -> None:
+    """比对一个目录层。share_path 为分享内路径（驱动定位），rel_path 为对应保存目录后缀。"""
+    mr = MagicRename(magic_regex)
+    mr.set_taskname(spec.taskname)
+    pattern, replace = mr.magic_regex_conv(spec.pattern, spec.replace)
+
+    target_path = _norm_path(f"{spec.savepath}{rel_path}")
+    await driver.ensure_dir(target_path)
+    dir_items = await driver.list_dir(target_path)
+    dir_names = [i.name for i in dir_items]
+
+    need_save: list[_Plan] = []
+    for share_file in share_list:
+        search_pattern = spec.update_subdir if (share_file.is_dir and spec.update_subdir) else pattern
+        if re.search(search_pattern or "", share_file.name):
+            if not mr.is_exists(share_file.name, dir_names, spec.ignore_extension and not share_file.is_dir):
+                if share_file.is_dir or rel_path:
+                    # 文件夹、子目录文件不重命名
+                    need_save.append(_Plan(share_file, share_file.name))
+                else:
+                    name_re = mr.sub(pattern, replace, share_file.name)
+                    if not mr.is_exists(name_re, dir_names, spec.ignore_extension):
+                        need_save.append(_Plan(share_file, name_re))
+            elif share_file.is_dir and spec.update_subdir and re.search(spec.update_subdir, share_file.name):
+                if spec.update_subdir_resave and driver.has("delete"):
+                    log("info", f"重存子目录：{target_path}/{share_file.name}")
+                    existing = next((i for i in dir_items if i.name == share_file.name and i.is_dir), None)
+                    if existing:
+                        await driver.delete_items([existing], purge=True)
+                        dir_names.remove(existing.name)
+                        dir_items.remove(existing)
+                    need_save.append(_Plan(share_file, share_file.name))
+                else:
+                    # 递归模式：进入分享子目录比对
+                    log("info", f"检查子目录：{share_file.name}")
+                    sub_share_path = f"{share_path}/{share_file.name}"
+                    before = len(result.files)
+                    sub_items = await driver.list_share(ref, sub_share_path)
+                    if sub_items:
+                        await _check_dir(
+                            driver,
+                            spec,
+                            ref,
+                            magic_regex,
+                            sub_share_path,
+                            f"{rel_path}/{share_file.name}",
+                            sub_items,
+                            log,
+                            result,
+                        )
+                    if len(result.files) > before:
+                        log("info", f"子目录有新内容：{rel_path}/{share_file.name}")
+        # 起始文件订阅：列表新→旧遍历，遇到 startfid（含）即停止
+        if share_file.fid == spec.startfid and spec.startfid:
+            break
+
+    if _I_RE.search(replace or ""):
+        mr.set_dir_file_list(_mr_view(dir_items), replace)
+        plans_view = [
+            {"name_re": p.name_re, "mtime": p.item.mtime, "is_dir": p.item.is_dir} for p in need_save
+        ]
+        mr.sort_file_list(plans_view)
+        for p, view in zip(need_save, plans_view, strict=True):
+            p.name_re = view["name_re"]
+
+    if not need_save:
+        return
+
+    items = [p.item for p in need_save]
+    save_result = await driver.save(items, target_path, ref)
+    if not save_result.ok:
+        raise DriveError(f"转存失败：{save_result.message}")
+    if save_result.message:
+        log("warn", save_result.message)
+
+    if len(save_result.saved) == len(need_save):
+        # 顺序一一对应，可安全重命名
+        for plan, saved in zip(need_save, save_result.saved, strict=True):
+            final_name = plan.name_re
+            if (
+                final_name != plan.item.name
+                and not plan.item.is_dir
+                and not rel_path
+                and driver.has("rename")
+            ):
+                try:
+                    await driver.rename(saved.fid, final_name)
+                    log("info", f"重命名：{plan.item.name} → {final_name}")
+                except DriveError as exc:
+                    log("warn", f"重命名失败：{exc.message}")
+            else:
+                final_name = saved.name
+            result.files.append(
+                SavedFile(
+                    share_name=plan.item.name,
+                    final_name=final_name,
+                    new_fid=saved.fid,
+                    dest_path=_norm_path(f"{target_path}/{final_name}"),
+                    is_dir=plan.item.is_dir,
+                )
+            )
+    else:
+        log("warn", f"转存结果数量（{len(save_result.saved)}）与计划（{len(need_save)}）不一致，跳过重命名")
+        for saved in save_result.saved:
+            result.files.append(
+                SavedFile(
+                    share_name=saved.name,
+                    final_name=saved.name,
+                    new_fid=saved.fid,
+                    dest_path=_norm_path(f"{target_path}/{saved.name}"),
+                    is_dir=saved.is_dir,
+                )
+            )
+    result.status = "updated"

@@ -1,0 +1,33 @@
+{
+  "name": "xiao-pan-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "lint": "eslint src --fix && prettier --write src",
+    "lint:check": "eslint src && prettier --check src"
+  },
+  "dependencies": {
+    "element-plus": "^2.7.0",
+    "pinia": "^2.1.7",
+    "vue": "^3.4.0",
+    "vue-router": "^4.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.0",
+    "eslint": "^9.0.0",
+    "eslint-plugin-vue": "^9.25.0",
+    "prettier": "^3.2.0",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.0.0",
+    "vite": "^5.2.0",
+    "vue-tsc": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

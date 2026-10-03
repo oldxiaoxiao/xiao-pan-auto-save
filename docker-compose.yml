@@ -1,0 +1,20 @@
+services:
+  xiao-pan:
+    build: .
+    image: xiao-pan-auto-save:latest
+    container_name: xiao-pan-auto-save
+    restart: unless-stopped
+    ports:
+      - "8432:8432"
+    volumes:
+      - ./data:/app/data
+    environment:
+      # WebUI 登录密码（留空则本地免登录，公网部署务必设置）
+      - WEBUI_PASSWORD=${WEBUI_PASSWORD:-}
+      # 对外 API 的兜底 Token（推荐改用 Web 上管理的多 Token）
+      - API_TOKEN=${API_TOKEN:-}
+      # 默认定时（可在 Web 设置页修改）
+      - CRONTAB=${CRONTAB:-0 9 * * *}
+      # HTTP 代理（可选）
+      - PROXY=${PROXY:-}
+      - TZ=Asia/Shanghai

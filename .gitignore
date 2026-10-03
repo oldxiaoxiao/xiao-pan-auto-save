@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+data/*.db
+data/logs/
+data/downloads/
+frontend/node_modules/
+frontend/dist/
+*.log
+egg-info/
+*.egg-info/

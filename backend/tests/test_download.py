@@ -1,0 +1,206 @@
+"""下载服务测试：路径安全、目录递归、内置下载、aria2 协议、Emby 触发。"""
+
+from __future__ import annotations
+
+import pytest
+
+from backend.core.engine import SavedFile
+from backend.drivers.base import CloudDrive, FsItem, ShareRef
+from backend.services import download_service as dl
+from backend.services.download_service import DownloadSettings, resolve_local, safe_name
+
+
+class DlDriver(CloudDrive):
+    key = "fake"
+    name = "假盘"
+    supported = True
+    capability = {"download"}
+    UA = "FakeUA/9.9"
+
+    def __init__(self, children: dict[str, list[FsItem]] | None = None):
+        super().__init__()
+        self.children = children or {}
+        self.requested: list[list[str]] = []
+
+    def parse_share(self, url):
+        return ShareRef(url=url)
+
+    async def list_share(self, ref, path=""):
+        return []
+
+    async def list_dir(self, path):
+        return []
+
+    async def ensure_dir(self, path):
+        return "f"
+
+    async def save(self, items, dest_path, ref=None):
+        raise NotImplementedError
+
+    async def list_dir_children(self, fid):
+        return self.children.get(fid, [])
+
+    async def get_download_urls(self, fids):
+        self.requested.append(list(fids))
+        return [
+            {"fid": f, "file_name": f, "size": 10, "download_url": f"http://dl/{f}"} for f in fids
+        ], "DLCK=1"
+
+
+def cfg(tmp_path, **kw) -> DownloadSettings:
+    base = dict(mode="builtin", dir=str(tmp_path / "down"), concurrency=2)
+    base.update(kw)
+    return DownloadSettings(**base)
+
+
+def saved(fid="1", name="01.mp4", dest="/动漫/剧/01.mp4", is_dir=False) -> SavedFile:
+    return SavedFile(share_name=name, final_name=name, new_fid=fid, dest_path=dest, is_dir=is_dir)
+
+
+def test_safe_name_blocks_traversal():
+    assert safe_name("../../etc/passwd") == "_.._etc_passwd"
+    assert safe_name("a/b\\c:d*e") == "a_b_c_d_e"
+    assert safe_name("") == "_"
+    p = resolve_local("/动漫/剧/01.mp4", DownloadSettings(dir="/base"), "")
+    assert str(p).replace("\\", "/").endswith("/base/动漫/剧/01.mp4")
+    evil = resolve_local("/x/../../y/1.mp4", DownloadSettings(dir="/base"), "")
+    assert "/.." not in str(evil)
+    assert evil.name == "1.mp4"
+
+
+def test_resolve_local_override_flattens(tmp_path):
+    c = cfg(tmp_path)
+    p = resolve_local("/动漫/剧/01.mp4", c, "剧集专区")
+    assert p == tmp_path / "down" / "剧集专区" / "01.mp4"
+
+
+@pytest.mark.asyncio
+async def test_collect_files_recursive(tmp_path):
+    driver = DlDriver(
+        children={
+            "d1": [FsItem(fid="s1", name="a.mp4", size=5), FsItem(fid="d2", name="sub", is_dir=True)],
+            "d2": [FsItem(fid="s2", name="b.mp4", size=7)],
+        }
+    )
+    items = await dl.collect_files(
+        driver, [saved(fid="d1", name="4K", dest="/动漫/4K", is_dir=True)], cfg(tmp_path), "", True
+    )
+    paths = sorted(str(i.local_path).replace("\\", "/") for i in items)
+    assert any(p.endswith("4K/a.mp4") for p in paths)
+    assert any(p.endswith("4K/sub/b.mp4") for p in paths)
+    # 不递归时目录不入列
+    assert (
+        await dl.collect_files(
+            driver, [saved(fid="d1", dest="/动漫/4K", is_dir=True)], cfg(tmp_path), "", False
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_builtin_download_flow(tmp_path, monkeypatch):
+    driver = DlDriver()
+    calls = []
+
+    async def fake_fetch(row, item, cookie_str, ua):
+        calls.append((row["download_url"], str(item.local_path), cookie_str, ua))
+        return True, f"{item.name}（0.0MB）"
+
+    monkeypatch.setattr(dl, "_fetch_one", fake_fetch)
+    emby = []
+    monkeypatch.setattr(dl, "_emby_refresh", lambda c, log: emby.append(1) or _noop())
+
+    lines = await dl.download_task_files(
+        driver, [saved("1"), saved("2", "02.mp4", "/动漫/剧/02.mp4")], cfg(tmp_path)
+    )
+    assert len(lines) == 2 and all(s.startswith("✅") for s in lines)
+    assert calls[0][0] == "http://dl/1" and calls[0][2] == "DLCK=1" and calls[0][3] == "FakeUA/9.9"
+    assert emby == [1]  # 成功后触发刷新
+
+
+async def _noop():
+    return None
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_writes_and_skips(tmp_path, monkeypatch):
+    class FakeResp:
+        status_code = 200
+
+        async def aiter_bytes(self, _n):
+            yield b"x" * 10
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url, headers=None):
+            assert headers["cookie"] == "C=1" and headers["user-agent"] == "UA"
+            return FakeResp()
+
+    monkeypatch.setattr(dl.httpx, "AsyncClient", FakeClient)
+    target = tmp_path / "sub" / "01.mp4"
+    item = dl._Item(fid="1", name="01.mp4", size=10, local_path=target)
+    ok, msg = await dl._fetch_one({"download_url": "http://dl/1", "size": 10}, item, "C=1", "UA")
+    assert ok and target.read_bytes() == b"x" * 10 and not list(target.parent.glob("*.part"))
+    # 已存在同大小 → 跳过
+    ok2, msg2 = await dl._fetch_one({"download_url": "http://dl/1", "size": 10}, item, "C=1", "UA")
+    assert ok2 and "跳过" in msg2
+
+
+@pytest.mark.asyncio
+async def test_aria2_payload_protocol(tmp_path, monkeypatch):
+    posted = []
+
+    class FakeResp:
+        def json(self):
+            return {"result": "gid-1"}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json):
+            posted.append((url, json))
+            return FakeResp()
+
+    monkeypatch.setattr(dl.httpx, "AsyncClient", FakeClient)
+    driver = DlDriver()
+    c = cfg(
+        tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800", aria2_secret="sec", aria2_pause=True
+    )
+    lines = await dl.download_task_files(driver, [saved("1")], c)
+    assert lines[0].startswith("✅")
+    url, payload = posted[0]
+    assert url == "http://127.0.0.1:6800/jsonrpc"
+    assert payload["method"] == "aria2.addUri"
+    assert payload["params"][0] == "token:sec"
+    opts = payload["params"][2]
+    assert opts["pause"] == "true"
+    assert opts["out"] == "01.mp4"
+    assert "Cookie: DLCK=1" in opts["header"]
+    assert "User-Agent: FakeUA/9.9" in opts["header"]
+    assert payload["params"][1] == ["http://dl/1"]
+
+
+@pytest.mark.asyncio
+async def test_no_saved_files_noop(tmp_path):
+    assert await dl.download_task_files(DlDriver(), [], cfg(tmp_path)) == []
