@@ -41,7 +41,13 @@ const emit = defineEmits<{
 const previewItems = ref<FsItem[]>([]);
 const previewLoading = ref(false);
 const previewError = ref("");
+const previewPath = ref("");
 const showPreview = computed(() => (!!props.shareurl && props.mode !== "savepath" ? true : !!props.shareurl));
+
+const previewCrumbs = computed(() => {
+  const parts = previewPath.value.split("/").filter(Boolean);
+  return parts.map((p, i) => ({ label: p, path: "/" + parts.slice(0, i + 1).join("/") }));
+});
 
 async function loadPreview() {
   if (!props.shareurl) return;
@@ -50,7 +56,7 @@ async function loadPreview() {
   try {
     const r = await api.sharePreview({
       shareurl: props.shareurl,
-      path: "",
+      path: previewPath.value,
       taskname: props.taskname,
       pattern: props.pattern,
       replace: props.replace,
@@ -65,6 +71,17 @@ async function loadPreview() {
   } finally {
     previewLoading.value = false;
   }
+}
+
+function enterPreviewDir(item: FsItem) {
+  if (!item.is_dir) return;
+  previewPath.value = previewPath.value ? `${previewPath.value}/${item.name}` : `/${item.name}`;
+  loadPreview();
+}
+
+function gotoPreviewPath(path: string) {
+  previewPath.value = path;
+  loadPreview();
 }
 
 // —— 下半区：目标目录浏览 ——
@@ -172,6 +189,8 @@ function onRowClick(item: FsItem) {
     close();
   } else if (props.mode === "savepath") {
     enter(item);
+  } else if (props.mode === "preview") {
+    enterPreviewDir(item);
   }
 }
 
@@ -184,6 +203,7 @@ watch(
   (open) => {
     if (!open) return;
     previewItems.value = [];
+    previewPath.value = "";
     loadPreview();
     if (props.mode === "savepath") {
       loadDir(props.savepath || "/");
@@ -206,6 +226,14 @@ watch(
       <div class="pane__head">
         <span>分享文件预览（含正则效果）</span>
         <el-button size="small" text @click="loadPreview"> 刷新 </el-button>
+      </div>
+      <div class="crumb">
+        <a class="crumb__link" :class="{ active: !previewPath }" @click="gotoPreviewPath('')">分享根目录</a>
+        <template v-for="c in previewCrumbs" :key="c.path">
+          <span class="crumb__sep">/</span>
+          <a class="crumb__link" @click="gotoPreviewPath(c.path)">{{ c.label }}</a>
+        </template>
+        <span class="crumb__hint text-muted">点击 📁 目录进入下一层</span>
       </div>
       <div v-if="previewError" class="pane__err">
         {{ previewError }}
@@ -352,6 +380,10 @@ watch(
 }
 .crumb__sep {
   margin: 0 4px;
+}
+.crumb__hint {
+  margin-left: 10px;
+  font-size: 12px;
 }
 .toolbar {
   display: flex;
