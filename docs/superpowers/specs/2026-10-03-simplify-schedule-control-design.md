@@ -49,7 +49,7 @@ def matches_filters(name: str, ep_start: int, ep_end: int, quality: str, mr: Mag
 - 画质 token 匹配:对 `name.lower()`,按词边界检查是否包含 `quality` 拆分出的任一 token(避免 `4k` 命中 `14k`);UI 提供 `4K`、`1080P`、`720P`、`x265`、`HDR` 等预设,写入归一小写。多选任一命中即通过(OR)。
 - 集数:新增 `extract_episode(name) -> int | None`,复用 `DEFAULT_MAGIC_VARIABLES["{E}"]` 候选正则取首个数字。**局限**:候选含 `(?<!\d)\d{1,3}(?!\d)` 等宽松式,可能把年份/体积误当集数;与现有重命名同源,可接受,记入文档。
 
-接入点:`backend/core/engine.py` 的 `_check_dir` 文件选中循环(line ~160),在 `re.search(search_pattern, name)` 命中、且 `not share_file.is_dir` 时,追加 `if not matches_filters(share_file.name, spec.episode_start, spec.episode_end, spec.quality, mr): continue`。`TaskSpec` 相应新增 `episode_start/episode_end/quality` 三字段并在 `_task_spec()` 填充。
+接入点:`backend/core/engine.py` 的 `_check_dir` 文件选中循环。实现为 `passes = share_file.is_dir or matches_filters(share_file.name, spec.episode_start, spec.episode_end, spec.quality)`,用 `if passes:` 仅包住**选中/转存**那段逻辑;目录恒 `passes=True` 故 `matches_filters` 不在目录上调用。**关键**:`if share_file.fid == spec.startfid: break`(遇 startfid 即停)必须留在 `if passes` **之外**、循环体末尾恒求值——否则当 startfid 文件本身被过滤掉时会跳过 break、越过 startfid 转存更旧文件。`matches_filters` 为 4 参(不传 `MagicRename`;`{E}` 用模块级 `DEFAULT_MAGIC_VARIABLES`,与现有重命名一致)。`TaskSpec` 相应新增 `episode_start/episode_end/quality` 三字段并在 `_task_spec()` 填充。
 
 - **已知限制**: `update_subdir_resave`(重存模式)对命中的子目录整目录删除重存,叶子级集数/画质过滤在该模式下不生效;阶段 1 仅在文档与前端表单注明此限制,真正修复(重存前按过滤裁剪)延后至阶段 2。
 
