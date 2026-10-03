@@ -13,3 +13,5 @@ frontend/dist/
 egg-info/
 *.egg-info/
 .idea/
+frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo
