@@ -180,50 +180,52 @@ async def _check_dir(
 
     need_save: list[_Plan] = []
     for share_file in share_list:
-        if not share_file.is_dir and not matches_filters(
+        # 过滤只影响「是否入选转存」，不影响 startfid 截断：即便 startfid 文件被过滤掉，
+        # 也仍需在下方 break，避免越过起始点继续转更旧的文件。
+        passes = share_file.is_dir or matches_filters(
             share_file.name, spec.episode_start, spec.episode_end, spec.quality
-        ):
-            continue
-        search_pattern = spec.update_subdir if (share_file.is_dir and spec.update_subdir) else pattern
-        if re.search(search_pattern or "", share_file.name):
-            if not mr.is_exists(share_file.name, dir_names, spec.ignore_extension and not share_file.is_dir):
-                if share_file.is_dir or rel_path:
-                    # 文件夹、子目录文件不重命名
-                    need_save.append(_Plan(share_file, share_file.name))
-                else:
-                    name_re = mr.sub(pattern, replace, share_file.name)
-                    if not mr.is_exists(name_re, dir_names, spec.ignore_extension):
-                        need_save.append(_Plan(share_file, name_re))
-            elif share_file.is_dir and spec.update_subdir and re.search(spec.update_subdir, share_file.name):
-                if spec.update_subdir_resave and driver.has("delete"):
-                    log("info", f"重存子目录：{target_path}/{share_file.name}")
-                    existing = next((i for i in dir_items if i.name == share_file.name and i.is_dir), None)
-                    if existing:
-                        await driver.delete_items([existing], purge=True)
-                        dir_names.remove(existing.name)
-                        dir_items.remove(existing)
-                    need_save.append(_Plan(share_file, share_file.name))
-                else:
-                    # 递归模式：进入分享子目录比对
-                    log("info", f"检查子目录：{share_file.name}")
-                    sub_share_path = f"{share_path}/{share_file.name}"
-                    before = len(result.files)
-                    sub_items = await driver.list_share(ref, sub_share_path)
-                    if sub_items:
-                        await _check_dir(
-                            driver,
-                            spec,
-                            ref,
-                            magic_regex,
-                            sub_share_path,
-                            f"{rel_path}/{share_file.name}",
-                            sub_items,
-                            log,
-                            result,
-                        )
-                    if len(result.files) > before:
-                        log("info", f"子目录有新内容：{rel_path}/{share_file.name}")
-        # 起始文件订阅：列表新→旧遍历，遇到 startfid（含）即停止
+        )
+        if passes:
+            search_pattern = spec.update_subdir if (share_file.is_dir and spec.update_subdir) else pattern
+            if re.search(search_pattern or "", share_file.name):
+                if not mr.is_exists(share_file.name, dir_names, spec.ignore_extension and not share_file.is_dir):
+                    if share_file.is_dir or rel_path:
+                        # 文件夹、子目录文件不重命名
+                        need_save.append(_Plan(share_file, share_file.name))
+                    else:
+                        name_re = mr.sub(pattern, replace, share_file.name)
+                        if not mr.is_exists(name_re, dir_names, spec.ignore_extension):
+                            need_save.append(_Plan(share_file, name_re))
+                elif share_file.is_dir and spec.update_subdir and re.search(spec.update_subdir, share_file.name):
+                    if spec.update_subdir_resave and driver.has("delete"):
+                        log("info", f"重存子目录：{target_path}/{share_file.name}")
+                        existing = next((i for i in dir_items if i.name == share_file.name and i.is_dir), None)
+                        if existing:
+                            await driver.delete_items([existing], purge=True)
+                            dir_names.remove(existing.name)
+                            dir_items.remove(existing)
+                        need_save.append(_Plan(share_file, share_file.name))
+                    else:
+                        # 递归模式：进入分享子目录比对
+                        log("info", f"检查子目录：{share_file.name}")
+                        sub_share_path = f"{share_path}/{share_file.name}"
+                        before = len(result.files)
+                        sub_items = await driver.list_share(ref, sub_share_path)
+                        if sub_items:
+                            await _check_dir(
+                                driver,
+                                spec,
+                                ref,
+                                magic_regex,
+                                sub_share_path,
+                                f"{rel_path}/{share_file.name}",
+                                sub_items,
+                                log,
+                                result,
+                            )
+                        if len(result.files) > before:
+                            log("info", f"子目录有新内容：{rel_path}/{share_file.name}")
+        # 起始文件订阅：列表新→旧遍历，遇到 startfid（含）即停止（不受过滤影响）
         if share_file.fid == spec.startfid and spec.startfid:
             break
 

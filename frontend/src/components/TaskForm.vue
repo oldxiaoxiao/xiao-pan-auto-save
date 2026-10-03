@@ -233,7 +233,7 @@ const hasId = computed(() => props.task?.id ?? null);
             <el-input v-model="draft.update_subdir" placeholder="留空=不递归子目录" />
           </div>
           <div class="f">
-            <label class="field-label">子目录重存模式</label>
+            <label class="field-label">子目录重存模式（重存时集数/画质过滤不生效，整目录搬运）</label>
             <el-switch v-model="draft.update_subdir_resave" />
           </div>
 

@@ -224,10 +224,16 @@ def test_matches_filters_episode_range():
     assert matches_filters("第01集.mp4", 1, 1, "") is True  # 边界含
     assert matches_filters("第01集.mp4", 0, 0, "") is True  # 未设区间放行
     assert matches_filters("花絮无集数.mp4", 1, 20, "") is False  # 设了区间但提不出集数
+    # 单边限定：另一端 0 = 不限
+    assert matches_filters("第03集.mp4", 0, 5, "") is True
+    assert matches_filters("第08集.mp4", 0, 5, "") is False
+    assert matches_filters("第03集.mp4", 2, 0, "") is True
+    assert matches_filters("第01集.mp4", 2, 0, "") is False
 
 
 def test_matches_filters_empty_passes_all():
     assert matches_filters("任意文件名", 0, 0, "") is True
+    assert matches_filters("任意.mp4", 0, 0, ", ,") is True  # 逗号/空白 token 视为不限画质
 
 
 @pytest.mark.asyncio
@@ -253,3 +259,32 @@ async def test_engine_episode_filter_skips_dirs():
     )
     res = await run_update_task(drv, spec(update_subdir="4K", episode_start=1, episode_end=10))
     assert [i.share_name for i in res.files] == ["第03集.mp4"]
+    assert res.files[0].dest_path == "/动漫/测试剧/4K/第03集.mp4"
+
+
+@pytest.mark.asyncio
+async def test_engine_episode_filter_digitless_dir_still_recursed():
+    # 「第一季」无 ASCII 数字：若去掉目录放行（not share_file.is_dir）守卫，
+    # 区间过滤会误杀该目录导致不再递归——本测试用于区分这一回归。
+    drv = FakeDriver(
+        {
+            "": [d("10", "第一季"), f("11", "readme.mp4")],
+            "/第一季": [f("1", "第03集.mp4"), f("2", "第30集.mp4")],
+        },
+        dirs={"/动漫/测试剧": [d("9", "第一季"), f("8", "readme.mp4")], "/动漫/测试剧/第一季": []},
+    )
+    res = await run_update_task(drv, spec(update_subdir="第一季", episode_start=1, episode_end=10))
+    assert [i.share_name for i in res.files] == ["第03集.mp4"]
+    assert res.files[0].dest_path == "/动漫/测试剧/第一季/第03集.mp4"
+
+
+@pytest.mark.asyncio
+async def test_engine_startfid_stop_wins_over_filter():
+    # FIX 回归：列表新→旧，startfid 文件本身被画质过滤拒绝时，
+    # 仍须在该文件处停止——绝不能 continue 跳过 break 而越过起始点转存更旧的文件。
+    drv = FakeDriver(
+        {"": [f("3", "03.4k.mp4"), f("2", "02.1080p.mp4"), f("1", "01.4k.mp4")]},
+    )
+    res = await run_update_task(drv, spec(startfid="2", quality="4k"))
+    # 03（更新且通过过滤）转存；02 命中 startfid 但被过滤 → 依然截断；01 更旧 → 不得转存
+    assert [i.share_name for i in res.files] == ["03.4k.mp4"]

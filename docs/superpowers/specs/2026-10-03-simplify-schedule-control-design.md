@@ -51,6 +51,8 @@ def matches_filters(name: str, ep_start: int, ep_end: int, quality: str, mr: Mag
 
 接入点:`backend/core/engine.py` 的 `_check_dir` 文件选中循环(line ~160),在 `re.search(search_pattern, name)` 命中、且 `not share_file.is_dir` 时,追加 `if not matches_filters(share_file.name, spec.episode_start, spec.episode_end, spec.quality, mr): continue`。`TaskSpec` 相应新增 `episode_start/episode_end/quality` 三字段并在 `_task_spec()` 填充。
 
+- **已知限制**: `update_subdir_resave`(重存模式)对命中的子目录整目录删除重存,叶子级集数/画质过滤在该模式下不生效;阶段 1 仅在文档与前端表单注明此限制,真正修复(重存前按过滤裁剪)延后至阶段 2。
+
 ### 前端表单两层
 
 `frontend/src/components/TaskForm.vue` 重构:
