@@ -17,6 +17,8 @@
 - 前端"默认大于配置":基础表单只暴露高频字段,个性化字段折叠进默认收起的高级区,不删除任何字段。
 - 语言:所有用户可见文案用中文。
 - 频率下限:任务级间隔 < 1 分钟时仅提示夸克风控风险,不强制阻止。
+- 迁移:新增 Task 列依赖 `database.py:_auto_add_columns()` 启动时自动 `ALTER TABLE ADD COLUMN`,无需手写迁移脚本;新列均带默认值,旧行自动补默认。
+- 并发安全:`run_tasks` 当前无全局锁,SQLite 未开 WAL/busy_timeout。任务级调度引入并发前,必须先加运行锁(见阶段2),否则会 `database is locked` 且同账号被并发打。
 
 ---
 
@@ -38,15 +40,16 @@ quality: str = ""        # 逗号分隔 token，如 "1080p,4k"；空 = 不限
 
 新增纯函数于 `backend/core/engine.py`（其内调用 `MagicRename` 提取集数）：
 ```python
-def matches_filters(name: str, ep_start: int, ep_end: int, quality: str, magic: MagicRename) -> bool:
-    """画质：文件名含所选 token 之一（不区分大小写）才通过；quality 空则不限。
-    集数：设了区间时用 magic 提取 {E} 集数，落在 [start,end] 才通过；
+def matches_filters(name: str, ep_start: int, ep_end: int, quality: str, mr: MagicRename) -> bool:
+    """画质：文件名含所选 token 之一（不区分大小写、带词边界）才通过；quality 空则不限。
+    集数：设了区间时用 extract_episode(name) 取集数，落在 [start,end] 才通过；
     设了区间但提不出集数 → 不通过；区间未设（两者皆 0）→ 通过。"""
 ```
-- 画质 token 匹配:对 `name.lower()`,检查是否包含 `quality` 拆分出的任一 token(如 `4k`→也匹配 `2160p`? 不,严格按用户所填 token 子串匹配;UI 侧提供 `4K/2160P`、`1080P`、`720P`、`x265`、`HDR` 等预设,写入时归一为小写)。多选时任一命中即通过(OR)。
-- 集数:复用 `MagicRename` 现有 `{E}` 候选正则提取集数整数;无法提取视为不匹配。
+- **仅作用于非目录叶子文件**：engine 选中循环里 `share_file` 可能是目录，对目录名跑集数/画质过滤会误杀整棵子树。故 `matches_filters` 只在 `not share_file.is_dir` 时判定；目录恒 `True`（放行让递归继续）。递归子目录内的叶子文件由各自 `_check_dir` 调用覆盖。
+- 画质 token 匹配:对 `name.lower()`,按词边界检查是否包含 `quality` 拆分出的任一 token(避免 `4k` 命中 `14k`);UI 提供 `4K`、`1080P`、`720P`、`x265`、`HDR` 等预设,写入归一小写。多选任一命中即通过(OR)。
+- 集数:新增 `extract_episode(name) -> int | None`,复用 `DEFAULT_MAGIC_VARIABLES["{E}"]` 候选正则取首个数字。**局限**:候选含 `(?<!\d)\d{1,3}(?!\d)` 等宽松式,可能把年份/体积误当集数;与现有重命名同源,可接受,记入文档。
 
-接入点:`backend/core/engine.py` 文件选中循环里,在现有 `re.search(search_pattern, name)` 命中之后、执行转存之前,追加 `if not matches_filters(...): continue`。对目录型 `update_subdir` 分支同样在叶子文件上应用。
+接入点:`backend/core/engine.py` 的 `_check_dir` 文件选中循环(line ~160),在 `re.search(search_pattern, name)` 命中、且 `not share_file.is_dir` 时,追加 `if not matches_filters(share_file.name, spec.episode_start, spec.episode_end, spec.quality, mr): continue`。`TaskSpec` 相应新增 `episode_start/episode_end/quality` 三字段并在 `_task_spec()` 填充。
 
 ### 前端表单两层
 
@@ -89,6 +92,12 @@ schedule: str = ""  # "" = 继承全局 crontab；"interval:5" = 每5分钟；"c
 - lifespan 启动时:遍历启用任务,对设了 `schedule` 的逐个 `reschedule_task`。
 - `routes_tasks` 的 create/update/delete 后调用 `reschedule_task`/`unschedule_task`(update 若清空 schedule 则撤销该任务 job 回落到全局)。
 
+**并发运行锁(必须,先于任务级 job)**:`backend/services/task_service.py` 新增模块级 `_run_lock = asyncio.Lock()`。
+- 把 `run_tasks` 拆成"转存阶段"(写 DB、调网盘 save)与"下载阶段"。转存阶段整体 `async with _run_lock:` 串行化,保护 SQLite 写与账号频率;下载阶段在锁外执行(允许与别的任务下载重叠)。
+- 每任务 job 用 `max_instances=1`+`coalesce=True` 防同一任务自身叠加;不同任务的转存由 `_run_lock` 串行,不会并发写库。
+- 手动"立即运行"(SSE `/run`)与 scheduled 共用同一 `_run_lock`,避免手动/定时交叠。
+- 代价(记入文档):转存串行意味着某任务转存耗时期间别的任务转存排队;但下载不持锁,故大文件下载不会阻塞其它任务的转存。
+
 ### 频率选择器 UI
 
 `TaskForm.vue` 基础区"更新频率":`el-select` 预设(每5分钟 / 每30分钟 / 每小时 / 每天9:00 / 继承全局 / 自定义) + 选"自定义"时出现 cron 输入框。写回 `schedule` 字段。间隔 <1 分钟(即 `interval:` 无法表达,或自定义 cron 每秒)时 `el-text` 提示夸克风控风险。
@@ -96,6 +105,7 @@ schedule: str = ""  # "" = 继承全局 crontab；"interval:5" = 每5分钟；"c
 ### 测试
 
 - `test_scheduler_log.py`:`reschedule_task` 对 `interval:5`/`cron:...`/空 分别注册正确 trigger;非法 cron 不崩;`unschedule_task` 幂等。
+- `test_task_service.py`:并发两个 `run_tasks` 转存阶段被 `_run_lock` 串行(断言不重叠);下载阶段不持锁。
 - `test_api.py`:update 设置/清空 `schedule` 会触发(或不触发)重注册(可 monkeypatch scheduler 断言调用)。
 - 真机:建一个 `interval:1` 的测试任务,观察日志按分钟级触发(用临时 DATA_DIR 或可清理的任务)。
 
@@ -106,6 +116,8 @@ schedule: str = ""  # "" = 继承全局 crontab；"interval:5" = 每5分钟；"c
 ### job 结构补充
 
 `DownloadRegistry.snapshot()` 每个内置 job dict 增加 `"source": "builtin"`;`aria2_status()` 每个 job 增加 `"source": "aria2"`。内置 `status` 增加 `"stopped"` 取值。
+
+**aria2 状态映射修正**:现 `aria2_status` 把非 active 一律映射为 `queued`,但 paused 任务也在 `tellWaiting` 返回里,会被错显"排队"。改为按 aria2 `status` 字段映射:`active→downloading`、`paused→paused`、`waiting→queued`;`ACTIVE` 集合纳入 `paused`(暂停项仍应显示在列表)。
 
 ### 取消机制（内置）
 
