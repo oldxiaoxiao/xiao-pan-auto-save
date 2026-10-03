@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from . import config
 from .api import (
     routes_accounts,
+    routes_downloads,
     routes_external,
     routes_files,
     routes_logs,
@@ -67,6 +68,7 @@ app.include_router(routes_search.router)
 app.include_router(routes_external.router)
 app.include_router(routes_tokens.router)
 app.include_router(routes_migrate.router)
+app.include_router(routes_downloads.router)
 
 
 @app.get("/api/health")
