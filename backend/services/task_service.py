@@ -43,6 +43,9 @@ def _task_spec(task: Task) -> TaskSpec:
         startfid=task.startfid,
         update_subdir=task.update_subdir,
         update_subdir_resave=task.update_subdir_resave,
+        episode_start=task.episode_start,
+        episode_end=task.episode_end,
+        quality=task.quality,
     )
 
 

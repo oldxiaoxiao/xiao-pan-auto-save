@@ -37,6 +37,9 @@ class TaskSpec:
     startfid: str = ""
     update_subdir: str = ""
     update_subdir_resave: bool = False
+    episode_start: int = 0
+    episode_end: int = 0
+    quality: str = ""
 
 
 @dataclass

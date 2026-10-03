@@ -95,3 +95,26 @@ def test_run_all_with_no_tasks(client):
         events = [line for line in resp.iter_lines() if line.startswith("data:")]
     assert any('"level": "done"' in e or '"level":"done"' in e for e in events)
     assert any("summary" in e for e in events)
+
+
+def test_task_episode_quality_fields(client):
+    body = {
+        "taskname": "集数画质任务",
+        "shareurl": "https://pan.quark.cn/s/xyz",
+        "savepath": "/动漫/剧",
+        "episode_start": 1,
+        "episode_end": 20,
+        "quality": "1080p,4k",
+    }
+    created = client.post("/api/tasks", json=body).json()
+    assert created["episode_start"] == 1 and created["episode_end"] == 20
+    assert created["quality"] == "1080p,4k"
+
+    # 默认值向后兼容：不传即 0/0/""
+    plain = client.post(
+        "/api/tasks",
+        json={"taskname": "默认", "shareurl": "https://pan.quark.cn/s/d", "savepath": "/d"},
+    ).json()
+    assert plain["episode_start"] == 0 and plain["episode_end"] == 0 and plain["quality"] == ""
+    client.delete(f"/api/tasks/{created['id']}")
+    client.delete(f"/api/tasks/{plain['id']}")

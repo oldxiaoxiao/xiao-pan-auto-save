@@ -54,6 +54,9 @@ class Task(SQLModel, table=True):
     shareurl_ban: str = ""  # 非空 = 失效原因，永久跳过
     account_id: int | None = Field(default=None, foreign_key="account.id")
     sort_order: int = 0
+    episode_start: int = 0  # 起始集（含），0=不限
+    episode_end: int = 0  # 结束集（含），0=不限
+    quality: str = ""  # 逗号分隔 token，如 "1080p,4k"，空=不限
     last_run_at: NaiveDatetime | None = None
     created_at: NaiveDatetime = Field(default_factory=_now)
 

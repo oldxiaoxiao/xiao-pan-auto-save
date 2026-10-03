@@ -23,6 +23,9 @@ class TaskIn(BaseModel):
     disabled: bool = False
     account_id: int | None = None
     sort_order: int = 0
+    episode_start: int = 0
+    episode_end: int = 0
+    quality: str = ""
 
 
 class TaskOut(TaskIn):

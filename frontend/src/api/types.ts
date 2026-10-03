@@ -19,6 +19,9 @@ export interface TaskPayload {
   disabled: boolean;
   account_id: number | null;
   sort_order: number;
+  episode_start: number;
+  episode_end: number;
+  quality: string;
 }
 
 export interface Task extends TaskPayload {
