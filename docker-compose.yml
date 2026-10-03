@@ -18,3 +18,35 @@ services:
       # HTTP 代理（可选）
       - PROXY=${PROXY:-}
       - TZ=Asia/Shanghai
+
+  # 可选：Aria2 RPC 下载器。默认不启动，用 `docker compose --profile aria2 up -d` 启用。
+  # 启用后在 Web「设置 → 下载到本地」把模式改为 aria2，RPC 地址填 `aria2:6800`，
+  # 密钥与下面的 ARIA2_SECRET 保持一致；下载目录用容器内路径 /app/data/downloads。
+  # 与主服务共享 ./data:/app/data 同一挂载点，保证应用提交的 dir 参数两边解析到同一目录。
+  aria2:
+    image: p3terx/aria2-pro:latest
+    container_name: xiao-pan-aria2
+    profiles: ["aria2"]
+    restart: unless-stopped
+    entrypoint: ["aria2c"]
+    command:
+      - --enable-rpc
+      - --rpc-listen-all=true
+      - --rpc-listen-port=6800
+      - --rpc-allow-origin-all=true
+      - --rpc-secret=${ARIA2_SECRET:-}
+      - --dir=/app/data/downloads
+      - --max-concurrent-downloads=3
+      # 多连接是突破夸克免费账号单流限速的关键
+      - --max-connection-per-server=5
+      - --split=5
+      - --min-split-size=10M
+      - --continue=true
+      - --auto-file-renaming=false
+      - --allow-overwrite=true
+      - --user-agent=Mozilla/5.0
+    volumes:
+      - ./data:/app/data
+    # 应用经 compose 内网 aria2:6800 访问，无需对宿主机暴露；如需外部调试再放开：
+    # ports:
+    #   - "127.0.0.1:6800:6800"

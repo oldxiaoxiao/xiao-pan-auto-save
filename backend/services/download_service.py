@@ -210,6 +210,8 @@ async def _aria2_submit(
             if not row:
                 lines.append(f"❌ 取直链失败: {item.name}")
                 continue
+            # aria2 不会自建缺失目录，投递前先建好目标目录（与内置下载器一致）
+            item.local_path.parent.mkdir(parents=True, exist_ok=True)
             params: list = [
                 [row["download_url"]],
                 {

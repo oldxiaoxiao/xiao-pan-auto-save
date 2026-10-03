@@ -4,6 +4,7 @@
 分享链接更新，把新文件转存到指定目录并按规则重命名，全程推送通知。
 
 > 业务思路脱胎于 [quark-auto-save](https://github.com/Cp0204/quark-auto-save)（AGPL-3.0），
+> 因为原理项目页面和操作方式都很不习惯所以进行升级优化
 > 但架构与界面全部重写：FastAPI + SQLite + Vue3，网盘操作抽象为可插拔驱动层。
 
 ![界面截图占位](docs/screenshot.png)
@@ -41,6 +42,24 @@ docker compose up -d --build
 3. **任务**页新建任务（任务名输入几个字即可联网搜资源直接建任务），或"立即运行"看 SSE 日志。
 
 公网部署请务必设置环境变量 `WEBUI_PASSWORD`。
+
+### 下载到本地（可选 Aria2 提速）
+
+内置流式下载器为单连接，夸克**免费账号**常被限速到 ~0.1 MB/s，整集大文件不友好。
+需要更快落盘时，用 compose 里可选的 Aria2 服务（多连接突破单流限速）：
+
+```bash
+# 1) 连同 aria2 一起启动（aria2 默认不启动，靠 profile 开关）
+ARIA2_SECRET=你的RPC密钥 docker compose --profile aria2 up -d --build
+```
+
+然后在 **设置 → 下载到本地**：模式选 `aria2`，RPC 地址填 `aria2:6800`，
+密钥与上面的 `ARIA2_SECRET` 一致，下载目录用容器内路径 `/app/data/downloads`。
+
+- aria2 与主服务共享同一 `./data:/app/data` 挂载点，应用提交的 `dir` 参数两边解析到同一目录，
+  下载结果直接落到宿主机 `./data/downloads`。
+- 只想跑主服务时照旧 `docker compose up -d`，aria2 不会被拉起。
+- 换 VIP 账号是限速的根治手段；aria2 多连接对免费账号通常也有数倍提升。
 
 ## 从 quark-auto-save 迁移
 
