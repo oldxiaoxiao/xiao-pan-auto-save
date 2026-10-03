@@ -23,6 +23,7 @@ from .core.logstream import hub
 from .core.scheduler import TaskScheduler
 from .database import init_db
 from .drivers import driver_matrix
+from .services.backup_service import backup_db
 
 scheduler = TaskScheduler()
 
@@ -50,6 +51,7 @@ def reschedule_main_job() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    backup_db(config.DB_PATH, config.DATA_DIR / "backups")
     init_db()
     scheduler.start()
     reschedule_main_job()
