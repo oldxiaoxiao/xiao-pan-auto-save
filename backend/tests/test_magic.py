@@ -99,3 +99,15 @@ class TestIncrement:
         ]
         mr.sort_file_list(plans)
         assert plans[0]["name_re"] == "第1集.mp4"
+
+
+from backend.core.magic import extract_episode
+
+
+def test_extract_episode_variants():
+    assert extract_episode("第05集.mp4") == 5
+    assert extract_episode("凡人修仙传.E193.mkv") == 193
+    assert extract_episode("S02E15.mp4") == 15
+    assert extract_episode("01.mp4") == 1
+    assert extract_episode("预告片 1080p.mp4") in (1080, None)  # 宽松候选可能取到 1080，允许 None
+    assert extract_episode("无数字标题.mkv") is None

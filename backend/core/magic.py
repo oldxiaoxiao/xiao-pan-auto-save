@@ -60,6 +60,21 @@ DEFAULT_MAGIC_VARIABLES: dict[str, Any] = {
 
 PRIORITY_LIST = list("上中下一二三四五六七八九十百千万")
 
+
+def extract_episode(name: str) -> int | None:
+    """按 {E} 候选正则顺序从文件名取首个集数整数；无匹配返回 None。
+
+    候选较宽松（含 (?<!\\d)\\d{1,3}(?!\\d) 等），可能把年份/体积误判为集数，
+    与现有重命名同源，追更场景可接受。
+    """
+    for pat in DEFAULT_MAGIC_VARIABLES["{E}"]:
+        if m := re.search(pat, name):
+            digits = "".join(c for c in m.group() if c.isdigit())
+            if digits:
+                return int(digits)
+    return None
+
+
 _I_PATTERN = re.compile(r"\{I+\}")
 
 
