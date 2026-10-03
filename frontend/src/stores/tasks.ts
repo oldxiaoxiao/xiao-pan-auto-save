@@ -76,30 +76,9 @@ export const useTasksStore = defineStore("tasks", () => {
       }
     });
     for (const t of changes) {
-      const payload: TaskPayload = {
-        taskname: t.taskname,
-        shareurl: t.shareurl,
-        savepath: t.savepath,
-        pattern: t.pattern,
-        replace: t.replace,
-        ignore_extension: t.ignore_extension,
-        startfid: t.startfid,
-        update_subdir: t.update_subdir,
-        update_subdir_resave: t.update_subdir_resave,
-        enddate: t.enddate,
-        auto_download: t.auto_download,
-        download_subdir: t.download_subdir,
-        download_savepath: t.download_savepath,
-        runweek: t.runweek,
-        disabled: t.disabled,
-        account_id: t.account_id,
-        sort_order: t.sort_order,
-        episode_start: t.episode_start,
-        episode_end: t.episode_end,
-        quality: t.quality,
-        schedule: t.schedule,
-      };
-      const updated = await api.updateTask(t.id, payload);
+      // 剥离只读字段，其余即 TaskPayload；新增字段自动随展开带上，避免手写清单漏字段
+      const { id, shareurl_ban, last_run_at, ...payload } = t;
+      const updated = await api.updateTask(id, payload);
       replaceTask(updated);
     }
   }

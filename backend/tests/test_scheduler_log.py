@@ -108,3 +108,35 @@ def test_has_valid_schedule():
     assert not has_valid_schedule("")
     assert not has_valid_schedule("cron:not-a-cron")
     assert not has_valid_schedule("unknown:1")
+
+
+async def test_run_one_task_self_unschedules_when_expired(monkeypatch):
+    from datetime import timedelta
+
+    from backend import main
+    from backend.database import session_scope
+
+    unscheduled = []
+    monkeypatch.setattr(main.scheduler, "unschedule_task", lambda tid: unscheduled.append(tid))
+    ran = []
+
+    async def fake_run(task_ids=None, trigger=None):
+        ran.append(task_ids)
+        return {}
+
+    monkeypatch.setattr("backend.services.task_service.run_tasks", fake_run)
+    past = (date.today() - timedelta(days=1)).isoformat()
+    with session_scope() as s:
+        t = Task(taskname="过期任务", shareurl="https://x/s", savepath="/s", schedule="interval:5", enddate=past)
+        s.add(t)
+        s.commit()
+        s.refresh(t)
+        tid = t.id
+    try:
+        await main._run_one_task(tid)
+        assert unscheduled == [tid] and ran == []
+    finally:
+        with session_scope() as s:
+            row = s.get(Task, tid)
+            if row:
+                s.delete(row)

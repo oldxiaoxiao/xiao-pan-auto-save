@@ -10,6 +10,16 @@ import os
 import shutil
 import tempfile
 
+import pytest
+
 _tmp = tempfile.mkdtemp(prefix="xiao-pan-tests-")
 os.environ["DATA_DIR"] = _tmp
 atexit.register(shutil.rmtree, _tmp, ignore_errors=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _init_test_db():
+    """建表一次：让不经过 TestClient 的测试(如 test_scheduler_log/test_task_service 单跑)也能访问临时库。"""
+    from backend.database import init_db
+
+    init_db()

@@ -51,8 +51,24 @@ def reschedule_main_job() -> None:
 
 
 async def _run_one_task(task_id: int) -> None:
+    from datetime import date, datetime
+
+    from .database import session_scope
+    from .models import Task
     from .services import task_service
 
+    with session_scope() as s:
+        row = s.get(Task, task_id)
+    if row is None or row.disabled:
+        scheduler.unschedule_task(task_id)  # 任务已删/停用 → 撤销自身定时器
+        return
+    if row.enddate:
+        try:
+            if date.today() > datetime.strptime(row.enddate, "%Y-%m-%d").date():
+                scheduler.unschedule_task(task_id)  # 过截止日期 → 停止高频空跑
+                return
+        except ValueError:
+            pass
     try:
         await task_service.run_tasks(task_ids=[task_id], trigger="scheduled")
     except Exception as exc:  # noqa: BLE001
