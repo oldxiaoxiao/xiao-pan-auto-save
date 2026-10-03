@@ -118,3 +118,73 @@ def test_task_episode_quality_fields(client):
     assert plain["episode_start"] == 0 and plain["episode_end"] == 0 and plain["quality"] == ""
     client.delete(f"/api/tasks/{created['id']}")
     client.delete(f"/api/tasks/{plain['id']}")
+
+
+def test_task_schedule_wiring(client, monkeypatch):
+    """任务 CRUD → 调度器接线：monkeypatch 记录调用，不依赖真实 APScheduler 时序。"""
+    from backend.main import scheduler
+
+    calls = []
+    monkeypatch.setattr(
+        scheduler,
+        "reschedule_task",
+        lambda task_id, schedule, func: calls.append(("reschedule", task_id, schedule)) or "fake",
+    )
+    monkeypatch.setattr(scheduler, "unschedule_task", lambda task_id: calls.append(("unschedule", task_id)))
+
+    body = {
+        "taskname": "调度接线",
+        "shareurl": "https://pan.quark.cn/s/wiring",
+        "savepath": "/wiring",
+        "schedule": "interval:5",
+    }
+    created = client.post("/api/tasks", json=body).json()
+    tid = created["id"]
+    # 创建（interval:5）→ reschedule_task(tid, "interval:5", func)
+    assert ("reschedule", tid, "interval:5") in calls
+
+    # 更新为空 schedule → apply_task_schedule 走 reschedule_task(tid, "")（其内部撤销旧 job）
+    body["schedule"] = ""
+    client.put(f"/api/tasks/{tid}", json=body)
+    assert ("reschedule", tid, "") in calls
+
+    # 更新为非法 cron → 200 不崩（真实实现经 FIX 1：撤销旧 job + warning 告警）
+    body["schedule"] = "cron:bad-cron"
+    assert client.put(f"/api/tasks/{tid}", json=body).status_code == 200
+    assert ("reschedule", tid, "cron:bad-cron") in calls
+
+    # 删除 → unschedule_task(tid)
+    client.delete(f"/api/tasks/{tid}")
+    assert ("unschedule", tid) in calls
+
+
+async def test_global_sweep_skips_tasks_with_own_schedule(client, monkeypatch):
+    """FIX 3：全局 sweep 只驱动无有效独立调度的任务；有效 schedule 的任务被跳过，空/非法仍参与。"""
+    from backend.models import Task
+    from backend.services import task_service
+
+    tasks = [
+        Task(id=901, taskname="自带调度", shareurl="https://fake.example/s", savepath="/s", schedule="cron:0 9 * * 0"),
+        Task(id=902, taskname="非法调度", shareurl="https://fake.example/s", savepath="/s", schedule="cron:bad"),
+        Task(id=903, taskname="继承全局", shareurl="https://fake.example/s", savepath="/s", schedule=""),
+    ]
+    monkeypatch.setattr(
+        task_service, "load_tasks", lambda ids=None: [t for t in tasks if ids is None or t.id in ids]
+    )
+    routed = []
+    monkeypatch.setattr(task_service, "route_driver", lambda url: routed.append(url) or None)
+
+    async def no_push(*a, **kw):
+        return None
+
+    monkeypatch.setattr(task_service, "_push", no_push)
+
+    summary = await task_service.run_tasks(trigger="scheduled")  # task_ids=None 即全局 sweep
+    assert summary["skipped"] == 1  # 901 有有效独立调度，sweep 不双驱动
+    assert summary["failed"] == 2  # 902（非法）/903（空）仍由 sweep 兜底
+    assert len(routed) == 2
+
+    # 指定任务运行（非 sweep）不受影响：有效 schedule 的任务照常执行
+    routed.clear()
+    await task_service.run_tasks(task_ids=[901], trigger="scheduled")
+    assert routed

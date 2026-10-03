@@ -12,7 +12,7 @@ from ..config import PROXY
 from ..core.engine import TaskSpec, run_update_task
 from ..core.logstream import hub
 from ..core.router import route_driver
-from ..core.scheduler import task_due_today
+from ..core.scheduler import has_valid_schedule, task_due_today
 from ..database import session_scope
 from ..models import Account, Task
 
@@ -118,6 +118,17 @@ async def _run_tasks_inner(
         if task.shareurl_ban:
             summary["skipped"] += 1
             tlog("warn", f"《{task.taskname}》已标记失效（{task.shareurl_ban}），跳过")
+            continue
+        # 全局 sweep（task_ids=None）只驱动「无有效独立调度」的任务：已自带有效 schedule 的任务
+        # 由其专属 job 触发，避免同时被主 crontab 双驱动（如"仅周日"cron 却在每日全局点被执行）。
+        # schedule 为空或非法的任务仍留在 sweep 中，继承全局回退。
+        if (
+            trigger == "scheduled"
+            and task_ids is None
+            and has_valid_schedule(getattr(task, "schedule", "") or "")
+        ):
+            summary["skipped"] += 1
+            tlog("info", f"《{task.taskname}》已配置独立调度（schedule={task.schedule}），全局 sweep 不再驱动")
             continue
         if trigger == "scheduled" and not task_due_today(task):
             summary["skipped"] += 1

@@ -3,7 +3,7 @@ import json
 from datetime import date
 
 from backend.core.logstream import LogHub
-from backend.core.scheduler import TaskScheduler, task_due_today
+from backend.core.scheduler import TaskScheduler, has_valid_schedule, task_due_today
 from backend.models import Task
 
 
@@ -82,3 +82,29 @@ def test_reschedule_task_interval_and_cron():
             s.shutdown()
 
     asyncio.run(run())
+
+
+def test_reschedule_task_invalid_cron_removes_old_job():
+    # FIX 1：从有效 schedule 改成非法后，旧 job 必须被撤销，不能继续按旧调度触发
+    async def run():
+        s = TaskScheduler()
+        s.start()
+        try:
+            assert s.reschedule_task(9, "interval:5", lambda: None) is not None
+            assert s.scheduler.get_job("xiao_pan_task_9") is not None
+            # 改成非法 cron → 返回 None 且撤销旧 job
+            assert s.reschedule_task(9, "cron:not-a-cron", lambda: None) is None
+            assert s.scheduler.get_job("xiao_pan_task_9") is None
+        finally:
+            s.shutdown()
+
+    asyncio.run(run())
+
+
+def test_has_valid_schedule():
+    # FIX 3 依赖：任务自带有效 schedule 判断，复用 TaskScheduler._parse_trigger
+    assert has_valid_schedule("interval:5")
+    assert has_valid_schedule("cron:*/10 * * * *")
+    assert not has_valid_schedule("")
+    assert not has_valid_schedule("cron:not-a-cron")
+    assert not has_valid_schedule("unknown:1")

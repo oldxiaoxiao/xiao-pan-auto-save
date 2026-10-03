@@ -44,6 +44,9 @@ class TaskScheduler:
             return None
         trigger = self._parse_trigger(schedule)
         if trigger is None:
+            # 非法 schedule：撤销旧 job，避免编辑后仍按旧调度触发；回退由全局 sweep 接管
+            self.unschedule_task(task_id)
+            logging.getLogger(__name__).warning("任务 %s 的 schedule 非法，忽略注册：%s", task_id, schedule)
             return None
         self.scheduler.add_job(
             func, trigger=trigger, id=job_id, replace_existing=True, max_instances=1, coalesce=True
@@ -69,6 +72,11 @@ class TaskScheduler:
             except (ValueError, KeyError, RuntimeError):
                 return None
         return None
+
+
+def has_valid_schedule(schedule: str) -> bool:
+    """schedule 非空且能解析出有效 trigger（即任务自带独立调度）。复用 TaskScheduler._parse_trigger。"""
+    return bool(schedule) and TaskScheduler._parse_trigger(schedule) is not None
 
 
 def task_due_today(task, today: date | None = None) -> bool:
