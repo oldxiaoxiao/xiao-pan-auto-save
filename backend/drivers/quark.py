@@ -247,18 +247,21 @@ class QuarkDriver(CloudDrive):
     # ------------------------------------------------------------------
     async def list_share(self, ref: ShareRef, path: str = "") -> list[FsItem]:
         path_fid = ref.extra["path_fids"]
-        if path not in path_fid:
-            parent = path.rsplit("/", 1)[0]
+        # 归一化：根为 ""，其余为 "/a/b"（去空段/尾斜杠）。否则裸名 "a" 会让
+        # parent==path 触发无限递归，且与引擎使用的 "/a" 产生两套缓存键。
+        norm = "/" + "/".join(seg for seg in path.split("/") if seg) if path.strip("/") else ""
+        if norm not in path_fid:
+            parent = norm.rsplit("/", 1)[0]
+            name = norm.rsplit("/", 1)[1]
             parent_items = await self.list_share(ref, parent)
-            name = path.rsplit("/", 1)[1]
             target = next((i for i in parent_items if i.is_dir and i.name == name), None)
             if target is None:
                 return []
-            path_fid[parent + "/" + name] = target.fid
-        items = await self._get_detail(ref, path_fid[path])
+            path_fid[norm] = target.fid
+        items = await self._get_detail(ref, path_fid[norm])
         for i in items:
             if i.is_dir:
-                path_fid.setdefault(f"{path}/{i.name}", i.fid)
+                path_fid.setdefault(f"{norm}/{i.name}", i.fid)
         return items
 
     async def _resolve_fid(self, path: str) -> str | None:

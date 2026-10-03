@@ -130,6 +130,21 @@ async def test_list_share_pagination_and_tokens(drv):
 
 
 @pytest.mark.asyncio
+async def test_list_share_subpath_without_leading_slash_no_recursion(drv):
+    # 回归：preview 传入裸名 "剧集"（无前导斜杠）曾令 parent==path 无限递归 → RecursionError/500
+    folder = {"fid": "a" * 32, "file_name": "剧集", "dir": True, "updated_at": 5, "share_fid_token": "tD"}
+    child = {"fid": "c1", "file_name": "01.mp4", "dir": False, "updated_at": 9, "share_fid_token": "t1", "size": 10}
+    root_detail = {"status": 200, "code": 0, "data": {"list": [folder]}, "metadata": {"_total": 1}}
+    sub_detail = {"status": 200, "code": 0, "data": {"list": [child]}, "metadata": {"_total": 1}}
+    drv.client = Recorder([root_detail, sub_detail])
+    ref = drv.parse_share("https://pan.quark.cn/s/abcd")
+    ref.extra["stoken"] = "stk"  # 跳过换 stoken 调用
+    items = await drv.list_share(ref, "剧集")
+    assert [i.name for i in items] == ["01.mp4"]
+    assert ref.extra["path_fids"]["/剧集"] == "a" * 32  # 归一化后与引擎共用同一缓存键
+
+
+@pytest.mark.asyncio
 async def test_save_body_and_batching(drv):
     n = 120
     responses = [
