@@ -440,3 +440,46 @@ async def test_fetch_one_reports_skipped_and_failed(tmp_path):
     mp.undo()
     job2 = next(j for j in registry.snapshot() if j["id"] == jid2)
     assert not ok2 and job2["status"] == "failed" and "403" in job2["error"]
+
+
+@pytest.mark.asyncio
+async def test_aria2_submit_sends_absolute_dir(tmp_path, monkeypatch):
+    """回归：aria2 投递的 dir 必须是绝对路径（否则容器按自身 CWD 解析，文件落不进宿主机挂载）。"""
+    import os
+
+    posted = []
+
+    class R:
+        def json(self):
+            return {"result": "g1"}
+
+    class C:
+        def __init__(self, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json):
+            posted.append(json)
+            return R()
+
+    monkeypatch.setattr(dl.httpx, "AsyncClient", C)
+    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
+    monkeypatch.setattr(dl, "_emby_refresh", lambda c, log: _noop())
+    monkeypatch.chdir(tmp_path)  # 相对 dir 在此临时目录下解析
+    c = DownloadSettings(
+        mode="aria2",
+        dir="data/downloads-rel",
+        concurrency=2,
+        aria2_host_port="http://127.0.0.1:6800",
+        aria2_secret="",
+        aria2_pause=False,
+    )
+    await dl.download_task_files(DlDriver(), [saved("1")], c)
+    opts = posted[0]["params"][-1]
+    assert os.path.isabs(opts["dir"]), opts["dir"]
+    assert opts["dir"].replace("\\", "/").endswith("data/downloads-rel/动漫/剧")

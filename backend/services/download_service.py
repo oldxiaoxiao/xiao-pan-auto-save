@@ -322,14 +322,17 @@ async def _aria2_submit(
             if not row:
                 lines.append(f"❌ 取直链失败: {item.name}")
                 continue
-            # aria2 不会自建缺失目录，投递前先建好目标目录（与内置下载器一致）
-            item.local_path.parent.mkdir(parents=True, exist_ok=True)
+            # aria2 不会自建缺失目录，投递前先建好目标目录（与内置下载器一致）。
+            # dir 必须用绝对路径：aria2 常在容器内运行，相对路径会按容器 CWD 解析，
+            # 导致文件落进容器而非宿主机挂载目录（内置下载器跑在宿主机不受影响）。
+            dest_dir = item.local_path.parent.resolve()
+            dest_dir.mkdir(parents=True, exist_ok=True)
             params: list = [
                 [row["download_url"]],
                 {
                     "header": [f"Cookie: {cookie_str}", f"User-Agent: {ua}"],
                     "out": item.local_path.name,
-                    "dir": str(item.local_path.parent),
+                    "dir": str(dest_dir),
                     "pause": str(cfg.aria2_pause).lower(),
                 },
             ]

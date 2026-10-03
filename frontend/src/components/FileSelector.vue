@@ -216,7 +216,7 @@ watch(
 <template>
   <el-dialog
     :model-value="modelValue"
-    :title="mode === 'startfid' ? '选择起始文件' : mode === 'preview' ? '正则效果预览' : '选择保存目录'"
+    :title="mode === 'startfid' ? '选择起始文件' : mode === 'preview' ? '浏览分享 / 正则效果' : '选择保存目录'"
     width="min(900px, 94vw)"
     top="6vh"
     @update:model-value="(v: boolean) => emit('update:modelValue', v)"

@@ -188,7 +188,12 @@ const hasId = computed(() => props.task?.id ?? null);
       </div>
       <div class="f f--wide">
         <label class="field-label">分享链接</label>
-        <el-input v-model="draft.shareurl" placeholder="https://pan.quark.cn/s/..." />
+        <div class="row">
+          <el-input v-model="draft.shareurl" placeholder="https://pan.quark.cn/s/..." />
+          <el-button :icon="'🔍'" :disabled="!draft.shareurl.trim()" @click="openSelector('preview')">
+            浏览
+          </el-button>
+        </div>
       </div>
       <div class="f f--wide">
         <label class="field-label">保存路径</label>
