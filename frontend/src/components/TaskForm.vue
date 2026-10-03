@@ -224,6 +224,9 @@ const hasId = computed(() => props.task?.id ?? null);
           placeholder="标准 crontab，如 */5 17-23 * * *"
           style="margin-top: 8px"
         />
+        <div v-if="scheduleMode === '__custom' && !customCron.trim()" class="hint">
+          请先填写 crontab 表达式，否则将回退为继承全局。
+        </div>
         <div v-if="draft.schedule.startsWith('interval:') && Number(draft.schedule.split(':')[1]) < 5" class="hint">
           频率过高可能触发夸克风控，建议 ≥5 分钟。
         </div>
