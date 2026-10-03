@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 from sqlmodel import delete, select
 
@@ -118,3 +121,57 @@ async def test_no_account_notifies(monkeypatch):
     monkeypatch.setattr(task_service, "_push", fake_push)
     summary = await task_service.run_tasks(trigger="manual")
     assert summary["failed"] == 1
+
+
+def _mktask(tid):
+    """内存 Task（不落库），让流程真正走到转存段。"""
+    return Task(
+        id=tid,
+        taskname=f"t{tid}",
+        shareurl="https://fake.example/s",
+        savepath="/s",
+        auto_download=False,
+        disabled=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_transfer_phase_serialized_across_calls(monkeypatch):
+    """并发两个 run_tasks 时，转存段（run_update_task）从不重叠——全局锁串行化。"""
+    active = {"n": 0, "max": 0, "calls": 0}
+
+    class FakeResult:
+        status = "no_changes"
+        message = ""
+        files = []
+
+        def render(self):
+            return ""
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        # 记录转存段的重叠进入数：进入 +1，await 让出事件循环，另一路并发进入则 +2
+        active["calls"] += 1
+        active["n"] += 1
+        active["max"] = max(active["max"], active["n"])
+        await asyncio.sleep(0.05)
+        active["n"] -= 1
+        return FakeResult()
+
+    def fake_pick_account(account_id, driver_key):
+        return SimpleNamespace(id=1, cookie="ck", sort_order=0, can_save=True)
+
+    # route_driver 必须返回 supported 驱动、_pick_account 返回账号，流程才会进入 run_update_task
+    monkeypatch.setattr(task_service, "run_update_task", fake_run_update)
+    monkeypatch.setattr(task_service, "route_driver", lambda url: OkDriver)
+    monkeypatch.setattr(task_service, "_pick_account", fake_pick_account)
+    monkeypatch.setattr(task_service, "load_tasks", lambda ids=None: [_mktask(1), _mktask(2)])
+
+    await asyncio.gather(
+        task_service.run_tasks([1], "scheduled"),
+        task_service.run_tasks([2], "scheduled"),
+    )
+
+    # 非空转：两次 run 各两任务都真正进入转存段（4 次），否则锁根本没被测到
+    assert active["calls"] == 4, "转存段应被实际调用，测试才有意义"
+    # 转存段从不重叠：无锁时并发 gather 会让 max==2
+    assert active["max"] <= 1

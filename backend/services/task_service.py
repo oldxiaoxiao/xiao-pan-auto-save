@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime
 
@@ -22,6 +23,11 @@ STATUS_ICONS = {
     "network": "⚠️",
     "failed": "❌",
 }
+
+# 全局运行锁：Phase 2 后多个 per-task 定时作业可并发调用 run_tasks；SQLite 无 WAL/busy_timeout
+# 且同一夸克账号不宜被并发打。转存段（engine save + DB 写入）必须串行，下载段（本地/aria2）可并行，
+# 故仅把转存段包进此锁。见 _run_tasks_inner。
+_run_lock = asyncio.Lock()
 
 
 def load_tasks(task_ids: list[int] | None = None) -> list[Task]:
@@ -140,15 +146,16 @@ async def _run_tasks_inner(
         driver = drivers[account.id]  # type: ignore[assignment]
 
         tlog("info", f"《{task.taskname}》开始运行")
-        result = await run_update_task(driver, _task_spec(task), magic_regex=magic_regex, log=tlog)
-
-        with session_scope() as session:
-            row = session.get(Task, task.id)
-            if row:
-                row.last_run_at = datetime.now()
-                if result.status == "banned":
-                    row.shareurl_ban = result.message
-                session.add(row)
+        # 转存段（engine save + DB 落库）加全局锁串行化：跨并发 run_tasks 不重叠，避免同账号并发转存与 SQLite 写冲突
+        async with _run_lock:
+            result = await run_update_task(driver, _task_spec(task), magic_regex=magic_regex, log=tlog)
+            with session_scope() as session:
+                row = session.get(Task, task.id)
+                if row:
+                    row.last_run_at = datetime.now()
+                    if result.status == "banned":
+                        row.shareurl_ban = result.message
+                    session.add(row)
 
         icon = STATUS_ICONS.get(result.status)
         if result.status == "updated":
@@ -156,6 +163,7 @@ async def _run_tasks_inner(
             notify_lines.append(f"✅《{task.taskname}》添加追更：\n{result.render()}")
             tlog("info", f"《{task.taskname}》新增 {len(result.files)} 项")
             if getattr(task, "auto_download", False):
+                # 下载在锁外：本地/aria2 可与其它任务的转存并行，不占用转存串行段
                 await _download_for_task(driver, task, result, settings, notify_lines, tlog)
         elif result.status == "no_changes":
             tlog("info", f"《{task.taskname}》没有新的转存")
