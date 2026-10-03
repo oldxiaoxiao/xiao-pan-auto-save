@@ -35,7 +35,7 @@ function blank(): TaskPayload & { startfid_name: string } {
     update_subdir_resave: false,
     enddate: "",
     runweek: [],
-    auto_download: false,
+    auto_download: true,
     download_subdir: false,
     download_savepath: "",
     disabled: false,
@@ -65,6 +65,13 @@ const SCHEDULE_PRESETS = [
   { label: "每 30 分钟", value: "interval:30" },
   { label: "每小时", value: "interval:60" },
   { label: "每天 9:00", value: "cron:0 9 * * *" },
+  { label: "每周一 9:00", value: "cron:0 9 * * 1" },
+  { label: "每周二 9:00", value: "cron:0 9 * * 2" },
+  { label: "每周三 9:00", value: "cron:0 9 * * 3" },
+  { label: "每周四 9:00", value: "cron:0 9 * * 4" },
+  { label: "每周五 9:00", value: "cron:0 9 * * 5" },
+  { label: "每周六 9:00", value: "cron:0 9 * * 6" },
+  { label: "每周日 9:00", value: "cron:0 9 * * 0" },
   { label: "自定义 cron", value: "__custom" },
 ];
 const customCron = ref("");
