@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from . import config
+from . import __version__, config
 from .api import (
     routes_accounts,
     routes_downloads,
@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 
-app = FastAPI(title="xiao-pan-auto-save", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="xiao-pan-auto-save", version=__version__, lifespan=lifespan)
 
 app.include_router(routes_tasks.router)
 app.include_router(routes_accounts.router)
@@ -75,7 +75,7 @@ app.include_router(routes_downloads.router)
 
 @app.get("/api/health")
 async def health() -> dict:
-    return {"status": "ok", "data_dir": str(config.DATA_DIR)}
+    return {"status": "ok", "version": __version__, "data_dir": str(config.DATA_DIR)}
 
 
 @app.get("/api/drivers")
