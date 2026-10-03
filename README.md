@@ -1,5 +1,9 @@
 # xiao-pan-auto-save
 
+<p align="center">
+  <img src="assets/logo.png" width="200" alt="xiao logo" />
+</p>
+
 多网盘分享链接 **自动转存 / 追更** 系统。给网盘账号配置 Cookie，系统按计划任务自动检查
 分享链接更新，把新文件转存到指定目录并按规则重命名，全程推送通知。
 

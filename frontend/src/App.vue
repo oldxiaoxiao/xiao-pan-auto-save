@@ -11,6 +11,7 @@ const nav = [
 ];
 
 const backendDown = ref(false);
+const appVersion = __APP_VERSION__;
 
 async function checkHealth() {
   try {
@@ -31,7 +32,7 @@ onMounted(() => {
   <div class="layout">
     <aside class="sidebar">
       <div class="brand">
-        <span class="brand__mark">盘</span>
+        <img class="brand__mark" src="/favicon.svg" alt="xiao logo" />
         <span class="brand__text">小盘自动转存</span>
       </div>
       <nav>
@@ -53,11 +54,12 @@ onMounted(() => {
       <div class="sidebar__foot">
         <span class="dot" :class="backendDown ? 'dot--off' : 'dot--on'" />
         {{ backendDown ? "后端未连接" : "已连接" }}
+        <span class="foot__version">v{{ appVersion }}</span>
       </div>
     </aside>
 
     <header class="mobile-bar">
-      <span class="brand__mark">盘</span>
+      <img class="brand__mark" src="/favicon.svg" alt="xiao logo" />
       <RouterLink v-for="item in nav" :key="item.to" :to="item.to" class="mtab">
         {{ item.label }}
       </RouterLink>
@@ -99,12 +101,8 @@ onMounted(() => {
   width: 30px;
   height: 30px;
   border-radius: 8px;
-  background: var(--primary);
-  color: #fff;
-  font-weight: 700;
-  display: grid;
-  place-items: center;
-  font-size: 15px;
+  display: block;
+  flex-shrink: 0;
 }
 .brand__text {
   font-weight: 700;
@@ -152,6 +150,11 @@ onMounted(() => {
 }
 .dot--off {
   background: var(--danger);
+}
+.foot__version {
+  margin-left: auto;
+  padding-right: 4px;
+  font-variant-numeric: tabular-nums;
 }
 
 .mobile-bar {
