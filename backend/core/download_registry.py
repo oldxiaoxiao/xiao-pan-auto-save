@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections import deque
 from dataclasses import asdict, dataclass, field
 
 ACTIVE = {"queued", "downloading"}
+
+# 每个 job 的协作式取消 Event：stop() 置位，_fetch_one 的 chunk 循环检查；终态即清理。
+_controls: dict[str, asyncio.Event] = {}
 
 
 @dataclass
@@ -20,7 +24,7 @@ class DownloadJob:
     total: int
     done: int = 0
     speed: float = 0.0
-    status: str = "queued"  # queued|downloading|done|failed|skipped
+    status: str = "queued"  # queued|downloading|done|failed|skipped|stopped（paused 仅 aria2 映射）
     error: str = ""
     started_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -41,7 +45,26 @@ class DownloadRegistry:
             total=int(total or 0),
         )
         self._active[job.id] = job
+        _controls[job.id] = asyncio.Event()
         return job.id
+
+    def cancel_requested(self, job_id: str) -> bool:
+        ev = _controls.get(job_id)
+        return bool(ev and ev.is_set())
+
+    def stop(self, job_id: str) -> bool:
+        ev = _controls.get(job_id)
+        if ev is None:
+            return False
+        ev.set()
+        return True
+
+    def remove(self, job_id: str) -> bool:
+        # 幂等清理：从 active + done 移除记录并删除取消 Event，恒返回 True
+        _controls.pop(job_id, None)
+        self._active.pop(job_id, None)
+        self._done = deque((j for j in self._done if j.id != job_id), maxlen=self._done.maxlen)
+        return True
 
     def update(
         self,
@@ -70,10 +93,11 @@ class DownloadRegistry:
             if status not in ACTIVE:
                 self._active.pop(job_id, None)
                 self._done.appendleft(job)
+                _controls.pop(job_id, None)  # 终态清理取消 Event，避免残留
 
     def snapshot(self) -> list[dict]:
         active = sorted(self._active.values(), key=lambda j: j.started_at)
-        return [asdict(j) for j in active + list(self._done)]
+        return [{**asdict(j), "source": "builtin"} for j in active + list(self._done)]
 
 
 registry = DownloadRegistry()

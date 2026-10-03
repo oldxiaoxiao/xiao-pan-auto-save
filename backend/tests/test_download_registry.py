@@ -31,3 +31,22 @@ def test_update_unknown_id_is_noop():
     r = DownloadRegistry()
     r.update("nope", done=5, status="done")  # 不抛异常
     assert r.snapshot() == []
+
+
+def test_snapshot_marks_builtin_source():
+    from backend.core.download_registry import registry
+    jid = registry.create(task_id=None, taskname="t", filename="f.mkv", dest_path="/d/f.mkv", total=10)
+    row = next(j for j in registry.snapshot() if j["id"] == jid)
+    assert row["source"] == "builtin"
+    registry.remove(jid)
+
+
+def test_stop_sets_cancel_and_remove_drops():
+    from backend.core.download_registry import registry
+    jid = registry.create(task_id=None, taskname="t", filename="g.mkv", dest_path="/d/g.mkv", total=10)
+    assert registry.cancel_requested(jid) is False
+    assert registry.stop(jid) is True
+    assert registry.cancel_requested(jid) is True
+    assert registry.remove(jid) is True
+    assert all(j["id"] != jid for j in registry.snapshot())
+    assert registry.cancel_requested(jid) is False  # 清理后无残留

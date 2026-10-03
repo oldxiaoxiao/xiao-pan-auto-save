@@ -218,6 +218,11 @@ async def _fetch_one(row: dict, item: _Item, cookie_str: str, ua: str, *, job_id
                 return False, f"{item.name}: HTTP {resp.status_code}"
             with part.open("wb") as fh:
                 async for chunk in resp.aiter_bytes(1 << 16):
+                    if job_id and registry.cancel_requested(job_id):
+                        fh.close()
+                        part.unlink(missing_ok=True)
+                        registry.update(job_id, status="stopped", error="已停止")
+                        return False, f"{item.name}: 已停止"
                     fh.write(chunk)
                     written += len(chunk)
                     now = time.monotonic()
@@ -266,6 +271,8 @@ async def aria2_status(cfg: DownloadSettings) -> list[dict]:
                 for st in resp.json().get("result") or []:
                     files = st.get("files") or []
                     path = files[0].get("path", "") if files else ""
+                    raw = st.get("status")
+                    status = {"active": "downloading", "paused": "paused"}.get(raw, "queued")
                     out.append(
                         {
                             "id": st.get("gid") or path,
@@ -276,10 +283,11 @@ async def aria2_status(cfg: DownloadSettings) -> list[dict]:
                             "total": int(st.get("totalLength") or 0),
                             "done": int(st.get("completedLength") or 0),
                             "speed": float(st.get("downloadSpeed") or 0),
-                            "status": "downloading" if st.get("status") == "active" else "queued",
+                            "status": status,
                             "error": "",
                             "started_at": 0.0,
                             "updated_at": time.time(),
+                            "source": "aria2",
                         }
                     )
     except Exception:  # noqa: BLE001 aria2 不可达时静默降级

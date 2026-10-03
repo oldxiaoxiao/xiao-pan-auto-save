@@ -278,7 +278,15 @@ async def test_aria2_status_maps_active_and_waiting(tmp_path, monkeypatch):
                             "completedLength": "250",
                             "downloadSpeed": "50",
                             "files": [{"path": "/d/凡人/193.mkv"}],
-                        }
+                        },
+                        {
+                            "gid": "g3",
+                            "status": "paused",
+                            "totalLength": "500",
+                            "completedLength": "100",
+                            "downloadSpeed": "0",
+                            "files": [{"path": "/d/凡人/194.mkv"}],
+                        },
                     ]
                 )
             return FakeResp(
@@ -297,12 +305,14 @@ async def test_aria2_status_maps_active_and_waiting(tmp_path, monkeypatch):
     monkeypatch.setattr(dl.httpx, "AsyncClient", FakeClient)
     c = cfg(tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800", aria2_secret="sec")
     jobs = await dl.aria2_status(c)
-    assert len(jobs) == 2
+    assert len(jobs) == 3
+    assert all(j["source"] == "aria2" for j in jobs)
     by_id = {j["id"]: j for j in jobs}
     a = by_id["g1"]
     assert a["status"] == "downloading" and a["total"] == 1000 and a["done"] == 250
     assert a["speed"] == 50.0 and a["filename"] == "193.mkv" and a["taskname"] == ""
     assert by_id["g2"]["status"] == "queued" and by_id["g2"]["filename"] == "aria2"
+    assert by_id["g3"]["status"] == "paused"  # aria2 paused → paused，不再误报 queued
 
 
 @pytest.mark.asyncio
@@ -327,6 +337,47 @@ async def test_aria2_status_unreachable_degrades(tmp_path, monkeypatch):
     monkeypatch.setattr(dl.httpx, "AsyncClient", Boom)
     c = cfg(tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800")
     assert await dl.aria2_status(c) == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_cancellation_removes_part(tmp_path, monkeypatch):
+    from backend.core.download_registry import registry
+
+    class Resp:
+        status_code = 200
+
+        async def aiter_bytes(self, _n):
+            yield b"x" * 10
+            yield b"y" * 10
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class Client:
+        def __init__(self, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, m, u, headers=None):
+            return Resp()
+
+    monkeypatch.setattr(dl.httpx, "AsyncClient", Client)
+    target = tmp_path / "c.mkv"
+    item = dl._Item(fid="c", name="c.mkv", size=999, local_path=target)
+    jid = registry.create(task_id=None, taskname="T", filename="c.mkv", dest_path=str(target), total=999)
+    registry.stop(jid)  # 立即请求取消
+    ok, msg = await dl._fetch_one({"download_url": "http://x", "size": 999}, item, "", "UA", job_id=jid)
+    assert ok is False and "已停止" in msg
+    assert not target.exists() and not list(tmp_path.glob("*.part"))
+    assert next(j for j in registry.snapshot() if j["id"] == jid)["status"] == "stopped"
 
 
 @pytest.mark.asyncio
