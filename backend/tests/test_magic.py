@@ -1,6 +1,6 @@
 import pytest
 
-from backend.core.magic import MagicRename
+from backend.core.magic import MagicRename, extract_episode
 
 
 @pytest.fixture
@@ -99,9 +99,6 @@ class TestIncrement:
         ]
         mr.sort_file_list(plans)
         assert plans[0]["name_re"] == "第1集.mp4"
-
-
-from backend.core.magic import extract_episode
 
 
 def test_extract_episode_variants():
