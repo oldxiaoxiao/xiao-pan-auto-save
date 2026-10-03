@@ -11,3 +11,4 @@ frontend/dist/
 *.log
 egg-info/
 *.egg-info/
+.idea/
