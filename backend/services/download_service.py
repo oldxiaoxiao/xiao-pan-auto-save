@@ -129,6 +129,9 @@ async def download_task_files(
     items = await collect_files(driver, saved, cfg, savepath_override, download_subdir)
     if not items:
         return []
+    if cfg.mode == "aria2" and not await aria2_reachable(cfg):
+        log("warn", "⚠️ aria2 不可达，自动改用内置下载器（保证下载不中断）")
+        cfg = _as_builtin(cfg)
     if cfg.mode == "aria2":
         lines = await _aria2_submit(driver, items, cfg, log)
     else:
@@ -136,6 +139,28 @@ async def download_task_files(
     if any(line.startswith("✅") for line in lines):
         await _emby_refresh(cfg, log)
     return lines
+
+
+def _as_builtin(cfg: DownloadSettings) -> DownloadSettings:
+    from dataclasses import replace
+
+    return replace(cfg, mode="builtin")
+
+
+async def aria2_reachable(cfg: DownloadSettings) -> bool:
+    """探测 aria2 RPC 是否可用（getVersion 有 result）。未配地址/异常一律 False。"""
+    if not cfg.aria2_host_port:
+        return False
+    url = _rpc_url(cfg.aria2_host_port)
+    token = [f"token:{cfg.aria2_secret}"] if cfg.aria2_secret else []
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.post(
+                url, json={"jsonrpc": "2.0", "id": "ping", "method": "aria2.getVersion", "params": token}
+            )
+        return bool(resp.json().get("result"))
+    except Exception:  # noqa: BLE001 任何异常都视为不可达，交由内置下载器兜底
+        return False
 
 
 async def _resolve_links(driver: CloudDrive, items: list[_Item]) -> tuple[dict[str, dict], str]:

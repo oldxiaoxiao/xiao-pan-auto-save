@@ -183,6 +183,7 @@ async def test_aria2_payload_protocol(tmp_path, monkeypatch):
             return FakeResp()
 
     monkeypatch.setattr(dl.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
     driver = DlDriver()
     c = cfg(
         tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800", aria2_secret="sec", aria2_pause=True
@@ -204,6 +205,47 @@ async def test_aria2_payload_protocol(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_no_saved_files_noop(tmp_path):
     assert await dl.download_task_files(DlDriver(), [], cfg(tmp_path)) == []
+
+
+@pytest.mark.asyncio
+async def test_aria2_unreachable_falls_back_to_builtin(tmp_path, monkeypatch):
+    """aria2 模式但连不上时，自动降级到内置下载器，保证下载落盘。"""
+    driver = DlDriver()
+    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(False))
+    fetched = []
+
+    async def fake_fetch(row, item, cookie_str, ua, *, job_id=None):
+        fetched.append(item.name)
+        return True, f"{item.name} ok"
+
+    monkeypatch.setattr(dl, "_fetch_one", fake_fetch)
+    monkeypatch.setattr(dl, "_emby_refresh", lambda c, log: _noop())
+    c = cfg(tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:1")
+    lines = await dl.download_task_files(driver, [saved("1")], c)
+    assert fetched == ["01.mp4"]  # 走了内置 _fetch_one
+    assert lines[0].startswith("✅")
+
+
+@pytest.mark.asyncio
+async def test_aria2_reachable_uses_aria2(tmp_path, monkeypatch):
+    """aria2 可达时仍走 aria2 投递，不降级。"""
+    driver = DlDriver()
+    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
+    submitted = []
+
+    async def fake_submit(driver_, items, cfg_, log):
+        submitted.append(len(items))
+        return ["✅ aria2 已投递 01.mp4"]
+
+    monkeypatch.setattr(dl, "_aria2_submit", fake_submit)
+    monkeypatch.setattr(dl, "_emby_refresh", lambda c, log: _noop())
+    c = cfg(tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800")
+    lines = await dl.download_task_files(driver, [saved("1")], c)
+    assert submitted == [1] and lines[0].startswith("✅")
+
+
+async def _ret(v):
+    return v
 
 
 @pytest.mark.asyncio

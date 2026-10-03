@@ -233,6 +233,16 @@ def test_matches_filters_episode_range():
 
 def test_matches_filters_empty_passes_all():
     assert matches_filters("任意文件名", 0, 0, "") is True
+
+
+def test_matches_filters_quality_alias_4k_2160p():
+    # 4K 与 2160p 互为别名（真实文件名常用 2160p 而非 4K）
+    assert matches_filters("S01E194.2025.2160p.x264.mkv", 0, 0, "4K") is True
+    assert matches_filters("S01E194.2160p.mkv", 0, 0, "2160P") is True
+    assert matches_filters("S01E194.4k.mkv", 0, 0, "2160P") is True
+    assert matches_filters("x.1080p.mkv", 0, 0, "1080") is True  # 1080 命中 1080p
+    assert matches_filters("S01E194.1080p.mkv", 0, 0, "4K") is False  # 1080p 不算 4K
+    assert matches_filters("x.2160p.mkv", 0, 0, "1080p") is False
     assert matches_filters("任意.mp4", 0, 0, ", ,") is True  # 逗号/空白 token 视为不限画质
 
 

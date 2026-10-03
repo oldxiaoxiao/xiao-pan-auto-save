@@ -7,7 +7,7 @@ import type { Account, Task, TaskPayload } from "../api/types";
 import { MAGIC_VARIABLES } from "../constants";
 import { WEEK_LABELS } from "../utils";
 
-const QUALITY_OPTIONS = ["4K", "1080P", "720P", "x265", "HDR"];
+const QUALITY_OPTIONS = ["4K", "2160P", "1080P", "720P", "x265", "HDR"];
 
 const props = defineProps<{
   task: Task | null;
@@ -170,10 +170,14 @@ const hasId = computed(() => props.task?.id ?? null);
         <el-input-number v-model="draft.episode_end" :min="0" :max="9999" controls-position="right" />
       </div>
       <div class="f f--wide">
-        <label class="field-label">画质（多选，留空=不限）</label>
+        <label class="field-label">画质（多选，留空=不限；4K 与 2160P 互为别名）</label>
         <el-select v-model="qualityList" multiple clearable placeholder="不限画质" style="width: 100%">
           <el-option v-for="q in QUALITY_OPTIONS" :key="q" :label="q" :value="q" />
         </el-select>
+        <div class="hint">
+          提示：集数/画质只过滤文件，不作用于子目录；若分享里有整目录（如 001-184 合集），请在高级设置里填「匹配正则」（如
+          <code>$TV</code>）以排除非剧集目录。
+        </div>
       </div>
       <div class="f">
         <label class="field-label">下载到本地</label>
@@ -363,6 +367,18 @@ const hasId = computed(() => props.task?.id ?? null);
 }
 .var:hover {
   background: var(--primary-soft);
+}
+.hint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #8b94a7;
+}
+.hint code {
+  background: #eef1f6;
+  border-radius: 4px;
+  padding: 0 4px;
+  font-family: monospace;
 }
 .weeks {
   display: flex;
