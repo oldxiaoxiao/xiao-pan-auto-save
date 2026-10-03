@@ -94,6 +94,9 @@ export const useTasksStore = defineStore("tasks", () => {
         disabled: t.disabled,
         account_id: t.account_id,
         sort_order: t.sort_order,
+        episode_start: t.episode_start,
+        episode_end: t.episode_end,
+        quality: t.quality,
       };
       const updated = await api.updateTask(t.id, payload);
       replaceTask(updated);
