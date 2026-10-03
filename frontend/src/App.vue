@@ -98,15 +98,15 @@ onMounted(() => {
   margin-bottom: 26px;
 }
 .brand__mark {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
+  height: 22px;
+  width: auto;
   display: block;
   flex-shrink: 0;
 }
 .brand__text {
   font-weight: 700;
-  font-size: 15px;
+  font-size: 14px;
+  white-space: nowrap;
 }
 .sidebar nav {
   display: flex;
