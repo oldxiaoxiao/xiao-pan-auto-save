@@ -12,11 +12,13 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
+from ..core.download_registry import registry
 from ..core.engine import SavedFile
 from ..core.logstream import LogFn
 from ..drivers.base import CloudDrive, DriveError
@@ -117,6 +119,8 @@ async def download_task_files(
     download_subdir: bool = False,
     savepath_override: str = "",
     log: LogFn | None = None,
+    task_id: int | None = None,
+    taskname: str = "",
 ) -> list[str]:
     """执行下载，返回摘要行（供通知聚合）。单文件失败不中断整体。"""
     log = log or (lambda level, msg: None)
@@ -128,7 +132,7 @@ async def download_task_files(
     if cfg.mode == "aria2":
         lines = await _aria2_submit(driver, items, cfg, log)
     else:
-        lines = await _builtin_download(driver, items, cfg, log)
+        lines = await _builtin_download(driver, items, cfg, log, task_id=task_id, taskname=taskname)
     if any(line.startswith("✅") for line in lines):
         await _emby_refresh(cfg, log)
     return lines
@@ -140,7 +144,7 @@ async def _resolve_links(driver: CloudDrive, items: list[_Item]) -> tuple[dict[s
 
 
 async def _builtin_download(
-    driver: CloudDrive, items: list[_Item], cfg: DownloadSettings, log: LogFn
+    driver: CloudDrive, items: list[_Item], cfg: DownloadSettings, log: LogFn, *, task_id=None, taskname=""
 ) -> list[str]:
     by_fid, cookie_str = await _resolve_links(driver, items)
     ua = getattr(driver, "UA", "Mozilla/5.0")
@@ -150,10 +154,15 @@ async def _builtin_download(
         row = by_fid.get(item.fid)
         if not row:
             return f"❌ 取直链失败: {item.name}"
+        job_id = registry.create(
+            task_id=task_id, taskname=taskname, filename=item.name,
+            dest_path=str(item.local_path), total=int(row.get("size") or item.size or 0),
+        )
         async with sem:
             try:
-                ok, msg = await _fetch_one(row, item, cookie_str, ua)
+                ok, msg = await _fetch_one(row, item, cookie_str, ua, job_id=job_id)
             except Exception as exc:  # noqa: BLE001
+                registry.update(job_id, status="failed", error=str(exc))
                 ok, msg = False, f"{item.name}: {exc}"
         log("info" if ok else "warn", f"📥 {msg}")
         return f"{'✅' if ok else '❌'} {msg}"
@@ -161,29 +170,44 @@ async def _builtin_download(
     return list(await asyncio.gather(*(one(i) for i in items)))
 
 
-async def _fetch_one(row: dict, item: _Item, cookie_str: str, ua: str) -> tuple[bool, str]:
+async def _fetch_one(row: dict, item: _Item, cookie_str: str, ua: str, *, job_id: str | None = None) -> tuple[bool, str]:
     path = item.local_path
     path.parent.mkdir(parents=True, exist_ok=True)
     size = int(row.get("size") or item.size or 0)
     if path.exists() and size and path.stat().st_size == size:
+        if job_id:
+            registry.update(job_id, status="skipped")
         return True, f"跳过（已存在）{item.name}"
     part = path.with_name(path.name + ".part")
     headers = {"user-agent": ua}
     if cookie_str:
         headers["cookie"] = cookie_str
+    started = time.monotonic()
+    last_tick = started
+    written = 0
     async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
         async with client.stream("GET", row["download_url"], headers=headers) as resp:
             if resp.status_code != 200:
+                if job_id:
+                    registry.update(job_id, status="failed", error=f"HTTP {resp.status_code}")
                 return False, f"{item.name}: HTTP {resp.status_code}"
-            written = 0
             with part.open("wb") as fh:
                 async for chunk in resp.aiter_bytes(1 << 16):
                     fh.write(chunk)
                     written += len(chunk)
+                    now = time.monotonic()
+                    if job_id and now - last_tick >= 0.25:
+                        last_tick = now
+                        speed = written / max(now - started, 1e-6)
+                        registry.update(job_id, done=written, speed=speed, status="downloading")
     if size and written != size:
         part.unlink(missing_ok=True)
+        if job_id:
+            registry.update(job_id, status="failed", error=f"大小不符 {written}/{size}")
         return False, f"{item.name}: 大小不符 {written}/{size}"
     os.replace(part, path)
+    if job_id:
+        registry.update(job_id, done=written, total=written or size, status="done")
     return True, f"{item.name}（{written / 1024 / 1024:.1f}MB）"
 
 

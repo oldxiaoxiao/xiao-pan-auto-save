@@ -180,6 +180,8 @@ async def _download_for_task(driver, task, result, settings, notify_lines, tlog)
             download_subdir=bool(getattr(task, "download_subdir", False)),
             savepath_override=getattr(task, "download_savepath", "") or "",
             log=tlog,
+            task_id=task.id,
+            taskname=task.taskname,
         )
     except Exception as exc:  # noqa: BLE001 下载失败不影响转存结果
         tlog("error", f"《{task.taskname}》下载异常：{exc}")

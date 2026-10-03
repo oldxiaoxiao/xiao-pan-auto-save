@@ -102,7 +102,7 @@ async def test_builtin_download_flow(tmp_path, monkeypatch):
     driver = DlDriver()
     calls = []
 
-    async def fake_fetch(row, item, cookie_str, ua):
+    async def fake_fetch(row, item, cookie_str, ua, *, job_id=None):
         calls.append((row["download_url"], str(item.local_path), cookie_str, ua))
         return True, f"{item.name}（0.0MB）"
 
@@ -204,3 +204,65 @@ async def test_aria2_payload_protocol(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_no_saved_files_noop(tmp_path):
     assert await dl.download_task_files(DlDriver(), [], cfg(tmp_path)) == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_reports_progress_and_done(tmp_path):
+    from backend.core.download_registry import registry
+
+    class FakeResp:
+        status_code = 200
+        async def aiter_bytes(self, _n):
+            yield b"x" * 10
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        def stream(self, method, url, headers=None): return FakeResp()
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(dl.httpx, "AsyncClient", FakeClient)
+    target = tmp_path / "sub" / "01.mp4"
+    item = dl._Item(fid="1", name="01.mp4", size=10, local_path=target)
+    jid = registry.create(task_id=None, taskname="T", filename="01.mp4", dest_path=str(target), total=10)
+    ok, msg = await dl._fetch_one({"download_url": "http://dl/1", "size": 10}, item, "C=1", "UA", job_id=jid)
+    monkeypatch.undo()
+    job = next(j for j in registry.snapshot() if j["id"] == jid)
+    assert ok and job["status"] == "done" and job["done"] == 10
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_reports_skipped_and_failed(tmp_path):
+    from backend.core.download_registry import registry
+
+    # 已存在同大小 → skipped
+    target = tmp_path / "s.mp4"
+    target.write_bytes(b"y" * 10)
+    item = dl._Item(fid="s", name="s.mp4", size=10, local_path=target)
+    jid = registry.create(task_id=None, taskname="T", filename="s.mp4", dest_path=str(target), total=10)
+    ok, msg = await dl._fetch_one({"download_url": "http://dl", "size": 10}, item, "", "UA", job_id=jid)
+    assert ok and "跳过" in msg
+    assert next(j for j in registry.snapshot() if j["id"] == jid)["status"] == "skipped"
+
+    # HTTP 非 200 → failed
+    class BadResp:
+        status_code = 403
+        async def aiter_bytes(self, _n): yield b""
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+    class BadClient:
+        def __init__(self, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        def stream(self, method, url, headers=None): return BadResp()
+    mp = pytest.MonkeyPatch()
+    mp.setattr(dl.httpx, "AsyncClient", BadClient)
+    item2 = dl._Item(fid="b", name="b.mp4", size=5, local_path=tmp_path / "b.mp4")
+    jid2 = registry.create(task_id=None, taskname="T", filename="b.mp4", dest_path=str(item2.local_path), total=5)
+    ok2, _ = await dl._fetch_one({"download_url": "http://dl", "size": 5}, item2, "", "UA", job_id=jid2)
+    mp.undo()
+    job2 = next(j for j in registry.snapshot() if j["id"] == jid2)
+    assert not ok2 and job2["status"] == "failed" and "403" in job2["error"]
