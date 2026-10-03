@@ -210,7 +210,9 @@ async def _fetch_one(row: dict, item: _Item, cookie_str: str, ua: str, *, job_id
     started = time.monotonic()
     last_tick = started
     written = 0
-    async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
+    # read=60s 空闲上限：卡住的流最迟 60s 后抛 ReadTimeout 走失败路径，stop() 也能及时响应；
+    # 免费盘分片间隔远小于 60s，不影响正常长下载（不加总超时）。
+    async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10, read=60), follow_redirects=True) as client:
         async with client.stream("GET", row["download_url"], headers=headers) as resp:
             if resp.status_code != 200:
                 if job_id:
@@ -247,6 +249,16 @@ def _rpc_url(host_port: str) -> str:
         host, _, path = rest.partition("/")
         return f"{scheme.lower()}://{host}/{path or 'jsonrpc'}"
     return f"http://{host_port}/jsonrpc"
+
+
+async def aria2_rpc(cfg: DownloadSettings, method: str, *params) -> dict:
+    """向 aria2 RPC 发一条 JSON-RPC 指令（带 token 前缀），返回解析后的 json；异常向上抛。"""
+    url = _rpc_url(cfg.aria2_host_port)
+    token = [f"token:{cfg.aria2_secret}"] if cfg.aria2_secret else []
+    payload = {"jsonrpc": "2.0", "id": "ctl", "method": method, "params": token + list(params)}
+    async with httpx.AsyncClient(timeout=8) as client:
+        resp = await client.post(url, json=payload)
+    return resp.json()
 
 
 async def aria2_status(cfg: DownloadSettings) -> list[dict]:
