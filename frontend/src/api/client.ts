@@ -145,6 +145,10 @@ export const api = {
 
   // 下载进度
   listDownloads: () => request<{ jobs: DownloadJob[] }>("/api/downloads"),
+  downloadAction: (id: string, action: "stop" | "pause" | "resume", source: string) =>
+    request<{ ok: boolean }>(`/api/downloads/${id}/${action}?source=${source}`, { method: "POST" }),
+  deleteDownload: (id: string, source: string) =>
+    request<{ ok: boolean }>(`/api/downloads/${id}?source=${source}`, { method: "DELETE" }),
 
   // 搜索
   suggestions: (q: string, d = false) =>

@@ -242,7 +242,8 @@ export interface DownloadJob {
   total: number;
   done: number;
   speed: number;
-  status: "queued" | "downloading" | "done" | "failed" | "skipped";
+  status: "queued" | "downloading" | "paused" | "stopped" | "done" | "failed" | "skipped";
+  source: "builtin" | "aria2";
   error: string;
   started_at: number;
   updated_at: number;

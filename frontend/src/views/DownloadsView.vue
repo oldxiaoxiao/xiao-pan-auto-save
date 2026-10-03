@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
+import { ElMessage } from "element-plus";
 import { api } from "../api/client";
 import type { DownloadJob } from "../api/types";
 
@@ -24,7 +25,16 @@ function progressStatus(s: string): "" | "success" | "exception" | "warning" {
   return "";
 }
 function statusText(s: string): string {
-  return ({ queued: "排队", downloading: "下载中", done: "完成", failed: "失败", skipped: "跳过" } as Record<string, string>)[s] || s;
+  return ({ queued: "排队", downloading: "下载中", paused: "已暂停", stopped: "已停止", done: "完成", failed: "失败", skipped: "跳过" } as Record<string, string>)[s] || s;
+}
+
+async function act(row: DownloadJob, action: "stop" | "pause" | "resume") {
+  try { await api.downloadAction(row.id, action, row.source); refresh(); }
+  catch (e) { ElMessage.error((e as Error).message); }
+}
+async function del(row: DownloadJob) {
+  try { await api.deleteDownload(row.id, row.source); refresh(); }
+  catch (e) { ElMessage.error((e as Error).message); }
 }
 
 async function refresh() {
@@ -79,6 +89,16 @@ onBeforeUnmount(() => {
         </template>
       </el-table-column>
       <el-table-column prop="dest_path" label="目标路径" min-width="220" show-overflow-tooltip />
+      <el-table-column label="操作" width="220">
+        <template #default="{ row }">
+          <template v-if="row.status === 'downloading' || row.status === 'queued' || row.status === 'paused'">
+            <el-button v-if="row.source === 'aria2' && row.status !== 'paused'" size="small" text @click="act(row,'pause')">暂停</el-button>
+            <el-button v-if="row.source === 'aria2' && row.status === 'paused'" size="small" text @click="act(row,'resume')">继续</el-button>
+            <el-button size="small" text type="warning" @click="act(row,'stop')">停止</el-button>
+          </template>
+          <el-button size="small" text type="danger" @click="del(row)">删除</el-button>
+        </template>
+      </el-table-column>
     </el-table>
   </div>
 </template>
