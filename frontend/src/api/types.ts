@@ -22,6 +22,7 @@ export interface TaskPayload {
   episode_start: number;
   episode_end: number;
   quality: string;
+  schedule: string;
 }
 
 export interface Task extends TaskPayload {

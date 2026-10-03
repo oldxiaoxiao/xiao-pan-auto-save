@@ -40,7 +40,11 @@ async def create_task(body: TaskIn) -> TaskOut:
         session.add(task)
         session.commit()
         session.refresh(task)
-        return _to_out(task)
+        out = _to_out(task)
+    from ..main import apply_task_schedule
+
+    apply_task_schedule(task)
+    return out
 
 
 @router.put("/{task_id}", response_model=TaskOut)
@@ -55,7 +59,11 @@ async def update_task(task_id: int, body: TaskIn) -> TaskOut:
         session.add(task)
         session.commit()
         session.refresh(task)
-        return _to_out(task)
+        out = _to_out(task)
+    from ..main import apply_task_schedule
+
+    apply_task_schedule(task)
+    return out
 
 
 @router.delete("/{task_id}")
@@ -65,6 +73,9 @@ async def delete_task(task_id: int) -> dict:
         if not task:
             raise HTTPException(404, "任务不存在")
         session.delete(task)
+    from ..main import scheduler
+
+    scheduler.unschedule_task(task_id)
     return {"ok": True}
 
 

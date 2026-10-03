@@ -1,8 +1,9 @@
+import asyncio
 import json
 from datetime import date
 
 from backend.core.logstream import LogHub
-from backend.core.scheduler import task_due_today
+from backend.core.scheduler import TaskScheduler, task_due_today
 from backend.models import Task
 
 
@@ -58,3 +59,26 @@ def test_loghub_publish_history_and_queue(tmp_path):
     hub.unsubscribe(q)
     log("info", "after unsub")
     assert q.empty()
+
+
+def test_reschedule_task_interval_and_cron():
+    # AsyncIOScheduler 需要运行中的事件循环，同步用例里手动跑一个短循环
+    async def run():
+        s = TaskScheduler()
+        s.start()
+        try:
+            assert s.reschedule_task(1, "interval:5", lambda: None) is not None
+            assert s.scheduler.get_job("xiao_pan_task_1") is not None
+            assert s.reschedule_task(2, "cron:*/10 * * * *", lambda: None) is not None
+            # 非法 cron → 不注册、不崩
+            assert s.reschedule_task(3, "cron:not-a-cron", lambda: None) is None
+            assert s.scheduler.get_job("xiao_pan_task_3") is None
+            # 空 schedule → 撤销单独注册
+            s.reschedule_task(1, "", lambda: None)
+            assert s.scheduler.get_job("xiao_pan_task_1") is None
+            s.unschedule_task(2)
+            assert s.scheduler.get_job("xiao_pan_task_2") is None
+        finally:
+            s.shutdown()
+
+    asyncio.run(run())

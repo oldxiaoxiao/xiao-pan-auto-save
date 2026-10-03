@@ -26,6 +26,7 @@ class TaskIn(BaseModel):
     episode_start: int = 0
     episode_end: int = 0
     quality: str = ""
+    schedule: str = ""
 
 
 class TaskOut(TaskIn):

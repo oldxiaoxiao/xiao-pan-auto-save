@@ -7,6 +7,7 @@ from datetime import date, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
@@ -35,6 +36,39 @@ class TaskScheduler:
             func, trigger=trigger, id=MAIN_JOB_ID, replace_existing=True, max_instances=1, coalesce=True
         )
         return str(trigger)
+
+    def reschedule_task(self, task_id: int, schedule: str, func) -> str | None:
+        job_id = f"xiao_pan_task_{task_id}"
+        if not schedule:
+            self.unschedule_task(task_id)
+            return None
+        trigger = self._parse_trigger(schedule)
+        if trigger is None:
+            return None
+        self.scheduler.add_job(
+            func, trigger=trigger, id=job_id, replace_existing=True, max_instances=1, coalesce=True
+        )
+        return str(trigger)
+
+    def unschedule_task(self, task_id: int) -> None:
+        job_id = f"xiao_pan_task_{task_id}"
+        if self.scheduler.get_job(job_id):
+            self.scheduler.remove_job(job_id)
+
+    @staticmethod
+    def _parse_trigger(schedule: str):
+        if schedule.startswith("interval:"):
+            try:
+                mins = int(schedule.split(":", 1)[1])
+            except ValueError:
+                return None
+            return IntervalTrigger(minutes=max(1, mins))
+        if schedule.startswith("cron:"):
+            try:
+                return CronTrigger.from_crontab(schedule.split(":", 1)[1])
+            except (ValueError, KeyError, RuntimeError):
+                return None
+        return None
 
 
 def task_due_today(task, today: date | None = None) -> bool:

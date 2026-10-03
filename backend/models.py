@@ -57,6 +57,7 @@ class Task(SQLModel, table=True):
     episode_start: int = 0  # 起始集（含），0=不限
     episode_end: int = 0  # 结束集（含），0=不限
     quality: str = ""  # 逗号分隔 token，如 "1080p,4k"，空=不限
+    schedule: str = ""  # ""=继承全局；interval:N=每N分钟；cron:<expr>
     last_run_at: NaiveDatetime | None = None
     created_at: NaiveDatetime = Field(default_factory=_now)
 

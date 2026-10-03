@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from sqlmodel import select
 
 from . import __version__, config
 from .api import (
@@ -49,12 +50,46 @@ def reschedule_main_job() -> None:
     scheduler.reschedule(str(get_setting("crontab") or config.CRONTAB_DEFAULT), _main_job)
 
 
+async def _run_one_task(task_id: int) -> None:
+    from .services import task_service
+
+    try:
+        await task_service.run_tasks(task_ids=[task_id], trigger="scheduled")
+    except Exception as exc:  # noqa: BLE001
+        hub.make_logger("scheduled")("error", f"任务 {task_id} 运行异常：{exc}")
+
+
+def apply_task_schedule(task) -> None:
+    from functools import partial
+
+    from .database import session_scope
+    from .models import Task
+
+    with session_scope() as s:
+        row = s.get(Task, task.id)
+    if row is None or row.disabled:
+        scheduler.unschedule_task(task.id)
+        return
+    scheduler.reschedule_task(task.id, getattr(row, "schedule", "") or "", partial(_run_one_task, task.id))
+
+
+def reschedule_all_tasks() -> None:
+    from .database import session_scope
+    from .models import Task
+
+    with session_scope() as s:
+        tasks = s.exec(select(Task)).all()
+    for t in tasks:
+        apply_task_schedule(t)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     backup_db(config.DB_PATH, config.DATA_DIR / "backups")
     init_db()
     scheduler.start()
     reschedule_main_job()
+    reschedule_all_tasks()
     yield
     scheduler.shutdown()
 
