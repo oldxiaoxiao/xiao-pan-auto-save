@@ -15,8 +15,13 @@ const validateMsg = ref("");
 const validateOk = ref(false);
 const validatePending = ref(false);
 let timer: ReturnType<typeof setTimeout> | undefined;
+let justPicked = false;
 
 watch(taskname, (q) => {
+  if (justPicked) {
+    justPicked = false; // pick() 程序化回填，不重新触发搜索
+    return;
+  }
   if (timer) clearTimeout(timer);
   if (!q || q.trim().length < 2) {
     suggestions.value = [];
@@ -39,8 +44,11 @@ watch(taskname, (q) => {
 });
 
 async function pick(s: Suggestion) {
+  if (timer) clearTimeout(timer); // 丢弃挂起的 debounce，避免回填后又搜一次
+  justPicked = true;
   taskname.value = s.taskname;
   shareurl.value = s.shareurl;
+  suggestions.value = [];
   open.value = false;
   await runValidate();
 }
