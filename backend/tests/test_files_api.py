@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.api import routes_files, routes_search
-from backend.drivers.base import CloudDrive, FsItem, ShareRef
+from backend.drivers.base import CloudDrive, DriveError, FsItem, ShareRef
 from backend.main import app
 
 
@@ -62,6 +62,27 @@ def test_list_dir(client):
     data = client.get("/api/files/dir", params={"path": "/存"}).json()
     assert data["at_root"] is False and data["parent"] == "/"
     assert data["list"][0]["name"] == "第05集.mp4"
+
+
+def test_list_dir_cookie_error_friendly(client, monkeypatch):
+    async def boom(path):
+        raise DriveError("获取目录列表失败: code=31001 require login")
+
+    monkeypatch.setattr(client.drv, "list_dir", boom)
+    resp = client.get("/api/files/dir", params={"path": "/"})
+    assert resp.status_code == 502
+    assert "Cookie" in resp.json()["detail"]
+
+
+def test_list_dir_generic_error_friendly(client, monkeypatch):
+    async def boom(path):
+        raise DriveError("获取目录列表失败: 磁盘配额不足")
+
+    monkeypatch.setattr(client.drv, "list_dir", boom)
+    resp = client.get("/api/files/dir", params={"path": "/"})
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert "读取目录失败" in detail and "配额" in detail
 
 
 def test_rename_and_delete(client):

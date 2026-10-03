@@ -51,6 +51,19 @@ def _item_dict(i: FsItem, **extra) -> dict:
     }
 
 
+# 网盘返回里代表"未登录/Cookie 失效"的常见关键字（各驱动通用）。
+_LOGIN_HINTS = ("require login", "unauthorized", "not login", "未登录", "登录", "cookie", "token", "31001")
+
+
+def _drive_http(action: str, exc: DriveError) -> HTTPException:
+    """把驱动异常翻译成前端可读的友好提示，避免裸 500。"""
+    msg = (exc.message or str(exc)).strip()
+    low = msg.lower()
+    if any(k in low for k in _LOGIN_HINTS):
+        return HTTPException(502, "账号 Cookie 可能已失效，请到「账号」页更新 Cookie 后重试")
+    return HTTPException(502, f"{action}失败：{msg}")
+
+
 class RenameIn(BaseModel):
     path: str
     new_name: str
@@ -76,6 +89,8 @@ async def list_dir(path: str = "/", driver: str = "quark") -> dict:
             "at_root": norm == "/",
             "list": [_item_dict(i) for i in items],
         }
+    except DriveError as exc:
+        raise _drive_http("读取目录", exc) from exc
     finally:
         await drv.close()
 
@@ -92,6 +107,8 @@ async def rename(body: RenameIn) -> dict:
             raise HTTPException(404, f"未找到文件: {body.path}")
         await drv.rename(target, body.new_name)
         return {"ok": True}
+    except DriveError as exc:
+        raise _drive_http("重命名", exc) from exc
     finally:
         await drv.close()
 
@@ -110,6 +127,8 @@ async def delete(body: DeleteIn) -> dict:
             raise HTTPException(404, f"未找到文件: {body.path}")
         await drv.delete_items([target], purge=body.purge)
         return {"ok": True}
+    except DriveError as exc:
+        raise _drive_http("删除", exc) from exc
     finally:
         await drv.close()
 
