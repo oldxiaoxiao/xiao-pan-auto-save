@@ -38,11 +38,19 @@ async function refresh() {
   }
 }
 
+function onVisible() {
+  if (!document.hidden) refresh();
+}
+
 onMounted(() => {
   refresh();
   timer = window.setInterval(refresh, 1500);
+  document.addEventListener("visibilitychange", onVisible);
 });
-onBeforeUnmount(() => window.clearInterval(timer));
+onBeforeUnmount(() => {
+  window.clearInterval(timer);
+  document.removeEventListener("visibilitychange", onVisible);
+});
 </script>
 
 <template>
