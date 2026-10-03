@@ -65,6 +65,30 @@ ARIA2_SECRET=你的RPC密钥 docker compose --profile aria2 up -d --build
 - 只想跑主服务时照旧 `docker compose up -d`，aria2 不会被拉起。
 - 换 VIP 账号是限速的根治手段；aria2 多连接对免费账号通常也有数倍提升。
 
+#### 主服务跑在宿主机（uvicorn）+ 容器化 aria2
+
+若主服务不在 compose 里（例如无法构建镜像、直接 `uvicorn backend.main:app` 跑在宿主机），
+上面的 `aria2:6800` 内网名和 `./data:/app/data` 挂载都对不上——因为宿主机应用提交的
+`addUri dir` 是**宿主机绝对路径**，容器必须把 `data` 挂到**同一绝对路径**才能落盘。用这条：
+
+```bash
+DATA_ABS="$(pwd)/data"   # 宿主机上本仓库 data 目录的绝对路径
+docker run -d --name xiao-pan-aria2 --restart unless-stopped \
+  -v "$DATA_ABS:$DATA_ABS" \
+  -p 127.0.0.1:6800:6800 \
+  -e SECRET= -e PUID=0 -e PGID=0 -e RPC_PORT=6800 \
+  -e DOWNLOAD_DIR="$DATA_ABS/downloads" \
+  -e ARIA2_ARGS="--max-connection-per-server=5 --split=5 --min-split-size=1M" \
+  p3terx/aria2-pro
+```
+
+然后在 **设置 → 下载到本地**：模式 `aria2`，RPC 地址 `127.0.0.1:6800`。
+注意 `p3terx/aria2-pro` 在 `SECRET` 为空时会用内置默认密钥 `P3TERX`，故密钥填 `P3TERX`
+（或改成你自己的值并保持一致）。端口只绑 `127.0.0.1`，不对外暴露，单机本地用足够安全。
+
+- aria2 不可达时，下载会自动**降级到内置下载器**，不会因此下不到东西。
+- 换 VIP 或想根治限速同上。
+
 ## 从 quark-auto-save 迁移
 
 设置 → 旧配置导入：粘贴原 `quark_config.json` 内容，预览确认后一键导入。
