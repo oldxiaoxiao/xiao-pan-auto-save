@@ -3,6 +3,7 @@ import type {
   AccountActionResult,
   AccountPayload,
   DirList,
+  DownloadJob,
   DriverInfo,
   HealthResponse,
   LogEntry,
@@ -141,6 +142,9 @@ export const api = {
     }),
   sharePreview: (payload: SharePreviewPayload) =>
     request<SharePreview>("/api/files/share/preview", { method: "POST", body: JSON.stringify(payload) }),
+
+  // 下载进度
+  listDownloads: () => request<{ jobs: DownloadJob[] }>("/api/downloads"),
 
   // 搜索
   suggestions: (q: string, d = false) =>

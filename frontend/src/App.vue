@@ -6,6 +6,7 @@ const nav = [
   { to: "/tasks", label: "任务", icon: "M3 5h18M3 12h18M3 19h18" },
   { to: "/accounts", label: "账号", icon: "M16 20v-2a4 4 0 0 0-8 0v2M12 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" },
   { to: "/settings", label: "设置", icon: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM4 12h2m12 0h2" },
+  { to: "/downloads", label: "下载", icon: "M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" },
   { to: "/logs", label: "日志", icon: "M4 6h16M4 12h16M4 18h10" },
 ];
 

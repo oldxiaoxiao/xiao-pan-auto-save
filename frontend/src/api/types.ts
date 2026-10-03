@@ -228,3 +228,19 @@ export interface HealthResponse {
   status: string;
   data_dir: string;
 }
+
+/** GET /api/downloads 的下载任务项（内置下载队列）。 */
+export interface DownloadJob {
+  id: string;
+  task_id: number | null;
+  taskname: string;
+  filename: string;
+  dest_path: string;
+  total: number;
+  done: number;
+  speed: number;
+  status: "queued" | "downloading" | "done" | "failed" | "skipped";
+  error: string;
+  started_at: number;
+  updated_at: number;
+}
