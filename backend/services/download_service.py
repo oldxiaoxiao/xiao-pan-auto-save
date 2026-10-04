@@ -55,7 +55,7 @@ class DownloadSettings:
 
 
 @dataclass
-class _Item:
+class DownloadItem:
     fid: str
     name: str
     size: int
@@ -84,20 +84,20 @@ def resolve_local(dest_path: str, cfg: DownloadSettings, override: str) -> Path:
 
 async def collect_files(
     driver: CloudDrive, saved: list[SavedFile], cfg: DownloadSettings, override: str, download_subdir: bool
-) -> list[_Item]:
+) -> list[DownloadItem]:
     """待下载清单：文件直接入列；目录在开启递归时深度遍历（本地镜像子结构）。"""
-    items: list[_Item] = []
+    items: list[DownloadItem] = []
     for f in saved:
         local = resolve_local(f.dest_path, cfg, override)
         if not f.is_dir:
-            items.append(_Item(f.new_fid, Path(f.dest_path).name, 0, local))
+            items.append(DownloadItem(f.new_fid, Path(f.dest_path).name, 0, local))
         elif download_subdir:
             items.extend(await _walk_dir(driver, f.new_fid, local))
     return items
 
 
-async def _walk_dir(driver: CloudDrive, fid: str, local_dir: Path) -> list[_Item]:
-    out: list[_Item] = []
+async def _walk_dir(driver: CloudDrive, fid: str, local_dir: Path) -> list[DownloadItem]:
+    out: list[DownloadItem] = []
     try:
         children = await driver.list_dir_children(fid)
     except DriveError:
@@ -107,7 +107,7 @@ async def _walk_dir(driver: CloudDrive, fid: str, local_dir: Path) -> list[_Item
         if c.is_dir:
             out.extend(await _walk_dir(driver, c.fid, child))
         else:
-            out.append(_Item(c.fid, c.name, c.size, child))
+            out.append(DownloadItem(c.fid, c.name, c.size, child))
     return out
 
 
@@ -163,19 +163,19 @@ async def aria2_reachable(cfg: DownloadSettings) -> bool:
         return False
 
 
-async def _resolve_links(driver: CloudDrive, items: list[_Item]) -> tuple[dict[str, dict], str]:
+async def _resolve_links(driver: CloudDrive, items: list[DownloadItem]) -> tuple[dict[str, dict], str]:
     rows, cookie_str = await driver.get_download_urls([i.fid for i in items])
     return {r["fid"]: r for r in rows if r.get("download_url")}, cookie_str
 
 
 async def _builtin_download(
-    driver: CloudDrive, items: list[_Item], cfg: DownloadSettings, log: LogFn, *, task_id=None, taskname=""
+    driver: CloudDrive, items: list[DownloadItem], cfg: DownloadSettings, log: LogFn, *, task_id=None, taskname=""
 ) -> list[str]:
     by_fid, cookie_str = await _resolve_links(driver, items)
     ua = getattr(driver, "UA", "Mozilla/5.0")
     sem = asyncio.Semaphore(cfg.concurrency)
 
-    async def one(item: _Item) -> str:
+    async def one(item: DownloadItem) -> str:
         row = by_fid.get(item.fid)
         if not row:
             return f"❌ 取直链失败: {item.name}"
@@ -195,7 +195,7 @@ async def _builtin_download(
     return list(await asyncio.gather(*(one(i) for i in items)))
 
 
-async def _fetch_one(row: dict, item: _Item, cookie_str: str, ua: str, *, job_id: str | None = None) -> tuple[bool, str]:
+async def _fetch_one(row: dict, item: DownloadItem, cookie_str: str, ua: str, *, job_id: str | None = None) -> tuple[bool, str]:
     path = item.local_path
     path.parent.mkdir(parents=True, exist_ok=True)
     size = int(row.get("size") or item.size or 0)
@@ -308,7 +308,7 @@ async def aria2_status(cfg: DownloadSettings) -> list[dict]:
 
 
 async def _aria2_submit(
-    driver: CloudDrive, items: list[_Item], cfg: DownloadSettings, log: LogFn
+    driver: CloudDrive, items: list[DownloadItem], cfg: DownloadSettings, log: LogFn
 ) -> list[str]:
     if not cfg.aria2_host_port:
         return ["❌ aria2 模式未配置 RPC 地址"]

@@ -48,6 +48,13 @@ class DownloadRegistry:
         _controls[job.id] = asyncio.Event()
         return job.id
 
+    def get(self, job_id: str) -> DownloadJob | None:
+        """按 id 取 job（含已进 _done 的终态），供服务层落账本。"""
+        job = self._active.get(job_id)
+        if job is not None:
+            return job
+        return next((j for j in self._done if j.id == job_id), None)
+
     def cancel_requested(self, job_id: str) -> bool:
         ev = _controls.get(job_id)
         return bool(ev and ev.is_set())

@@ -68,6 +68,29 @@ class Task(SQLModel, table=True):
             return []
 
 
+class DownloadRecord(SQLModel, table=True):
+    """下载账本：一条 = 一次下载动作的完整生命周期（start 落 queued，finish 写终态）。"""
+
+    __tablename__ = "download_record"
+
+    id: int | None = Field(default=None, primary_key=True)
+    source: str = Field(default="builtin", index=True)  # builtin | aria2
+    ref_id: str = Field(default="", index=True)  # 内置=registry job_id；aria2=gid
+    task_id: int | None = None  # 只存值不加外键：任务删除后历史仍要留
+    taskname: str = ""
+    filename: str = ""
+    dest_path: str = ""
+    size_total: int = 0
+    size_done: int = 0
+    fid: str = ""  # 网盘 fid，重下取直链用
+    driver_key: str = ""
+    account_id: int | None = None
+    status: str = Field(default="queued", index=True)  # queued|downloading|done|failed|skipped|stopped
+    error: str = ""
+    created_at: NaiveDatetime = Field(default_factory=_now)
+    finished_at: NaiveDatetime | None = None
+
+
 class Setting(SQLModel, table=True):
     __tablename__ = "setting"
 

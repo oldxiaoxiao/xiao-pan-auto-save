@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from backend.core.download_registry import DownloadRegistry
 
 
@@ -50,3 +52,33 @@ def test_stop_sets_cancel_and_remove_drops():
     assert registry.remove(jid) is True
     assert all(j["id"] != jid for j in registry.snapshot())
     assert registry.cancel_requested(jid) is False  # 清理后无残留
+
+
+def test_registry_get_reads_active_and_terminal():
+    r = DownloadRegistry(history=5)
+    a = r.create(task_id=1, taskname="T", filename="a.mp4", dest_path="/d/a.mp4", total=10)
+    assert r.get(a).status == "queued"
+    r.update(a, done=10, status="done")
+    assert r.get(a).status == "done"  # 进 _done 后仍能取出，供落库
+    assert r.get("nope") is None
+
+
+def test_download_record_table_defaults():
+    from sqlmodel import select
+
+    from backend.database import session_scope
+    from backend.models import DownloadRecord
+
+    with session_scope() as s:
+        s.add(DownloadRecord(source="builtin", ref_id="r-t1", taskname="T", filename="a.mp4", dest_path="/d/a.mp4"))
+    with session_scope() as s:
+        row = s.exec(select(DownloadRecord).where(DownloadRecord.ref_id == "r-t1")).first()
+    assert row.status == "queued" and row.size_total == 0 and row.finished_at is None
+    assert row.task_id is None and row.account_id is None
+
+
+def test_download_item_is_public():
+    from backend.services.download_service import DownloadItem
+
+    i = DownloadItem(fid="f1", name="a.mp4", size=10, local_path=Path("/d/a.mp4"))
+    assert i.fid == "f1" and i.size == 10 and i.local_path.name == "a.mp4"

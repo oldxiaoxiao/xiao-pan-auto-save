@@ -152,7 +152,7 @@ async def test_fetch_one_writes_and_skips(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dl.httpx, "AsyncClient", FakeClient)
     target = tmp_path / "sub" / "01.mp4"
-    item = dl._Item(fid="1", name="01.mp4", size=10, local_path=target)
+    item = dl.DownloadItem(fid="1", name="01.mp4", size=10, local_path=target)
     ok, msg = await dl._fetch_one({"download_url": "http://dl/1", "size": 10}, item, "C=1", "UA")
     assert ok and target.read_bytes() == b"x" * 10 and not list(target.parent.glob("*.part"))
     # 已存在同大小 → 跳过
@@ -371,7 +371,7 @@ async def test_fetch_one_cancellation_removes_part(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dl.httpx, "AsyncClient", Client)
     target = tmp_path / "c.mkv"
-    item = dl._Item(fid="c", name="c.mkv", size=999, local_path=target)
+    item = dl.DownloadItem(fid="c", name="c.mkv", size=999, local_path=target)
     jid = registry.create(task_id=None, taskname="T", filename="c.mkv", dest_path=str(target), total=999)
     registry.stop(jid)  # 立即请求取消
     ok, msg = await dl._fetch_one({"download_url": "http://x", "size": 999}, item, "", "UA", job_id=jid)
@@ -400,7 +400,7 @@ async def test_fetch_one_reports_progress_and_done(tmp_path):
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(dl.httpx, "AsyncClient", FakeClient)
     target = tmp_path / "sub" / "01.mp4"
-    item = dl._Item(fid="1", name="01.mp4", size=10, local_path=target)
+    item = dl.DownloadItem(fid="1", name="01.mp4", size=10, local_path=target)
     jid = registry.create(task_id=None, taskname="T", filename="01.mp4", dest_path=str(target), total=10)
     ok, msg = await dl._fetch_one({"download_url": "http://dl/1", "size": 10}, item, "C=1", "UA", job_id=jid)
     monkeypatch.undo()
@@ -415,7 +415,7 @@ async def test_fetch_one_reports_skipped_and_failed(tmp_path):
     # 已存在同大小 → skipped
     target = tmp_path / "s.mp4"
     target.write_bytes(b"y" * 10)
-    item = dl._Item(fid="s", name="s.mp4", size=10, local_path=target)
+    item = dl.DownloadItem(fid="s", name="s.mp4", size=10, local_path=target)
     jid = registry.create(task_id=None, taskname="T", filename="s.mp4", dest_path=str(target), total=10)
     ok, msg = await dl._fetch_one({"download_url": "http://dl", "size": 10}, item, "", "UA", job_id=jid)
     assert ok and "跳过" in msg
@@ -434,7 +434,7 @@ async def test_fetch_one_reports_skipped_and_failed(tmp_path):
         def stream(self, method, url, headers=None): return BadResp()
     mp = pytest.MonkeyPatch()
     mp.setattr(dl.httpx, "AsyncClient", BadClient)
-    item2 = dl._Item(fid="b", name="b.mp4", size=5, local_path=tmp_path / "b.mp4")
+    item2 = dl.DownloadItem(fid="b", name="b.mp4", size=5, local_path=tmp_path / "b.mp4")
     jid2 = registry.create(task_id=None, taskname="T", filename="b.mp4", dest_path=str(item2.local_path), total=5)
     ok2, _ = await dl._fetch_one({"download_url": "http://dl", "size": 5}, item2, "", "UA", job_id=jid2)
     mp.undo()
