@@ -1,66 +1,185 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { api } from "../api/client";
-import type { DownloadJob } from "../api/types";
+import { useTasksStore } from "../stores/tasks";
+import type { DownloadJob, DownloadRecord } from "../api/types";
 
+const tab = ref<"active" | "history">("active");
+const tasks = useTasksStore();
+
+/* ---------- 进行中 ---------- */
 const jobs = ref<DownloadJob[]>([]);
 const error = ref("");
 let timer: number | undefined;
 
-function pct(j: DownloadJob): number {
-  if (!j.total) return j.status === "done" ? 100 : 0;
-  return Math.min(100, Math.round((j.done / j.total) * 100));
-}
-function fmtSize(n: number): string {
-  if (n <= 0) return "0 B";
-  const u = ["B", "KB", "MB", "GB"];
-  let i = 0;
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return `${n.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
-}
-function progressStatus(s: string): "" | "success" | "exception" | "warning" {
-  if (s === "done" || s === "skipped") return "success";
-  if (s === "failed") return "exception";
-  return "";
-}
-function statusText(s: string): string {
-  return ({ queued: "排队", downloading: "下载中", paused: "已暂停", stopped: "已停止", done: "完成", failed: "失败", skipped: "跳过" } as Record<string, string>)[s] || s;
-}
-
-async function act(row: DownloadJob, action: "stop" | "pause" | "resume") {
-  try { await api.downloadAction(row.id, action, row.source); refresh(); }
-  catch (e) { ElMessage.error((e as Error).message); }
-}
-async function del(row: DownloadJob) {
-  try { await api.deleteDownload(row.id, row.source); refresh(); }
-  catch (e) { ElMessage.error((e as Error).message); }
-}
-
 async function refresh() {
   if (document.hidden) return;
   try {
-    const r = await api.listDownloads();
-    jobs.value = r.jobs;
+    jobs.value = (await api.listDownloads()).jobs;
     error.value = "";
   } catch (e) {
     error.value = (e as Error).message;
   }
 }
 
-function onVisible() {
-  if (!document.hidden) refresh();
+async function act(row: DownloadJob, action: "stop" | "pause" | "resume") {
+  try {
+    await api.downloadAction(row.id, action, row.source);
+    refresh();
+  } catch (e) {
+    ElMessage.error((e as Error).message);
+  }
+}
+
+async function del(row: DownloadJob) {
+  try {
+    await api.deleteDownload(row.id, row.source);
+    refresh();
+  } catch (e) {
+    ElMessage.error((e as Error).message);
+  }
+}
+
+/* ---------- 历史 ---------- */
+const rows = ref<DownloadRecord[]>([]);
+const total = ref(0);
+const hLoading = ref(false);
+const query = reactive({
+  page: 1,
+  page_size: 50,
+  status: [] as string[],
+  task_id: null as number | null,
+  keyword: "",
+});
+const statusOptions = [
+  { label: "排队", value: "queued" },
+  { label: "下载中", value: "downloading" },
+  { label: "完成", value: "done" },
+  { label: "失败", value: "failed" },
+  { label: "跳过", value: "skipped" },
+  { label: "已停止", value: "stopped" },
+];
+let hTimer: number | undefined;
+
+const hasOpen = computed(() => rows.value.some((r) => r.status === "queued" || r.status === "downloading"));
+
+function stateText(s?: string): string {
+  return s === "ok" ? "在" : s === "missing" ? "已丢失" : "未校验";
+}
+
+async function loadHistory() {
+  hLoading.value = true;
+  try {
+    const r = await api.listDownloadHistory({
+      page: query.page,
+      page_size: query.page_size,
+      status: query.status.join(","),
+      task_id: query.task_id,
+      keyword: query.keyword.trim(),
+    });
+    rows.value = r.items;
+    total.value = r.total;
+  } catch (e) {
+    ElMessage.error((e as Error).message);
+  } finally {
+    hLoading.value = false;
+  }
+}
+
+async function delRecord(row: DownloadRecord) {
+  try {
+    await api.deleteDownloadHistory(row.id);
+    ElMessage.success("已删除记录（磁盘文件保留）");
+    loadHistory();
+  } catch (e) {
+    ElMessage.error((e as Error).message);
+  }
+}
+
+watch(tab, (v) => {
+  if (v === "history") loadHistory();
+});
+watch(
+  () => [query.status.join(","), query.task_id, query.page, query.page_size],
+  () => tab.value === "history" && loadHistory(),
+);
+let kwTimer: number | undefined;
+watch(
+  () => query.keyword,
+  () => {
+    window.clearTimeout(kwTimer);
+    kwTimer = window.setTimeout(() => {
+      // page 非 1 时先归 1，交给下面的 watch 统一触发加载，避免同一次搜索发两遍请求
+      const pageChanged = query.page !== 1;
+      query.page = 1;
+      if (!pageChanged && tab.value === "history") loadHistory();
+    }, 400);
+  },
+);
+watch(hasOpen, (open) => {
+  window.clearInterval(hTimer);
+  if (open && tab.value === "history") hTimer = window.setInterval(loadHistory, 5000);
+});
+
+function fmtSize(n: number): string {
+  if (n <= 0) return "0 B";
+  const u = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return `${n.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+}
+
+function pct(j: DownloadJob): number {
+  if (!j.total) return j.status === "done" ? 100 : 0;
+  return Math.min(100, Math.round((j.done / j.total) * 100));
+}
+
+function progressStatus(s: string): "" | "success" | "exception" | "warning" {
+  if (s === "done" || s === "skipped") return "success";
+  if (s === "failed") return "exception";
+  return "";
+}
+
+function statusText(s: string): string {
+  return (
+    (
+      {
+        queued: "排队",
+        downloading: "下载中",
+        paused: "已暂停",
+        stopped: "已停止",
+        done: "完成",
+        failed: "失败",
+        skipped: "跳过",
+      } as Record<string, string>
+    )[s] || s
+  );
+}
+
+function fmtTime(iso: string | null): string {
+  return iso ? iso.replace("T", " ").slice(0, 19) : "-";
 }
 
 onMounted(() => {
   refresh();
+  tasks.fetchTasks();
   timer = window.setInterval(refresh, 1500);
   document.addEventListener("visibilitychange", onVisible);
 });
 onBeforeUnmount(() => {
   window.clearInterval(timer);
+  window.clearInterval(hTimer);
+  window.clearTimeout(kwTimer);
   document.removeEventListener("visibilitychange", onVisible);
 });
+
+function onVisible() {
+  if (!document.hidden) refresh();
+}
 </script>
 
 <template>
@@ -69,41 +188,146 @@ onBeforeUnmount(() => {
       <span class="sticky-bar__title">下载任务</span>
       <span v-if="error" class="err">{{ error }}</span>
     </div>
-    <el-table :data="jobs" empty-text="暂无下载记录" row-key="id">
-      <el-table-column prop="taskname" label="任务" min-width="120" show-overflow-tooltip />
-      <el-table-column prop="filename" label="文件" min-width="200" show-overflow-tooltip />
-      <el-table-column label="进度" min-width="200">
-        <template #default="{ row }">
-          <el-progress :percentage="pct(row)" :status="progressStatus(row.status)" :stroke-width="12" />
-          <span class="sub">{{ fmtSize(row.done) }} / {{ row.total ? fmtSize(row.total) : "未知" }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="速度" width="110">
-        <template #default="{ row }">{{ row.status === "downloading" ? `${fmtSize(row.speed)}/s` : "-" }}</template>
-      </el-table-column>
-      <el-table-column label="状态" width="90">
-        <template #default="{ row }">
-          <el-tag :type="row.status === 'failed' ? 'danger' : row.status === 'done' ? 'success' : 'info'" size="small">
-            {{ statusText(row.status) }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="dest_path" label="目标路径" min-width="220" show-overflow-tooltip />
-      <el-table-column label="操作" width="220">
-        <template #default="{ row }">
-          <template v-if="row.status === 'downloading' || row.status === 'queued' || row.status === 'paused'">
-            <el-button v-if="row.source === 'aria2' && row.status !== 'paused'" size="small" text @click="act(row,'pause')">暂停</el-button>
-            <el-button v-if="row.source === 'aria2' && row.status === 'paused'" size="small" text @click="act(row,'resume')">继续</el-button>
-            <el-button size="small" text type="warning" @click="act(row,'stop')">停止</el-button>
-          </template>
-          <el-button size="small" text type="danger" @click="del(row)">删除</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+
+    <el-tabs v-model="tab">
+      <el-tab-pane name="active" :label="`进行中 (${jobs.length})`">
+        <el-table :data="jobs" empty-text="暂无进行中的下载" row-key="id">
+          <el-table-column prop="taskname" label="任务" min-width="120" show-overflow-tooltip />
+          <el-table-column prop="filename" label="文件" min-width="200" show-overflow-tooltip />
+          <el-table-column label="进度" min-width="200">
+            <template #default="{ row }">
+              <el-progress :percentage="pct(row)" :status="progressStatus(row.status)" :stroke-width="12" />
+              <span class="sub">{{ fmtSize(row.done) }} / {{ row.total ? fmtSize(row.total) : "未知" }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="速度" width="110">
+            <template #default="{ row }">
+              {{ row.status === "downloading" ? `${fmtSize(row.speed)}/s` : "-" }}
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="90">
+            <template #default="{ row }">
+              <el-tag
+                :type="row.status === 'failed' ? 'danger' : row.status === 'done' ? 'success' : 'info'"
+                size="small"
+              >
+                {{ statusText(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="dest_path" label="目标路径" min-width="220" show-overflow-tooltip />
+          <el-table-column label="操作" width="220">
+            <template #default="{ row }">
+              <template v-if="row.status === 'downloading' || row.status === 'queued' || row.status === 'paused'">
+                <el-button
+                  v-if="row.source === 'aria2' && row.status !== 'paused'"
+                  size="small"
+                  text
+                  @click="act(row, 'pause')"
+                  >暂停</el-button
+                >
+                <el-button
+                  v-if="row.source === 'aria2' && row.status === 'paused'"
+                  size="small"
+                  text
+                  @click="act(row, 'resume')"
+                  >继续</el-button
+                >
+                <el-button size="small" text type="warning" @click="act(row, 'stop')">停止</el-button>
+              </template>
+              <el-button size="small" text type="danger" @click="del(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
+      <el-tab-pane name="history" label="历史">
+        <div class="filters">
+          <el-select
+            v-model="query.status"
+            multiple
+            collapse-tags
+            placeholder="全部状态"
+            clearable
+            style="width: 200px"
+          >
+            <el-option v-for="o in statusOptions" :key="o.value" :label="o.label" :value="o.value" />
+          </el-select>
+          <el-select v-model="query.task_id" placeholder="全部任务" clearable filterable style="width: 200px">
+            <el-option v-for="t in tasks.sorted" :key="t.id" :label="t.taskname" :value="t.id" />
+          </el-select>
+          <el-input v-model="query.keyword" placeholder="文件名 / 路径" clearable style="width: 240px" />
+        </div>
+
+        <el-table v-loading="hLoading" :data="rows" empty-text="暂无下载记录" row-key="id">
+          <el-table-column prop="taskname" label="任务" min-width="120" show-overflow-tooltip />
+          <el-table-column prop="filename" label="文件" min-width="200" show-overflow-tooltip />
+          <el-table-column label="体积" width="130">
+            <template #default="{ row }">
+              {{ fmtSize(row.size_done) }} / {{ row.size_total ? fmtSize(row.size_total) : "未知" }}
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="90">
+            <template #default="{ row }">
+              <el-tag
+                :type="row.status === 'failed' ? 'danger' : row.status === 'done' ? 'success' : 'info'"
+                size="small"
+              >
+                {{ statusText(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="文件" width="90">
+            <template #default="{ row }">
+              <span :class="row.file_state === 'missing' ? 'lost' : ''">{{ stateText(row.file_state) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="完成时间" width="160">
+            <template #default="{ row }">{{ fmtTime(row.finished_at) }}</template>
+          </el-table-column>
+          <el-table-column prop="dest_path" label="目标路径" min-width="220" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span class="sub">{{ row.dest_path }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="110">
+            <template #default="{ row }">
+              <el-button size="small" text type="danger" @click="delRecord(row)">删记录</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <el-pagination
+          v-model:current-page="query.page"
+          v-model:page-size="query.page_size"
+          :total="total"
+          :page-sizes="[20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          style="margin-top: 12px; justify-content: flex-end"
+        />
+      </el-tab-pane>
+    </el-tabs>
   </div>
 </template>
 
 <style scoped>
-.err { color: var(--danger); font-size: 13px; margin-left: 12px; }
-.sub { font-size: 12px; color: var(--text-muted); }
+.err {
+  color: var(--danger);
+  font-size: 13px;
+  margin-left: 12px;
+}
+.sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.filters {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.lost {
+  color: var(--danger);
+  font-size: 13px;
+}
 </style>

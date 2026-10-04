@@ -249,3 +249,36 @@ export interface DownloadJob {
   started_at: number;
   updated_at: number;
 }
+
+export type FileState = "ok" | "missing" | "unknown";
+
+/** GET /api/downloads/history 的账本行（download_record 表）。 */
+export interface DownloadRecord {
+  id: number;
+  source: "builtin" | "aria2";
+  ref_id: string;
+  task_id: number | null;
+  taskname: string;
+  filename: string;
+  dest_path: string;
+  size_total: number;
+  size_done: number;
+  fid: string;
+  driver_key: string;
+  account_id: number | null;
+  status: "queued" | "downloading" | "done" | "failed" | "skipped" | "stopped";
+  error: string;
+  created_at: string;
+  finished_at: string | null;
+  /** 磁盘到位校验，由历史查询接口补出。 */
+  file_state?: FileState;
+}
+
+/** GET /api/downloads/history 的查询参数。 */
+export interface DownloadHistoryQuery {
+  page?: number;
+  page_size?: number;
+  status?: string;
+  task_id?: number | null;
+  keyword?: string;
+}

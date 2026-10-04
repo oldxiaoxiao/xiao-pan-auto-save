@@ -3,7 +3,9 @@ import type {
   AccountActionResult,
   AccountPayload,
   DirList,
+  DownloadHistoryQuery,
   DownloadJob,
+  DownloadRecord,
   DriverInfo,
   HealthResponse,
   LogEntry,
@@ -149,6 +151,16 @@ export const api = {
     request<{ ok: boolean }>(`/api/downloads/${id}/${action}?source=${source}`, { method: "POST" }),
   deleteDownload: (id: string, source: string) =>
     request<{ ok: boolean }>(`/api/downloads/${id}?source=${source}`, { method: "DELETE" }),
+  listDownloadHistory: (q: DownloadHistoryQuery) => {
+    const p = new URLSearchParams();
+    p.set("page", String(q.page ?? 1));
+    p.set("page_size", String(q.page_size ?? 50));
+    if (q.status) p.set("status", q.status);
+    if (q.task_id) p.set("task_id", String(q.task_id));
+    if (q.keyword) p.set("keyword", q.keyword);
+    return request<{ items: DownloadRecord[]; total: number }>(`/api/downloads/history?${p}`);
+  },
+  deleteDownloadHistory: (id: number) => request<{ ok: boolean }>(`/api/downloads/history/${id}`, { method: "DELETE" }),
 
   // 搜索
   suggestions: (q: string, d = false) =>
@@ -164,10 +176,11 @@ export const api = {
 
   // 对外 API Token
   listTokens: () => request<ApiTokenInfo[]>("/api/tokens"),
-  createToken: (name: string) => request<{ token: string; name: string }>("/api/tokens", {
-    method: "POST",
-    body: JSON.stringify({ name }),
-  }),
+  createToken: (name: string) =>
+    request<{ token: string; name: string }>("/api/tokens", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
   deleteToken: (token: string) =>
     request<{ ok: boolean }>("/api/tokens", { method: "DELETE", body: JSON.stringify({ token }) }),
 
