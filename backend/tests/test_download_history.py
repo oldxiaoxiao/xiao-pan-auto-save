@@ -256,8 +256,14 @@ def _aria2_cfg() -> dl.DownloadSettings:
     return dl.DownloadSettings(mode="aria2", aria2_host_port="http://127.0.0.1:6800")
 
 
-def _patch_aria2(monkeypatch, *, active: list[dict], struct):
-    """active：aria2_status 返回的进行中 job（用 id 标识 gid）；struct：tellDownloadResult 单条结果。"""
+def _patch_aria2(monkeypatch, *, active: list[dict], struct=None, structs: dict[str, dict | None] | None = None):
+    """active：aria2_status 返回的进行中 job（用 id 标识 gid）。
+
+    struct：所有被问 gid 共用的单条 tellDownloadResult（None 表示 gid 已被 aria2 丢弃）；
+    structs：多 gid 用例按 gid 分别指定结果，值为 None 同样表示被丢弃。
+    返回条目从代码实际发出的 multicall 参数里读出 gid、按请求顺序逐条构造：
+    若实现把 asked 与 result 的 zip 写反或逆序，错配会直接反映到断言上，而不是被固定单条返回掩盖。
+    """
     calls: list[tuple] = []
 
     async def fake_status(cfg):
@@ -265,9 +271,12 @@ def _patch_aria2(monkeypatch, *, active: list[dict], struct):
 
     async def fake_rpc(cfg, method, *params):
         calls.append((method, params))
-        if struct is None:
-            return {"result": [{"errorMessage": "gid not found"}]}
-        return {"result": [{"result": [struct]}]}
+        asked = [c["params"][0] for c in params[0]]  # multicall 每个子调用只带一个 gid
+        entries = []
+        for gid in asked:
+            s = struct if structs is None else structs[gid]  # KeyError 即代码问了预期外的 gid
+            entries.append({"errorMessage": f"{gid} not found"} if s is None else {"result": [s]})
+        return {"result": entries}
 
     monkeypatch.setattr(dl, "aria2_status", fake_status)
     monkeypatch.setattr(dl, "aria2_rpc", fake_rpc)
@@ -357,5 +366,53 @@ async def test_reconcile_skips_aria2_when_mode_is_builtin(tmp_path, monkeypatch)
     await hist.reconcile(dl.DownloadSettings(mode="builtin"))
     assert calls == []
     assert _status_of("g-off").status == "queued"  # 既没问 RPC 也没文件，先挂着
+
+
+async def test_reconcile_multicall_aligns_results_per_asked_gid(tmp_path, monkeypatch):
+    """一次问两个开放 gid：第一个已被 aria2 丢弃（errorMessage 条目）、第二个有 complete 结果。
+
+    返回按代码实际请求的 gid 顺序逐条构造；zip 操作数写反或 asked 逆序都会让两条互串结局
+    （被丢弃的错标 done、有结果的悬挂 queued），本用例即可抓住。
+    """
+    _seed_open("g-drop", dest=str(tmp_path / "drop.mkv"))  # 文件不在：只能落 24h 兜底
+    _seed_open("g-full", dest=str(tmp_path / "full.mkv"))
+    _patch_aria2(monkeypatch, active=[], structs={
+        "g-drop": None,
+        "g-full": {"status": "complete", "completedLength": "100", "totalLength": "100"},
+    })
+    await hist.reconcile(_aria2_cfg())
+    assert _status_of("g-drop").status == "queued"  # 各归各：走文件兜底，不足 24h 先挂着
+    r = _status_of("g-full")
+    assert r.status == "done" and r.size_done == 100 and r.finished_at is not None
+
+
+async def test_reconcile_aria2_error_field_accepts_both_spellings(tmp_path, monkeypatch):
+    """tellDownloadResult 结构体里错误字段两种拼写都要认：snake_case error_message（aria2 惯例）
+    与 camelCase errorMessage（与封装层一致）；两者皆无才落通用文案。"""
+    _seed_open("g-snake", dest=str(tmp_path / "s.mkv"))
+    _seed_open("g-camel", dest=str(tmp_path / "c.mkv"))
+    _seed_open("g-bare", dest=str(tmp_path / "b.mkv"))
+    _patch_aria2(monkeypatch, active=[], structs={
+        "g-snake": {"status": "error", "error_message": "直链过期", "completedLength": "10"},
+        "g-camel": {"status": "error", "errorMessage": "种子不足", "completedLength": "5"},
+        "g-bare": {"status": "error", "completedLength": "0"},
+    })
+    await hist.reconcile(_aria2_cfg())
+    for ref in ("g-snake", "g-camel", "g-bare"):
+        assert _status_of(ref).status == "failed"
+    assert _status_of("g-snake").error == "直链过期"
+    assert _status_of("g-camel").error == "种子不足"  # 不能退化成通用文案
+    assert _status_of("g-bare").error == "aria2 未成功"
+
+
+async def test_reconcile_file_fallback_records_real_size_when_total_zero(tmp_path, monkeypatch):
+    """size_total=0 时"非空即到位"，done 要写 stat 到的真实字节数，不能留 size_done=0。"""
+    dest = tmp_path / "nolength.bin"
+    dest.write_bytes(b"0" * 37)
+    _seed_open("g-nosize", dest=str(dest), size=0)
+    _patch_aria2(monkeypatch, active=[], struct=None)
+    await hist.reconcile(_aria2_cfg())
+    r = _status_of("g-nosize")
+    assert r.status == "done" and r.size_done == 37 and r.size_total == 37
 
 

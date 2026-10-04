@@ -152,14 +152,24 @@ def open_records() -> list[dict]:
         return [r.model_dump() for r in rows]
 
 
-def _size_matches(path: str, size_total: int) -> bool:
+def _file_check(path: str, size_total: int) -> tuple[str, bool, int]:
+    """兜底校验：一次 os.stat 同时给出「到位状态」与「大小是否匹配」，避免每行 stat 两次。
+
+    返回 (state, matches, size)：
+    - state 与 file_state 同语义（ok/missing/unknown；unknown 不当成丢失）；
+    - matches 仅在 state == "ok" 时有意义：size_total 为 0 时非空即到位，否则须精确相符；
+    - size 为实际字节数（stat 失败时 0），供 size_total 缺失时回填真实大小。
+    """
     try:
         st = os.stat(path)
+    except FileNotFoundError:
+        return "missing", False, 0
     except OSError:
-        return False
+        return "unknown", False, 0
     if not stat.S_ISREG(st.st_mode):
-        return False
-    return st.st_size == size_total if size_total else st.st_size > 0
+        return "unknown", False, 0
+    matches = st.st_size == size_total if size_total else st.st_size > 0
+    return "ok", matches, st.st_size
 
 
 async def reconcile(cfg) -> None:
@@ -225,18 +235,19 @@ async def reconcile(cfg) -> None:
                                size_total=int(struct.get("totalLength") or r["size_total"] or 0))
                         continue
                     if state in ("error", "removed"):
+                        # 结构体里错误字段两种拼写都读：snake（aria2 惯例）优先，camel 兜底
                         finish(ref, source=source, status="failed",
                                size_done=int(struct.get("completedLength") or 0),
-                               error=str(struct.get("error_message") or "aria2 未成功"))
+                               error=str(struct.get("error_message") or struct.get("errorMessage") or "aria2 未成功"))
                         continue
 
         if skip:
             continue
-        # 兜底：文件到位 = 完成（同步 IO 走线程池，不卡事件循环）
-        state = await asyncio.to_thread(file_state, r["dest_path"])
-        matches = await asyncio.to_thread(_size_matches, r["dest_path"], int(r["size_total"] or 0))
+        # 兜底：文件到位 = 完成（同步 IO 走线程池，一次 stat 出齐状态与大小，不卡事件循环）
+        state, matches, size = await asyncio.to_thread(_file_check, r["dest_path"], int(r["size_total"] or 0))
         if state == "ok" and matches:
-            finish(ref, source=source, status="done", size_done=r["size_total"], size_total=r["size_total"])
+            # size_total 为 0 时"非空即到位"，done 用 stat 到的真实字节数，不写 0
+            finish(ref, source=source, status="done", size_done=size, size_total=size)
             continue
         if now - r["created_at"] >= timedelta(hours=STALE_HOURS):
             finish(ref, source=source, status="failed",
