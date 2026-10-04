@@ -1,4 +1,4 @@
-"""下载进度快照接口 + 控制端点（stop/pause/resume/delete，按 source 分派 builtin/aria2）+ 历史账本查询。"""
+"""下载进度快照接口 + 控制端点（stop/pause/resume/delete，按 source 分派 builtin/aria2）+ 历史账本查询与单文件重下。"""
 
 from __future__ import annotations
 
@@ -49,6 +49,26 @@ async def history_delete(record_id: int) -> dict:
     if not download_history.delete_record(record_id):
         raise HTTPException(404, "记录不存在")
     return {"ok": True}
+
+
+@router.post("/downloads/history/{record_id}/retry")
+async def history_retry(record_id: int) -> dict:
+    """起后台任务重下：内置下载器一个 4K 文件可能跑几小时，绝不同步等待。
+
+    这里只做记录存在性校验；驱动/账号是否可用由 retry_record 在后台任务里判定并写日志。
+    """
+    from ..api.deps import get_setting
+    from ..core.logstream import hub
+    from ..services import download_history
+    from ..services.download_service import DownloadSettings, retry_record
+
+    rec = download_history.get_record(record_id)
+    if rec is None:
+        raise HTTPException(404, "记录不存在")
+    cfg = DownloadSettings.from_dict(get_setting("download"))
+    log = hub.make_logger("retry", task_id=rec.get("task_id"))
+    asyncio.create_task(retry_record(rec, cfg, log=log))
+    return {"ok": True, "message": "重下已开始，稍后刷新查看"}
 
 
 @router.post("/downloads/{job_id}/stop")

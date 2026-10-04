@@ -161,6 +161,8 @@ export const api = {
     return request<{ items: DownloadRecord[]; total: number }>(`/api/downloads/history?${p}`);
   },
   deleteDownloadHistory: (id: number) => request<{ ok: boolean }>(`/api/downloads/history/${id}`, { method: "DELETE" }),
+  retryDownloadHistory: (id: number) =>
+    request<{ ok: boolean; message: string }>(`/api/downloads/history/${id}/retry`, { method: "POST" }),
 
   // 搜索
   suggestions: (q: string, d = false) =>

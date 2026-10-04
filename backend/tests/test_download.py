@@ -17,8 +17,9 @@ class DlDriver(CloudDrive):
     capability = {"download"}
     UA = "FakeUA/9.9"
 
-    def __init__(self, children: dict[str, list[FsItem]] | None = None):
-        super().__init__()
+    def __init__(self, children: dict[str, list[FsItem]] | None = None, **kw):
+        # **kw 透传 CloudDrive 的 (cookie/proxy/index)：生产代码按该签名构造驱动（重下路径要用）
+        super().__init__(**kw)
         self.children = children or {}
         self.requested: list[list[str]] = []
 

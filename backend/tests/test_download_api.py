@@ -1,3 +1,6 @@
+import asyncio
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -129,3 +132,29 @@ def test_history_route_not_shadowed_by_job_id_routes():
         resp = c.delete("/api/downloads/history/999999")
         # 断言 detail 而非仅状态码：证明请求到达了 history 处理器的 404，而不是路由缺失
         assert resp.status_code == 404 and resp.json()["detail"] == "记录不存在"
+
+
+def test_retry_endpoint_returns_at_once(monkeypatch):
+    """端点必须立刻返回：内置下载器一个 4K 文件可能跑几小时，绝不同步等待。"""
+    from backend.services import download_history as hist
+
+    async def slow_retry(rec, cfg, *, log):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(dl, "retry_record", slow_retry)
+    rid = hist.start(
+        source="builtin", ref_id="api-retry", task_id=925, taskname="t", filename="f", dest_path="/d/f",
+        size_total=1, fid="F", driver_key="fake", account_id=None,
+    )
+    t0 = time.monotonic()
+    with TestClient(app) as c:
+        r = c.post(f"/api/downloads/history/{rid}/retry")
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert time.monotonic() - t0 < 2
+
+
+def test_retry_unknown_record_404():
+    with TestClient(app) as c:
+        resp = c.post("/api/downloads/history/987654/retry")
+    # 同样断言 detail：证明请求落在 history retry 处理器上，而不是路由缺失/被 job_id 抢先匹配
+    assert resp.status_code == 404 and resp.json()["detail"] == "记录不存在"

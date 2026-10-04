@@ -69,6 +69,8 @@ function stateText(s?: string): string {
 }
 
 async function loadHistory() {
+  // 后台标签页不轮询：不可见的表格没必要刷，后端挂了也不会每 5s 弹一次错误提示
+  if (document.hidden) return;
   hLoading.value = true;
   try {
     const r = await api.listDownloadHistory({
@@ -97,8 +99,25 @@ async function delRecord(row: DownloadRecord) {
   }
 }
 
+async function retry(row: DownloadRecord) {
+  try {
+    const r = await api.retryDownloadHistory(row.id);
+    ElMessage.success(r.message);
+    await loadHistory();
+  } catch (e) {
+    ElMessage.error((e as Error).message);
+  }
+}
+
+/** 历史轮询只在「历史 tab 在前」且「仍有未完成记录」时跑：切走即停，切回自动续上。 */
+function syncHistoryPoll() {
+  window.clearInterval(hTimer);
+  if (tab.value === "history" && hasOpen.value) hTimer = window.setInterval(loadHistory, 5000);
+}
+
 watch(tab, (v) => {
   if (v === "history") loadHistory();
+  syncHistoryPoll();
 });
 watch(
   () => [query.status.join(","), query.task_id, query.page, query.page_size],
@@ -117,10 +136,7 @@ watch(
     }, 400);
   },
 );
-watch(hasOpen, (open) => {
-  window.clearInterval(hTimer);
-  if (open && tab.value === "history") hTimer = window.setInterval(loadHistory, 5000);
-});
+watch(hasOpen, syncHistoryPoll);
 
 function fmtSize(n: number): string {
   if (n <= 0) return "0 B";
@@ -290,8 +306,9 @@ function onVisible() {
               <span class="sub">{{ row.dest_path }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="110">
+          <el-table-column label="操作" width="170">
             <template #default="{ row }">
+              <el-button size="small" text type="primary" @click="retry(row)">重下</el-button>
               <el-button size="small" text type="danger" @click="delRecord(row)">删记录</el-button>
             </template>
           </el-table-column>

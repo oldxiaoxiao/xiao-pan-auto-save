@@ -18,6 +18,7 @@ from pathlib import Path
 
 import httpx
 
+from ..config import PROXY
 from ..core.download_registry import registry
 from ..core.engine import SavedFile
 from ..core.logstream import LogFn
@@ -137,6 +138,27 @@ async def _walk_dir(driver: CloudDrive, fid: str, local_dir: Path) -> list[Downl
     return out
 
 
+async def download_items(
+    driver: CloudDrive, items: list[DownloadItem], cfg: DownloadSettings, *, log: LogFn,
+    task_id: int | None = None, taskname: str = "", account_id: int | None = None, driver_key: str = "",
+) -> list[str]:
+    """执行已解析的下载清单：分派内置/aria2、写账本、成功后刷新 Emby。"""
+    if cfg.mode == "aria2" and not await aria2_reachable(cfg):
+        log("warn", "⚠️ aria2 不可达，自动改用内置下载器（保证下载不中断）")
+        cfg = _as_builtin(cfg)
+    if cfg.mode == "aria2":
+        lines = await _aria2_submit(
+            driver, items, cfg, log, task_id=task_id, taskname=taskname, account_id=account_id, driver_key=driver_key
+        )
+    else:
+        lines = await _builtin_download(
+            driver, items, cfg, log, task_id=task_id, taskname=taskname, account_id=account_id, driver_key=driver_key
+        )
+    if any(line.startswith("✅") for line in lines):
+        await _emby_refresh(cfg, log)
+    return lines
+
+
 async def download_task_files(
     driver: CloudDrive,
     saved: list[SavedFile],
@@ -148,32 +170,18 @@ async def download_task_files(
     task_id: int | None = None,
     taskname: str = "",
     account_id: int | None = None,
-    driver_key: str = "",
 ) -> list[str]:
-    """执行下载，返回摘要行（供通知聚合）。单文件失败不中断整体。"""
+    """转存成功后的文件落本地：解析清单 → 执行下载。返回摘要行（供通知聚合）。"""
     log = log or (lambda level, msg: None)
     if not saved:
         return []
-    driver_key = driver_key or driver.key
     items = await collect_files(driver, saved, cfg, savepath_override, download_subdir)
     if not items:
         return []
-    if cfg.mode == "aria2" and not await aria2_reachable(cfg):
-        log("warn", "⚠️ aria2 不可达，自动改用内置下载器（保证下载不中断）")
-        cfg = _as_builtin(cfg)
-    if cfg.mode == "aria2":
-        lines = await _aria2_submit(
-            driver, items, cfg, log, task_id=task_id, taskname=taskname, account_id=account_id,
-            driver_key=driver_key,
-        )
-    else:
-        lines = await _builtin_download(
-            driver, items, cfg, log, task_id=task_id, taskname=taskname, account_id=account_id,
-            driver_key=driver_key,
-        )
-    if any(line.startswith("✅") for line in lines):
-        await _emby_refresh(cfg, log)
-    return lines
+    return await download_items(
+        driver, items, cfg, log=log, task_id=task_id, taskname=taskname,
+        account_id=account_id, driver_key=driver.key,
+    )
 
 
 def _as_builtin(cfg: DownloadSettings) -> DownloadSettings:
@@ -409,3 +417,53 @@ async def _emby_refresh(cfg: DownloadSettings, log: LogFn) -> None:
         log("info", f"Emby 媒体库刷新: HTTP {resp.status_code}")
     except Exception as exc:  # noqa: BLE001
         log("warn", f"Emby 刷新失败: {exc}")
+
+
+def _account_for(rec: dict):
+    """重下用账号：优先记录里的 account_id，失效则按 driver_key 选可用主账号（语义同 routes_files._primary_account）。"""
+    from sqlmodel import select
+
+    from ..database import session_scope
+    from ..models import Account
+
+    with session_scope() as session:
+        acc = session.get(Account, int(rec["account_id"])) if rec.get("account_id") else None
+        if acc is not None and acc.enabled:
+            return acc
+        accs = session.exec(
+            select(Account)
+            .where(Account.enabled, Account.driver_key == rec["driver_key"])
+            .order_by(Account.sort_order, Account.id)
+        ).all()
+        return next((a for a in accs if a.can_save), accs[0] if accs else None)
+
+
+async def retry_record(rec: dict, cfg: DownloadSettings, *, log: LogFn) -> None:
+    """按账本记录重下单个文件：目标路径原样保留，直链重新获取。
+
+    不走 resolve_local：下载根目录/覆盖路径可能在首次下载后改过，重下必须打回原 dest_path。
+    账本仍由 download_items 内的既有写入点落一条新行（一次尝试一行），不改写旧记录。
+    """
+    from ..drivers import get_driver_class
+
+    cls = get_driver_class(rec.get("driver_key") or "")
+    if cls is None or not cls.supported:
+        log("error", f"《{rec.get('taskname') or ''}》重下失败：{rec.get('driver_key')} 驱动不可用")
+        return
+    acc = _account_for(rec)
+    if acc is None:
+        log("error", f"《{rec.get('taskname') or ''}》重下失败：没有可用的 {rec.get('driver_key')} 账号")
+        return
+    driver = cls(cookie=acc.cookie, proxy=PROXY, index=acc.sort_order)
+    if not driver.has("download"):
+        log("error", f"《{rec.get('taskname') or ''}》重下失败：{driver.name} 不支持下载")
+        return
+    item = DownloadItem(
+        fid=rec["fid"], name=rec["filename"], size=int(rec["size_total"] or 0), local_path=Path(rec["dest_path"])
+    )
+    lines = await download_items(
+        driver, [item], cfg, log=log, task_id=rec.get("task_id"), taskname=rec.get("taskname") or "",
+        account_id=acc.id, driver_key=rec["driver_key"],
+    )
+    ok = any(x.startswith("✅") for x in lines)
+    log("info" if ok else "warn", f"🔁 重下 {rec['filename']}：{lines or '无结果'}")

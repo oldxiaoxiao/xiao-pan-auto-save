@@ -33,7 +33,7 @@ async def test_builtin_flow_writes_one_terminal_record(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "_emby_refresh", lambda c, log: _noop())
 
     await dl.download_task_files(
-        DlDriver(), [saved("1")], cfg(tmp_path), task_id=701, taskname="追更", account_id=3, driver_key="fake"
+        DlDriver(), [saved("1")], cfg(tmp_path), task_id=701, taskname="追更", account_id=3
     )
 
     rows = _rows(701)
@@ -96,7 +96,7 @@ async def test_aria2_submit_records_queued_with_gid(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
     c = cfg(tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800")
     await dl.download_task_files(
-        DlDriver(), [saved("1")], c, task_id=704, taskname="A", account_id=5, driver_key="fake"
+        DlDriver(), [saved("1")], c, task_id=704, taskname="A", account_id=5
     )
 
     r = _rows(704)[-1]
@@ -414,5 +414,83 @@ async def test_reconcile_file_fallback_records_real_size_when_total_zero(tmp_pat
     await hist.reconcile(_aria2_cfg())
     r = _status_of("g-nosize")
     assert r.status == "done" and r.size_done == 37 and r.size_total == 37
+
+
+# ---- retry_record：单文件重下 ----
+
+
+def _register_fake_driver(monkeypatch) -> None:
+    """把测试驱动 DlDriver 临时挂进注册表，让 retry_record 能按 driver_key="fake" 解析到它。
+
+    注册表只扫描 backend/drivers/ 下的模块，测试文件里的假驱动不在其中；用 setitem 而非
+    直接写 DRIVERS，用例结束自动还原，不会污染 test_router 的 supported 集合断言。
+    """
+    from backend.drivers import DRIVERS
+
+    monkeypatch.setitem(DRIVERS, "fake", DlDriver)
+
+
+class _Acc:
+    id, cookie, sort_order, driver_key = 1, "ck", 0, "fake"
+
+
+async def test_retry_record_keeps_original_dest_path(tmp_path, monkeypatch):
+    """重下必须打回原目标路径，不能被 resolve_local 按网盘目录重算。"""
+    dest = str(tmp_path / "外部目录" / "已存在.mkv")
+    rid = hist.start(
+        source="builtin", ref_id="retry-src", task_id=921, taskname="T", filename="已存在.mkv",
+        dest_path=dest, size_total=10, fid="FID1", driver_key="fake", account_id=None,
+    )
+    hist.finish("retry-src", source="builtin", status="failed", error="HTTP 500")
+    seen = []
+
+    async def fake_items(driver, items, cfg, *, log, task_id=None, taskname="", account_id=None, driver_key=""):
+        seen.append((items[0].fid, str(items[0].local_path), taskname, account_id))
+        return [f"✅ {items[0].name}"]
+
+    _register_fake_driver(monkeypatch)
+    monkeypatch.setattr(dl, "download_items", fake_items)
+    monkeypatch.setattr(dl, "_account_for", lambda rec: _Acc())
+    await dl.retry_record(hist.get_record(rid), dl.DownloadSettings(dir=str(tmp_path)), log=lambda *a, **k: None)
+    assert seen == [("FID1", dest, "T", 1)]
+
+
+async def test_retry_without_account_logs_and_returns(tmp_path, monkeypatch):
+    rid = hist.start(
+        source="builtin", ref_id="retry-noacc", task_id=923, taskname="t", filename="a", dest_path="/d/a",
+        size_total=1, fid="F", driver_key="fake", account_id=None,
+    )
+    calls = []
+
+    async def fake_items(*a, **k):
+        calls.append(1)
+        return []
+
+    _register_fake_driver(monkeypatch)
+    monkeypatch.setattr(dl, "download_items", fake_items)
+    monkeypatch.setattr(dl, "_account_for", lambda rec: None)
+    msgs = []
+    await dl.retry_record(hist.get_record(rid), dl.DownloadSettings(), log=lambda lvl, m: msgs.append(m))
+    assert calls == [] and any("账号" in m for m in msgs)
+
+
+async def test_retry_with_unsupported_driver_logs_and_returns(tmp_path, monkeypatch):
+    from backend.drivers import get_driver_class
+
+    rid = hist.start(
+        source="builtin", ref_id="retry-nodrv", task_id=924, taskname="t", filename="a", dest_path="/d/a",
+        size_total=1, fid="F", driver_key="no_such_drive", account_id=None,
+    )
+    calls = []
+
+    async def fake_items(*a, **k):
+        calls.append(1)
+        return []
+
+    monkeypatch.setattr(dl, "download_items", fake_items)
+    assert get_driver_class("no_such_drive") is None
+    msgs = []
+    await dl.retry_record(hist.get_record(rid), dl.DownloadSettings(), log=lambda lvl, m: msgs.append(m))
+    assert calls == [] and any("驱动" in m for m in msgs)
 
 
