@@ -233,7 +233,7 @@ async def test_aria2_reachable_uses_aria2(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
     submitted = []
 
-    async def fake_submit(driver_, items, cfg_, log):
+    async def fake_submit(driver_, items, cfg_, log, **identity_kw):
         submitted.append(len(items))
         return ["✅ aria2 已投递 01.mp4"]
 

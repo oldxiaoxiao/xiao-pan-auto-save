@@ -22,6 +22,7 @@ from ..core.download_registry import registry
 from ..core.engine import SavedFile
 from ..core.logstream import LogFn
 from ..drivers.base import CloudDrive, DriveError
+from . import download_history as history
 
 DEFAULT_DOWNLOAD_DIR = str(Path(__file__).resolve().parent.parent.parent / "data" / "downloads")
 
@@ -68,6 +69,31 @@ _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 def safe_name(name: str) -> str:
     cleaned = _UNSAFE.sub("_", (name or "").strip()).lstrip(".")
     return cleaned[:200] or "_"
+
+
+def _history_start(log, *, source: str, ref_id: str, item: DownloadItem, size: int, task_id, taskname,
+                   account_id, driver_key: str) -> None:
+    try:
+        history.start(
+            source=source, ref_id=ref_id, task_id=task_id, taskname=taskname, filename=item.name,
+            dest_path=str(item.local_path), size_total=size, fid=item.fid,
+            driver_key=driver_key, account_id=account_id,
+        )
+    except Exception as exc:  # noqa: BLE001 账本是旁路观测，绝不中断下载
+        log("warn", f"下载账本写入失败（不影响下载）：{exc}")
+
+
+def _history_finish(log, *, source: str, ref_id: str, ok: bool, fallback_name: str) -> None:
+    try:
+        job = registry.get(ref_id)
+        # job 可能为 None（终态被内存注册表淘汰），此时用下载结果兜底，账本不丢终态。
+        status = job.status if job and job.status in history.TERMINAL else ("done" if ok else "failed")
+        done = job.done if job else 0
+        total = job.total if job else 0
+        error = job.error if job else ("" if ok else fallback_name)
+        history.finish(ref_id, source=source, status=status, size_done=done, size_total=total, error=error)
+    except Exception as exc:  # noqa: BLE001
+        log("warn", f"下载账本终态写入失败（不影响下载）：{exc}")
 
 
 def resolve_local(dest_path: str, cfg: DownloadSettings, override: str) -> Path:
@@ -121,11 +147,14 @@ async def download_task_files(
     log: LogFn | None = None,
     task_id: int | None = None,
     taskname: str = "",
+    account_id: int | None = None,
+    driver_key: str = "",
 ) -> list[str]:
     """执行下载，返回摘要行（供通知聚合）。单文件失败不中断整体。"""
     log = log or (lambda level, msg: None)
     if not saved:
         return []
+    driver_key = driver_key or driver.key
     items = await collect_files(driver, saved, cfg, savepath_override, download_subdir)
     if not items:
         return []
@@ -133,9 +162,15 @@ async def download_task_files(
         log("warn", "⚠️ aria2 不可达，自动改用内置下载器（保证下载不中断）")
         cfg = _as_builtin(cfg)
     if cfg.mode == "aria2":
-        lines = await _aria2_submit(driver, items, cfg, log)
+        lines = await _aria2_submit(
+            driver, items, cfg, log, task_id=task_id, taskname=taskname, account_id=account_id,
+            driver_key=driver_key,
+        )
     else:
-        lines = await _builtin_download(driver, items, cfg, log, task_id=task_id, taskname=taskname)
+        lines = await _builtin_download(
+            driver, items, cfg, log, task_id=task_id, taskname=taskname, account_id=account_id,
+            driver_key=driver_key,
+        )
     if any(line.startswith("✅") for line in lines):
         await _emby_refresh(cfg, log)
     return lines
@@ -169,7 +204,8 @@ async def _resolve_links(driver: CloudDrive, items: list[DownloadItem]) -> tuple
 
 
 async def _builtin_download(
-    driver: CloudDrive, items: list[DownloadItem], cfg: DownloadSettings, log: LogFn, *, task_id=None, taskname=""
+    driver: CloudDrive, items: list[DownloadItem], cfg: DownloadSettings, log: LogFn, *, task_id=None, taskname="",
+    account_id=None, driver_key=""
 ) -> list[str]:
     by_fid, cookie_str = await _resolve_links(driver, items)
     ua = getattr(driver, "UA", "Mozilla/5.0")
@@ -179,16 +215,20 @@ async def _builtin_download(
         row = by_fid.get(item.fid)
         if not row:
             return f"❌ 取直链失败: {item.name}"
+        size = int(row.get("size") or item.size or 0)
         job_id = registry.create(
             task_id=task_id, taskname=taskname, filename=item.name,
-            dest_path=str(item.local_path), total=int(row.get("size") or item.size or 0),
+            dest_path=str(item.local_path), total=size,
         )
+        _history_start(log, source="builtin", ref_id=job_id, item=item, size=size, task_id=task_id,
+                       taskname=taskname, account_id=account_id, driver_key=driver_key)
         async with sem:
             try:
                 ok, msg = await _fetch_one(row, item, cookie_str, ua, job_id=job_id)
             except Exception as exc:  # noqa: BLE001
                 registry.update(job_id, status="failed", error=str(exc))
                 ok, msg = False, f"{item.name}: {exc}"
+        _history_finish(log, source="builtin", ref_id=job_id, ok=ok, fallback_name=msg)
         log("info" if ok else "warn", f"📥 {msg}")
         return f"{'✅' if ok else '❌'} {msg}"
 
@@ -308,7 +348,8 @@ async def aria2_status(cfg: DownloadSettings) -> list[dict]:
 
 
 async def _aria2_submit(
-    driver: CloudDrive, items: list[DownloadItem], cfg: DownloadSettings, log: LogFn
+    driver: CloudDrive, items: list[DownloadItem], cfg: DownloadSettings, log: LogFn, *,
+    task_id=None, taskname="", account_id=None, driver_key=""
 ) -> list[str]:
     if not cfg.aria2_host_port:
         return ["❌ aria2 模式未配置 RPC 地址"]
@@ -344,8 +385,12 @@ async def _aria2_submit(
             except Exception as exc:  # noqa: BLE001
                 lines.append(f"❌ aria2 连接失败: {exc}")
                 break
-            if result.get("result"):
+            gid = result.get("result")
+            if gid:
                 log("info", f"📥 aria2 已投递 {item.name}")
+                _history_start(log, source="aria2", ref_id=str(gid), item=item,
+                               size=int(row.get("size") or item.size or 0), task_id=task_id,
+                               taskname=taskname, account_id=account_id, driver_key=driver_key)
                 lines.append(f"✅ aria2 已投递 {item.name}")
             else:
                 lines.append(f"❌ aria2 {item.name}: {result.get('error')}")

@@ -175,7 +175,7 @@ async def _run_tasks_inner(
             tlog("info", f"《{task.taskname}》新增 {len(result.files)} 项")
             if getattr(task, "auto_download", False):
                 # 下载在锁外：本地/aria2 可与其它任务的转存并行，不占用转存串行段
-                await _download_for_task(driver, task, result, settings, notify_lines, tlog)
+                await _download_for_task(driver, task, result, settings, notify_lines, tlog, account_id=account.id)
         elif result.status == "no_changes":
             tlog("info", f"《{task.taskname}》没有新的转存")
         else:
@@ -187,7 +187,7 @@ async def _run_tasks_inner(
         await _push("小盘自动转存运行结果", "\n".join(notify_lines), push_config, settings, log)
 
 
-async def _download_for_task(driver, task, result, settings, notify_lines, tlog) -> None:
+async def _download_for_task(driver, task, result, settings, notify_lines, tlog, *, account_id=None) -> None:
     from .download_service import DownloadSettings, download_task_files
 
     if not driver.has("download"):
@@ -204,6 +204,7 @@ async def _download_for_task(driver, task, result, settings, notify_lines, tlog)
             log=tlog,
             task_id=task.id,
             taskname=task.taskname,
+            account_id=account_id,
         )
     except Exception as exc:  # noqa: BLE001 下载失败不影响转存结果
         tlog("error", f"《{task.taskname}》下载异常：{exc}")
