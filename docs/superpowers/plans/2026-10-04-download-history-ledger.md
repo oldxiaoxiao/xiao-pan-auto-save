@@ -16,7 +16,7 @@
 - **不新增任何运行时依赖**（账本用已有 sqlmodel，清理调度用已有 apscheduler）。
 - 用户可见文案、日志、注释一律中文（沿用现有风格，如"⚠️ aria2 不可达，自动改用内置下载器"）。
 - **转存段全局锁语义不动**：下载仍在 `_run_lock` 之外执行（`task_service.py:161-178`），重下同样只走下载段、不触发转存。
-- 测试命令：`python3 -m pytest backend/tests -q`（`testpaths = ["backend/tests"]`，`asyncio_mode = "auto"`，无需 `@pytest.mark.asyncio`）。
+- 测试命令：**`.venv/bin/python -m pytest backend/tests -q`**（仓库根目录有 `.venv`，Python 3.12；系统 `python3` 是 3.9 且无 pytest，不要用）。静态检查：`.venv/bin/python -m ruff check backend`。`testpaths = ["backend/tests"]`，`asyncio_mode = "auto"`，无需 `@pytest.mark.asyncio`。
 - `backend/tests/conftest.py` 已把 `DATA_DIR` 指向临时目录，**任何测试都不得读写真实 `data/xiao_pan.db`**（历史事故：修复前的测试跑法毁掉过真实任务）。
 - 前端类型检查：`cd frontend && npm run typecheck`；构建：`npm run build`。
 - 每个 task 一次提交，中文 conventional commit（`feat(download): ...` / `fix(...)`）；**不 push**，由用户手动推。
@@ -593,7 +593,7 @@ def test_list_records_filters_and_pages():
     r2 = hist.list_records(task_id=801, page=2, page_size=2)
     assert r2["total"] == 3 and len(r2["items"]) == 1
     assert hist.list_records(status="failed", task_id=802)["total"] == 2
-    assert hist.list_records(keyword="英雄")["total"] == 3
+    assert hist.list_records(task_id=801, keyword="英雄")["total"] == 3
     assert hist.list_records(keyword="绝无此名")["total"] == 0
     assert all(i["status"] in ("failed", "queued") for i in hist.list_records(status="failed,queued")["items"])
 
