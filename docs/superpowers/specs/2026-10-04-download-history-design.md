@@ -75,7 +75,8 @@ start(*, source, ref_id, task_id, taskname, filename, dest_path, size_total, fid
     # 落一条 status=queued
 finish(ref_id, *, source, status, size_done=None, size_total=None, error="") -> None
     # 按 ref_id 定位，更新为终态并写 finished_at
-list_records(*, page, page_size, status, task_id, keyword) -> dict   # 内含 reconcile + 当前页 stat
+list_records(*, page, page_size, status, task_id, keyword) -> dict
+    # 纯分页查询；reconcile 与当前页 stat 由历史查询端点（路由层）在调用前后编排，见 4.3/4.4
 reconcile() -> None                                                  # 收口所有非终态记录
 prune(mode: str) -> int                                              # "auto" | "all" | "failed"
 ```

@@ -325,7 +325,8 @@ async def aria2_status(cfg: DownloadSettings) -> list[dict]:
     out: list[dict] = []
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            for method, extra in (("aria2.tellActive", []), ("aria2.tellWaiting", [0, 20])):
+                # tellWaiting 窗口取 200：排队深过窗口的 gid 对 reconcile 不可见，会被 24h 规则误判失败——盲区宁大勿漏
+            for method, extra in (("aria2.tellActive", []), ("aria2.tellWaiting", [0, 200])):
                 params = token + extra + [keys]
                 resp = await client.post(
                     url, json={"jsonrpc": "2.0", "id": "st", "method": method, "params": params}
