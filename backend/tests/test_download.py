@@ -377,7 +377,7 @@ async def test_fetch_one_cancellation_removes_part(tmp_path, monkeypatch):
     ok, msg = await dl._fetch_one({"download_url": "http://x", "size": 999}, item, "", "UA", job_id=jid)
     assert ok is False and "已停止" in msg
     assert not target.exists() and not list(tmp_path.glob("*.part"))
-    assert next(j for j in registry.snapshot() if j["id"] == jid)["status"] == "stopped"
+    assert registry.get(jid).status == "stopped"  # 终态改由 registry.get 观察，snapshot 只含进行中
 
 
 @pytest.mark.asyncio
@@ -404,8 +404,8 @@ async def test_fetch_one_reports_progress_and_done(tmp_path):
     jid = registry.create(task_id=None, taskname="T", filename="01.mp4", dest_path=str(target), total=10)
     ok, msg = await dl._fetch_one({"download_url": "http://dl/1", "size": 10}, item, "C=1", "UA", job_id=jid)
     monkeypatch.undo()
-    job = next(j for j in registry.snapshot() if j["id"] == jid)
-    assert ok and job["status"] == "done" and job["done"] == 10
+    job = registry.get(jid)
+    assert ok and job.status == "done" and job.done == 10
 
 
 @pytest.mark.asyncio
@@ -419,7 +419,7 @@ async def test_fetch_one_reports_skipped_and_failed(tmp_path):
     jid = registry.create(task_id=None, taskname="T", filename="s.mp4", dest_path=str(target), total=10)
     ok, msg = await dl._fetch_one({"download_url": "http://dl", "size": 10}, item, "", "UA", job_id=jid)
     assert ok and "跳过" in msg
-    assert next(j for j in registry.snapshot() if j["id"] == jid)["status"] == "skipped"
+    assert registry.get(jid).status == "skipped"
 
     # HTTP 非 200 → failed
     class BadResp:
@@ -438,8 +438,8 @@ async def test_fetch_one_reports_skipped_and_failed(tmp_path):
     jid2 = registry.create(task_id=None, taskname="T", filename="b.mp4", dest_path=str(item2.local_path), total=5)
     ok2, _ = await dl._fetch_one({"download_url": "http://dl", "size": 5}, item2, "", "UA", job_id=jid2)
     mp.undo()
-    job2 = next(j for j in registry.snapshot() if j["id"] == jid2)
-    assert not ok2 and job2["status"] == "failed" and "403" in job2["error"]
+    job2 = registry.get(jid2)
+    assert not ok2 and job2.status == "failed" and "403" in job2.error
 
 
 @pytest.mark.asyncio

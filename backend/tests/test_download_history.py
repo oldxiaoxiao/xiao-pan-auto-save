@@ -138,3 +138,72 @@ async def _noop():
 
 async def _ret(v):
     return v
+
+
+def _seed(n: int, *, status: str = "done", task_id: int, filename: str = "a.mp4", dest: str = "/d/a.mp4") -> None:
+    ref_base = f"{task_id}-{status}"
+    for i in range(n):
+        ref = f"{ref_base}-{i}"
+        hist.start(
+            source="builtin", ref_id=ref, task_id=task_id, taskname="T", filename=filename,
+            dest_path=dest, size_total=10, fid=f"F{i}", driver_key="fake", account_id=None,
+        )
+        if status != "queued":
+            hist.finish(ref, source="builtin", status=status, size_done=10)
+
+
+def test_list_records_filters_and_pages():
+    _seed(3, status="done", task_id=801, filename="英雄.mp4")
+    _seed(2, status="failed", task_id=802, filename="反派.mkv")
+
+    r = hist.list_records(task_id=801, page=1, page_size=2)
+    assert r["total"] == 3 and len(r["items"]) == 2
+    r2 = hist.list_records(task_id=801, page=2, page_size=2)
+    assert r2["total"] == 3 and len(r2["items"]) == 1
+    assert hist.list_records(status="failed", task_id=802)["total"] == 2
+    assert hist.list_records(keyword="英雄")["total"] == 3
+    assert hist.list_records(keyword="绝无此名")["total"] == 0
+    assert all(i["status"] in ("failed", "queued") for i in hist.list_records(status="failed,queued")["items"])
+
+
+def test_file_state_ok_missing_and_directory(tmp_path):
+    good = tmp_path / "in.mp4"
+    good.write_bytes(b"x")
+    assert hist.file_state(str(good)) == "ok"
+    assert hist.file_state(str(tmp_path / "gone.mp4")) == "missing"
+    d = tmp_path / "some_dir"
+    d.mkdir()
+    assert hist.file_state(str(d)) == "unknown"  # 目录不是常规文件
+
+
+def test_file_state_unknown_on_permission_error(monkeypatch):
+    import types
+
+    def boom(path):
+        raise PermissionError("挂载抖动")
+
+    # 只替换模块命名空间里的 os（file_state 只用到 os.stat），不碰全局 os
+    monkeypatch.setattr(hist, "os", types.SimpleNamespace(stat=boom))
+    assert hist.file_state("/anywhere") == "unknown"
+
+
+def test_get_record_roundtrip():
+    _seed(1, status="failed", task_id=803, filename="z.mp4")
+    rec = hist.get_record(_id_of_ref("803-failed-0"))
+    assert rec["task_id"] == 803 and rec["status"] == "failed" and rec["fid"].startswith("F")
+    assert hist.get_record(0) is None
+
+
+def _id_of_ref(ref: str) -> int:
+    with session_scope() as s:
+        return int(s.exec(select(DownloadRecord).where(DownloadRecord.ref_id == ref)).first().id)
+
+
+def test_delete_record_true_and_row_gone():
+    _seed(1, status="done", task_id=804)
+    rid = _id_of_ref("804-done-0")
+    assert hist.delete_record(rid) is True
+    assert hist.get_record(rid) is None
+    assert hist.delete_record(rid) is False  # 再删一次不存在
+
+

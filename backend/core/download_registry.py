@@ -1,4 +1,4 @@
-"""下载进度内存注册表：内置下载器写盘时更新，前端轮询快照。进程重启即清空。"""
+"""下载进度内存注册表：内置下载器写盘时更新，前端轮询快照；终态历史见 `services/download_history`。进程重启即清空。"""
 
 from __future__ import annotations
 
@@ -103,8 +103,8 @@ class DownloadRegistry:
                 _controls.pop(job_id, None)  # 终态清理取消 Event，避免残留
 
     def snapshot(self) -> list[dict]:
-        active = sorted(self._active.values(), key=lambda j: j.started_at)
-        return [{**asdict(j), "source": "builtin"} for j in active + list(self._done)]
+        """只返回进行中；终态记录由下载账本负责展示。"""
+        return [{**asdict(j), "source": "builtin"} for j in sorted(self._active.values(), key=lambda j: j.started_at)]
 
 
 registry = DownloadRegistry()

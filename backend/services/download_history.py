@@ -6,9 +6,12 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from datetime import datetime
 
-from sqlmodel import select
+from sqlalchemy import func, or_
+from sqlmodel import col, select
 
 from ..database import session_scope
 from ..models import DownloadRecord
@@ -74,3 +77,67 @@ def finish(
         row.error = error or ""
         row.finished_at = datetime.now()
         session.add(row)
+
+
+def file_state(path: str) -> str:
+    """文件到位校验：ok=常规文件在；missing=确实不存在；unknown=读不到（权限/挂载异常），不当成丢失。"""
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unknown"
+    return "ok" if stat.S_ISREG(st.st_mode) else "unknown"
+
+
+def _conditions(*, status: str, task_id: int | None, keyword: str) -> list:
+    conds = []
+    wanted = [s for s in (status or "").split(",") if s]
+    if wanted:
+        conds.append(col(DownloadRecord.status).in_(wanted))
+    if task_id:
+        conds.append(col(DownloadRecord.task_id) == int(task_id))
+    if keyword:
+        like = f"%{keyword}%"
+        conds.append(or_(col(DownloadRecord.filename).like(like), col(DownloadRecord.dest_path).like(like)))
+    return conds
+
+
+def list_records(*, page: int = 1, page_size: int = 50, status: str = "", task_id: int | None = None,
+                 keyword: str = "") -> dict:
+    """按创建时间倒序分页查账本。file_state 由调用方（路由层）用线程池补，避免阻塞事件循环。"""
+    page = max(1, int(page))
+    page_size = min(200, max(1, int(page_size)))
+    conds = _conditions(status=status, task_id=task_id, keyword=keyword)
+    with session_scope() as session:
+        total = session.exec(select(func.count()).select_from(DownloadRecord).where(*conds)).one()
+        rows = session.exec(
+            select(DownloadRecord)
+            .where(*conds)
+            .order_by(col(DownloadRecord.created_at).desc(), col(DownloadRecord.id).desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
+        items = [r.model_dump() for r in rows]
+    return {"items": items, "total": int(total)}
+
+
+def get_record(record_id: int) -> dict | None:
+    with session_scope() as session:
+        row = session.get(DownloadRecord, int(record_id))
+        return row.model_dump() if row else None
+
+
+def delete_record(record_id: int) -> bool:
+    """删账本记录，不动磁盘文件。"""
+    with session_scope() as session:
+        row = session.get(DownloadRecord, int(record_id))
+        if row is None:
+            return False
+        session.delete(row)
+    return True
+
+
+async def reconcile(cfg) -> None:
+    """Task 4 实现非终态对账；此处先保持无副作用。"""
+    return None

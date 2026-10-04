@@ -15,9 +15,9 @@ def test_create_update_snapshot_lifecycle():
     r.update(a, done=100, status="done")
     snap = r.snapshot()
     ids = [j["id"] for j in snap]
-    # 进行中(b)排在历史(a)之前
-    assert ids.index(b) < ids.index(a)
-    assert next(j for j in snap if j["id"] == a)["status"] == "done"
+    # 快照只含进行中：终态记录交给下载账本
+    assert ids == [b]
+    assert r.get(a).status == "done"
 
 
 def test_history_is_bounded():
@@ -25,8 +25,10 @@ def test_history_is_bounded():
     ids = [r.create(task_id=None, taskname="T", filename=f"{i}", dest_path="/d", total=1) for i in range(5)]
     for i in ids:
         r.update(i, status="done")
-    done_ids = [j["id"] for j in r.snapshot()]
-    assert len(done_ids) == 2 and ids[-1] in done_ids and ids[0] not in done_ids
+    assert r.snapshot() == []  # 全部终态，进行中为空
+    # _done 用 appendleft 维护，迭代顺序为新→旧
+    assert [j.id for j in r._done] == [ids[-1], ids[-2]]  # 只保留最近 2 条
+    assert r.get(ids[-1]).status == "done" and r.get(ids[0]) is None
 
 
 def test_update_unknown_id_is_noop():

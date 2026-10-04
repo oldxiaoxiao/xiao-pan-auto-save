@@ -1,6 +1,8 @@
-"""下载进度快照接口 + 控制端点（stop/pause/resume/delete，按 source 分派 builtin/aria2）。"""
+"""下载进度快照接口 + 控制端点（stop/pause/resume/delete，按 source 分派 builtin/aria2）+ 历史账本查询。"""
 
 from __future__ import annotations
+
+import asyncio
 
 from fastapi import APIRouter, HTTPException
 
@@ -17,6 +19,36 @@ async def downloads() -> dict:
     jobs = registry.snapshot()
     jobs += await aria2_status(DownloadSettings.from_dict(get_setting("download")))
     return {"jobs": jobs}
+
+
+# 注意：历史相关路由必须声明在 /{job_id} 模式之前，否则
+# POST /api/downloads/history/prune 会被 /{job_id}/{action} 抢先匹配、
+# DELETE /api/downloads/history/{id} 会把 history 当成 job_id。
+@router.get("/downloads/history")
+async def history_list(page: int = 1, page_size: int = 50, status: str = "", task_id: int | None = None,
+                       keyword: str = "") -> dict:
+    from ..api.deps import get_setting
+    from ..services import download_history
+    from ..services.download_service import DownloadSettings
+
+    cfg = DownloadSettings.from_dict(get_setting("download"))
+    await download_history.reconcile(cfg)
+    data = await asyncio.to_thread(
+        download_history.list_records, page=page, page_size=page_size, status=status, task_id=task_id, keyword=keyword
+    )
+    states = await asyncio.to_thread(lambda: [download_history.file_state(i["dest_path"]) for i in data["items"]])
+    for item, state in zip(data["items"], states, strict=True):
+        item["file_state"] = state
+    return data
+
+
+@router.delete("/downloads/history/{record_id}")
+async def history_delete(record_id: int) -> dict:
+    from ..services import download_history
+
+    if not download_history.delete_record(record_id):
+        raise HTTPException(404, "记录不存在")
+    return {"ok": True}
 
 
 @router.post("/downloads/{job_id}/stop")

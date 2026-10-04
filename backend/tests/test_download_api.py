@@ -85,3 +85,47 @@ def test_aria2_rpc_unreachable_gives_502(monkeypatch):
         resp = c.post("/api/downloads/GID9/stop?source=aria2")
     assert resp.status_code == 502
     assert "aria2 不可达" in resp.json()["detail"]
+
+
+def test_downloads_endpoint_excludes_terminal_jobs():
+    from backend.core.download_registry import DownloadRegistry as _R  # noqa: F401
+
+    jid = registry.create(task_id=9, taskname="x", filename="term.mp4", dest_path="/d/term.mp4", total=10)
+    registry.update(jid, done=10, status="done")
+    try:
+        with TestClient(app) as client:
+            ids = {j["id"] for j in client.get("/api/downloads").json()["jobs"]}
+    finally:
+        registry.remove(jid)
+    assert jid not in ids  # 终态不再混进进行中列表
+
+
+def test_history_endpoint_shape(tmp_path):
+    from backend.services import download_history as hist
+
+    rid = hist.start(
+        source="builtin", ref_id="api-shape", task_id=41, taskname="T", filename="在.mp4",
+        dest_path=str(tmp_path / "在.mp4"), size_total=10, fid="F", driver_key="fake", account_id=None,
+    )
+    hist.finish("api-shape", source="builtin", status="done", size_done=10)
+    (tmp_path / "在.mp4").write_bytes(b"0123456789")
+    hist.start(
+        source="builtin", ref_id="api-lost", task_id=41, taskname="T", filename="丢.mp4",
+        dest_path=str(tmp_path / "丢.mp4"), size_total=10, fid="G", driver_key="fake", account_id=None,
+    )
+    hist.finish("api-lost", source="builtin", status="done", size_done=10)
+
+    with TestClient(app) as c:
+        data = c.get("/api/downloads/history", params={"task_id": 41, "page_size": 10}).json()
+    assert data["total"] == 2
+    by_name = {i["filename"]: i for i in data["items"]}
+    assert by_name["在.mp4"]["file_state"] == "ok"
+    assert by_name["丢.mp4"]["file_state"] == "missing"
+    assert by_name["在.mp4"]["id"] == rid
+
+
+def test_history_route_not_shadowed_by_job_id_routes():
+    """历史路由必须先声明，否则 /downloads/history/... 会被 /{job_id} 吃掉。"""
+    with TestClient(app) as c:
+        assert c.get("/api/downloads/history").status_code == 200
+        assert c.delete("/api/downloads/history/999999").status_code == 404
