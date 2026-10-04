@@ -158,7 +158,8 @@ download_task_files(driver, saved: list[SavedFile], cfg, ...) -> list[str]
 → `get_download_urls([fid])` 取新直链（旧直链已过期）→ 造 `DownloadItem(fid, filename, size_total, Path(dest_path))` → `download_items()`。
 
 于是重下自动享有当前的下载模式、并发、`.part` 保护、已存在跳过的语义，并且走同一个写入点落新记录，不产生第二套真相。
-直链仍取不到（文件已不在网盘）→ 返回失败摘要并落一条 `failed`，界面看得到原因。
+直链仍取不到（文件已不在网盘）时**不落新记录**——与第 2 节"前置失败不落库"一致：这类失败发生在建立下载动作之前，
+界面通过任务日志里那条 `《…》重下异常：…` 解释原因（重下是后台任务，异常若不上报就只剩 uvicorn stderr，因此必须记日志）。
 
 ### 4.7 界面
 
