@@ -141,8 +141,19 @@ watch(tab, (v) => {
   syncHistoryPoll();
 });
 watch(
-  () => [query.status.join(","), query.task_id, query.page, query.page_size],
+  () => [query.page, query.page_size],
   () => tab.value === "history" && loadHistory(),
+);
+// 状态/任务筛选变化必须回第 1 页：停在第 N 页可能对上空的筛选结果、总数却非零。
+// page 非 1 时先归 1，交给上面的 watch 统一触发加载，避免同一次改筛选发两遍请求
+// （与关键词 watcher 同款守卫）。
+watch(
+  () => [query.status.join(","), query.task_id],
+  () => {
+    const pageChanged = query.page !== 1;
+    query.page = 1;
+    if (!pageChanged && tab.value === "history") loadHistory();
+  },
 );
 let kwTimer: number | undefined;
 watch(

@@ -132,7 +132,9 @@ async def test_history_finish_falls_back_when_job_evicted():
         fallback_name="f",
     )
     r = _rows(706)[0]
-    assert r.status == "done" and r.finished_at is not None and not warns  # ok 兜底成 done，未触发告警
+    # job 不在时体积传 None 而非 0：size_total 必须保持 start 落的 5，账本不被淘汰场景抹平
+    assert r.status == "done" and r.size_total == 5 and r.size_done == 0
+    assert r.finished_at is not None and not warns  # ok 兜底成 done，未触发告警
 
 
 async def _noop():

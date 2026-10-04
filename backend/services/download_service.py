@@ -91,8 +91,10 @@ def _history_finish(log, *, source: str, ref_id: str, ok: bool, fallback_name: s
         job = registry.get(ref_id)
         # job 可能为 None（终态被内存注册表淘汰），此时用下载结果兜底，账本不丢终态。
         status = job.status if job and job.status in history.TERMINAL else ("done" if ok else "failed")
-        done = job.done if job else 0
-        total = job.total if job else 0
+        # size 传 None 而不是 0：finish 会跳过这两个字段，保住 start 落的真实 size_total，
+        # 不让淘汰场景把账本体积抹平成 0。
+        done = job.done if job else None
+        total = job.total if job else None
         error = job.error if job else ("" if ok else fallback_name)
         history.finish(ref_id, source=source, status=status, size_done=done, size_total=total, error=error)
     except Exception as exc:  # noqa: BLE001
