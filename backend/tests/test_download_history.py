@@ -161,9 +161,18 @@ def test_list_records_filters_and_pages():
     r2 = hist.list_records(task_id=801, page=2, page_size=2)
     assert r2["total"] == 3 and len(r2["items"]) == 1
     assert hist.list_records(status="failed", task_id=802)["total"] == 2
-    assert hist.list_records(keyword="英雄")["total"] == 3
+    # 关键词断言按 task_id 限定：总表计数随共享测试库增长，不限定就依赖全表状态
+    assert hist.list_records(task_id=801, keyword="英雄")["total"] == 3
     assert hist.list_records(keyword="绝无此名")["total"] == 0
     assert all(i["status"] in ("failed", "queued") for i in hist.list_records(status="failed,queued")["items"])
+
+
+def test_keyword_escapes_like_wildcards():
+    _seed(2, status="done", task_id=805, filename="100%.mp4")
+    _seed(1, status="failed", task_id=805, filename="100A.mp4")
+    # 关键词里的 % 是字面字符：只命中 "100%.mp4" 两条，不得作为通配符把 "100A.mp4" 也算进来
+    assert hist.list_records(task_id=805, keyword="100%")["total"] == 2
+    assert hist.list_records(task_id=805, keyword="100")["total"] == 3  # 不带通配符的普通子串仍全部命中
 
 
 def test_file_state_ok_missing_and_directory(tmp_path):

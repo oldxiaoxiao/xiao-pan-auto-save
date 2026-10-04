@@ -95,11 +95,14 @@ def _conditions(*, status: str, task_id: int | None, keyword: str) -> list:
     wanted = [s for s in (status or "").split(",") if s]
     if wanted:
         conds.append(col(DownloadRecord.status).in_(wanted))
-    if task_id:
+    if task_id is not None:
         conds.append(col(DownloadRecord.task_id) == int(task_id))
     if keyword:
-        like = f"%{keyword}%"
-        conds.append(or_(col(DownloadRecord.filename).like(like), col(DownloadRecord.dest_path).like(like)))
+        # 转义 LIKE 通配符（先反斜杠，再 %/_），并显式声明 escape：搜 "100%" 按字面匹配，不当通配符
+        escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{escaped}%"
+        conds.append(or_(col(DownloadRecord.filename).like(like, escape="\\"),
+                         col(DownloadRecord.dest_path).like(like, escape="\\")))
     return conds
 
 

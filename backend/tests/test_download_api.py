@@ -88,8 +88,6 @@ def test_aria2_rpc_unreachable_gives_502(monkeypatch):
 
 
 def test_downloads_endpoint_excludes_terminal_jobs():
-    from backend.core.download_registry import DownloadRegistry as _R  # noqa: F401
-
     jid = registry.create(task_id=9, taskname="x", filename="term.mp4", dest_path="/d/term.mp4", total=10)
     registry.update(jid, done=10, status="done")
     try:
@@ -128,4 +126,6 @@ def test_history_route_not_shadowed_by_job_id_routes():
     """历史路由必须先声明，否则 /downloads/history/... 会被 /{job_id} 吃掉。"""
     with TestClient(app) as c:
         assert c.get("/api/downloads/history").status_code == 200
-        assert c.delete("/api/downloads/history/999999").status_code == 404
+        resp = c.delete("/api/downloads/history/999999")
+        # 断言 detail 而非仅状态码：证明请求到达了 history 处理器的 404，而不是路由缺失
+        assert resp.status_code == 404 and resp.json()["detail"] == "记录不存在"
