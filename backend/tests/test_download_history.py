@@ -577,3 +577,38 @@ def test_prune_all_removes_records():
     assert not _has("y-done")
 
 
+def test_retention_days_parsing_table():
+    """保留策略解析：只有 days_<整数> 生效，脏值（含 None/空串/非数字/小数）一律当作「不清」。
+
+    days_0 / days_-5 归到 1 天：宁可当晚就清，也不要因为一个 0 变成「永久」或 0 天全删。
+    days_1_2 解析成 12 —— int() 认 PEP 515 的数字分隔符，这是既有语义，不是脏值分支，钉住它。
+    """
+    cases = [
+        ("days_30", 30),
+        ("days_90", 90),
+        ("days_180", 180),
+        ("days_365", 365),
+        ("days_1", 1),
+        ("days_0", 1),
+        ("days_-5", 1),
+        ("days_1_2", 12),
+        ("days_abc", None),
+        ("days_", None),
+        ("days_90x", None),
+        ("days_1.5", None),
+        ("days_1e3", None),
+        ("forever", None),
+        ("", None),
+        (None, None),
+        ("  days_30", None),
+        ("DAYS_30", None),
+    ]
+    for retention, expected in cases:
+        assert hist._retention_days(retention) == expected, f"retention={retention!r}"
+
+
+def test_prune_with_corrupt_retention_deletes_nothing():
+    """脏保留值不能把清理变成「全删」：解析失败 → 天数 None → auto 分支一条都不动。"""
+    _seed_finished("pc-old", age_days=400)
+    assert hist.prune("auto", "days_abc") == 0
+    assert _has("pc-old")
