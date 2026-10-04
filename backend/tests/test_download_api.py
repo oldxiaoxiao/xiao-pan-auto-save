@@ -146,6 +146,8 @@ def test_retry_endpoint_returns_at_once(monkeypatch):
         source="builtin", ref_id="api-retry", task_id=925, taskname="t", filename="f", dest_path="/d/f",
         size_total=1, fid="F", driver_key="fake", account_id=None,
     )
+    # 记录必须先收口成终态才可重下：修复波后非终态记录会被 409 挡住（见下方拒绝用例）
+    hist.finish("api-retry", source="builtin", status="failed", error="HTTP 500")
     t0 = time.monotonic()
     with TestClient(app) as c:
         r = c.post(f"/api/downloads/history/{rid}/retry")
@@ -158,6 +160,110 @@ def test_retry_unknown_record_404():
         resp = c.post("/api/downloads/history/987654/retry")
     # 同样断言 detail：证明请求落在 history retry 处理器上，而不是路由缺失/被 job_id 抢先匹配
     assert resp.status_code == 404 and resp.json()["detail"] == "记录不存在"
+
+
+def _seed_retry_row(hist, ref: str, task_id: int, dest: str, *, terminal: bool) -> int:
+    rid = hist.start(
+        source="builtin", ref_id=ref, task_id=task_id, taskname="t", filename=dest.rsplit("/", 1)[-1],
+        dest_path=dest, size_total=1, fid="F", driver_key="fake", account_id=None,
+    )
+    if terminal:
+        hist.finish(ref, source="builtin", status="failed", error="HTTP 500")
+    return rid
+
+
+def test_retry_rejected_while_same_dest_has_open_row(tmp_path, monkeypatch):
+    """同 dest_path 已有在途下载时拒绝重下：两个内置写者会把同一个 .part 交错写坏。
+
+    模拟连点两次「重下」之后的第二次：第一次留下的开放行还挂着，此时不许再起后台任务。
+    """
+    from backend.services import download_history as hist
+
+    dest = str(tmp_path / "dup.mkv")
+    rid = _seed_retry_row(hist, "api-dup-src", 928, dest, terminal=True)
+    open_id = _seed_retry_row(hist, "api-dup-open", 928, dest, terminal=False)
+    started: list[str] = []
+
+    async def spy_retry(rec, cfg, *, log):
+        started.append(rec["ref_id"])
+
+    monkeypatch.setattr(dl, "retry_record", spy_retry)
+    try:
+        with TestClient(app) as c:
+            resp = c.post(f"/api/downloads/history/{rid}/retry")
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "该文件已有进行中的下载，请等待完成后再重下"
+        assert started == []  # 拒绝必须发生在起后台任务之前
+    finally:
+        hist.delete_record(rid)
+        hist.delete_record(open_id)  # 不留开放行污染共享测试库（reconcile 用例靠清场夹具，别依赖残留）
+
+
+def test_retry_rejected_when_record_itself_not_terminal(tmp_path, monkeypatch):
+    """被重下的记录自己还没收口（如 queued 挂着）→ 同样 409，挡住同一行连点两次。"""
+    from backend.services import download_history as hist
+
+    dest = str(tmp_path / "double-click.mkv")
+    rid = _seed_retry_row(hist, "api-selfopen", 929, dest, terminal=False)
+    started: list[str] = []
+
+    async def spy_retry(rec, cfg, *, log):
+        started.append(rec["ref_id"])
+
+    monkeypatch.setattr(dl, "retry_record", spy_retry)
+    try:
+        with TestClient(app) as c:
+            resp = c.post(f"/api/downloads/history/{rid}/retry")
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "该文件已有进行中的下载，请等待完成后再重下"
+        assert started == []
+    finally:
+        hist.delete_record(rid)
+
+
+def test_retry_allowed_for_terminal_row_without_open_sibling(tmp_path, monkeypatch):
+    """终态记录 + 同路径无在途行 → 重下照旧放行（守护不能把好路堵死）。"""
+    from backend.services import download_history as hist
+
+    dest = str(tmp_path / "solo.mkv")
+    rid = _seed_retry_row(hist, "api-solo", 930, dest, terminal=True)
+    started: list[str] = []
+
+    async def spy_retry(rec, cfg, *, log):
+        started.append(rec["ref_id"])
+
+    monkeypatch.setattr(dl, "retry_record", spy_retry)
+    try:
+        with TestClient(app) as c:
+            resp = c.post(f"/api/downloads/history/{rid}/retry")
+        assert resp.status_code == 200 and resp.json()["ok"] is True
+    finally:
+        hist.delete_record(rid)
+
+
+def test_retry_task_exception_is_logged(tmp_path, monkeypatch):
+    """后台重下任务炸出的异常必须落运行日志且端点仍 200：fire-and-forget 不设防就只剩 stderr。"""
+    from backend.core.logstream import hub
+    from backend.services import download_history as hist
+
+    rid = _seed_retry_row(hist, "api-task-boom", 931, str(tmp_path / "boom.mkv"), terminal=True)
+
+    async def exploding_retry(rec, cfg, *, log):
+        raise RuntimeError("账号服务炸了")
+
+    monkeypatch.setattr(dl, "retry_record", exploding_retry)
+    try:
+        with TestClient(app) as c:
+            assert c.post(f"/api/downloads/history/{rid}/retry").status_code == 200
+            entries = []
+            for _ in range(50):  # 后台任务在 TestClient 的 portal 循环上跑，轮询等日志落进 hub.history
+                time.sleep(0.02)
+                entries = [e for e in hub.history if "重下后台任务异常" in e["message"]]
+                if entries:
+                    break
+        assert entries and "账号服务炸了" in entries[-1]["message"]
+    finally:
+        hist.delete_record(rid)
 
 
 def test_prune_endpoint_passes_retention_from_setting(monkeypatch):

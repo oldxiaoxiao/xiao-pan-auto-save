@@ -52,11 +52,16 @@ async def history_delete(record_id: int) -> dict:
     return {"ok": True}
 
 
+# asyncio.create_task 的返回值若不存住，任务可能在跑完前被垃圾回收（CPython 只持弱引用，
+# 官方文档明确警告）。fire-and-forget 的重下必须留强引用，完成后在 done_callback 里释放。
+_pending_retry_tasks: set[asyncio.Task] = set()
+
+
 @router.post("/downloads/history/{record_id}/retry")
 async def history_retry(record_id: int) -> dict:
     """起后台任务重下：内置下载器一个 4K 文件可能跑几小时，绝不同步等待。
 
-    这里只做记录存在性校验；驱动/账号是否可用由 retry_record 在后台任务里判定并写日志。
+    这里只做记录存在性校验与同路径在途检查；驱动/账号是否可用由 retry_record 在后台任务里判定并写日志。
     """
     from ..api.deps import get_setting
     from ..core.logstream import hub
@@ -66,9 +71,25 @@ async def history_retry(record_id: int) -> dict:
     rec = download_history.get_record(record_id)
     if rec is None:
         raise HTTPException(404, "记录不存在")
+    # 同 dest_path 已有未收口的账本行（含本条自身仍是非终态）→ 拒绝：连点两次「重下」
+    # 会让两个内置写者并发写同一个 <name>.part，交错字节、双重改名，把文件写坏。
+    if download_history.has_open_for_path(rec["dest_path"]):
+        raise HTTPException(409, "该文件已有进行中的下载，请等待完成后再重下")
     cfg = DownloadSettings.from_dict(get_setting("download"))
     log = hub.make_logger("retry", task_id=rec.get("task_id"))
-    asyncio.create_task(retry_record(rec, cfg, log=log))
+    task = asyncio.create_task(retry_record(rec, cfg, log=log))
+    _pending_retry_tasks.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _pending_retry_tasks.discard(t)
+        # retry_record 内部已兜住下载异常；这里再收一层，逃逸的炸点落日志而不是无声沉没
+        if t.cancelled():  # 进程收尾时可能被取消，不是异常，不值得报
+            return
+        exc = t.exception()
+        if exc is not None:
+            log("error", f"重下后台任务异常：{exc}")
+
+    task.add_done_callback(_done)
     return {"ok": True, "message": "重下已开始，稍后刷新查看"}
 
 

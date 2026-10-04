@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import stat
 from datetime import datetime, timedelta
@@ -16,6 +17,8 @@ from sqlmodel import col, select
 
 from ..database import session_scope
 from ..models import DownloadRecord
+
+logger = logging.getLogger(__name__)
 
 TERMINAL = {"done", "failed", "skipped", "stopped"}
 
@@ -188,6 +191,16 @@ def open_records() -> list[dict]:
         return [r.model_dump() for r in rows]
 
 
+def has_open_for_path(dest_path: str) -> bool:
+    """同 dest_path 是否存在 STALE_HOURS 内创建的非终态账本行（含被查记录自身）。
+
+    重下入口用它把关：两个内置写者并发写同一个 <name>.part 会交错字节、双重改名，把文件写坏。
+    超过 STALE_HOURS 的悬挂行不在这里拦——那是 reconcile 的收口职责，收口后自然放行。
+    """
+    cutoff = datetime.now() - timedelta(hours=STALE_HOURS)
+    return any(r["dest_path"] == dest_path and r["created_at"] > cutoff for r in open_records())
+
+
 def _file_check(path: str, size_total: int) -> tuple[str, bool, int]:
     """兜底校验：一次 os.stat 同时给出「到位状态」与「大小是否匹配」，避免每行 stat 两次。
 
@@ -226,7 +239,9 @@ async def reconcile(cfg) -> None:
     if cfg.mode == "aria2" and cfg.aria2_host_port:
         try:
             running = {j["id"] for j in await aria2_status(cfg)}
-        except Exception:  # noqa: BLE001 aria2 不可达时静默降级到文件兜底
+        except Exception as exc:  # noqa: BLE001 aria2 不可达时静默降级到文件兜底
+            # 留痕：运维要能区分「aria2 不可达」与「gid 已被 aria2 丢弃」，静默降级两头都看不出来
+            logger.debug("对账时查询 aria2 活动队列失败，降级到文件兜底：%s", exc)
             running = set()
         asked = [r["ref_id"] for r in rows if r["source"] == "aria2" and r["ref_id"] not in running]
         if asked:
@@ -242,7 +257,9 @@ async def reconcile(cfg) -> None:
                     struct = (entry.get("result") or [None])[0]
                     if struct:
                         results[gid] = struct
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                # 同上：这一下炸了整轮 tellDownloadResult 都没了，不留一行日志就只剩猜
+                logger.debug("对账时批量询问 aria2 tellDownloadResult 失败，全部降级到文件兜底：%s", exc)
                 results = {}
 
     now = datetime.now()
