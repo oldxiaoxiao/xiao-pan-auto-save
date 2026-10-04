@@ -12,6 +12,7 @@ const draft = reactive<DownloadSettings>({
   mode: "builtin",
   dir: "",
   concurrency: 2,
+  history_retention: "days_90",
   aria2: { host_port: "", secret: "", pause: false },
   emby: { url: "", token: "" },
 });
@@ -57,6 +58,16 @@ async function save() {
       <label>并发数</label>
       <el-input-number v-model="draft.concurrency" :min="1" :max="8" />
       <span class="text-muted">仅内置下载器生效</span>
+    </div>
+    <div class="row">
+      <label>历史保留</label>
+      <el-select v-model="draft.history_retention" style="width: 200px">
+        <el-option label="最近 30 天" value="days_30" />
+        <el-option label="最近 90 天" value="days_90" />
+        <el-option label="最近 180 天" value="days_180" />
+        <el-option label="永久保留（手动清理）" value="forever" />
+      </el-select>
+      <span class="text-muted">自动清理过期下载记录，永久保留则只靠历史页的手动清理</span>
     </div>
 
     <template v-if="draft.mode === 'aria2'">

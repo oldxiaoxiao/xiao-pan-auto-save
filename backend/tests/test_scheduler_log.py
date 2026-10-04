@@ -110,6 +110,23 @@ def test_has_valid_schedule():
     assert not has_valid_schedule("unknown:1")
 
 
+def test_add_daily_registers_replacing_job():
+    """每日维护 job：重复注册同 id 必须覆盖（replace_existing），重启/重挂不会叠加成双份清理。"""
+
+    # AsyncIOScheduler 需要运行中的事件循环，同步用例里手动跑一个短循环（与上方惯例一致）
+    async def run():
+        s = TaskScheduler()
+        s.start()
+        try:
+            s.add_daily("xiao_pan_prune", lambda: None)
+            s.add_daily("xiao_pan_prune", lambda: None)
+            assert len([j for j in s.scheduler.get_jobs() if j.id == "xiao_pan_prune"]) == 1
+        finally:
+            s.shutdown()
+
+    asyncio.run(run())
+
+
 async def test_run_one_task_self_unschedules_when_expired(monkeypatch):
     from datetime import timedelta
 

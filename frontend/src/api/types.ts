@@ -104,6 +104,7 @@ export interface DownloadSettings {
   mode: "builtin" | "aria2";
   dir: string;
   concurrency: number;
+  history_retention: "days_30" | "days_90" | "days_180" | "forever";
   aria2: { host_port: string; secret: string; pause: boolean };
   emby: { url: string; token: string };
 }

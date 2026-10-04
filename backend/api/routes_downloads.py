@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from ..core.download_registry import registry
 
@@ -69,6 +70,21 @@ async def history_retry(record_id: int) -> dict:
     log = hub.make_logger("retry", task_id=rec.get("task_id"))
     asyncio.create_task(retry_record(rec, cfg, log=log))
     return {"ok": True, "message": "重下已开始，稍后刷新查看"}
+
+
+class PrunePayload(BaseModel):
+    mode: str = "auto"  # auto | failed | all
+
+
+@router.post("/downloads/history/prune")
+async def history_prune(payload: PrunePayload) -> dict:
+    """手动清理账本（只删记录不删文件）。路由排在 /{job_id} 之前，否则 history 会被当成 job id。"""
+    from ..api.deps import get_setting
+    from ..services import download_history
+
+    retention = str((get_setting("download") or {}).get("history_retention") or "days_90")
+    removed = download_history.prune(payload.mode, retention)
+    return {"ok": True, "removed": removed}
 
 
 @router.post("/downloads/{job_id}/stop")

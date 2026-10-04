@@ -37,6 +37,13 @@ class TaskScheduler:
         )
         return str(trigger)
 
+    def add_daily(self, job_id: str, func, hour: int = 4) -> None:
+        """注册一个每天整点执行的维护任务（重复注册覆盖）。"""
+        self.scheduler.add_job(
+            func, trigger=CronTrigger(hour=hour, minute=0), id=job_id, replace_existing=True,
+            max_instances=1, coalesce=True,
+        )
+
     def reschedule_task(self, task_id: int, schedule: str, func) -> str | None:
         job_id = f"xiao_pan_task_{task_id}"
         if not schedule:

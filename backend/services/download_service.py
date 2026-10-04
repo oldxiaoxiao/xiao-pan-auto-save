@@ -33,6 +33,7 @@ class DownloadSettings:
     mode: str = "builtin"  # builtin | aria2
     dir: str = DEFAULT_DOWNLOAD_DIR
     concurrency: int = 2
+    history_retention: str = "days_90"  # days_30 | days_90 | days_180 | forever
     aria2_host_port: str = ""
     aria2_secret: str = ""
     aria2_pause: bool = False
@@ -48,6 +49,7 @@ class DownloadSettings:
             mode=str(raw.get("mode") or "builtin"),
             dir=str(raw.get("dir") or DEFAULT_DOWNLOAD_DIR),
             concurrency=max(1, int(raw.get("concurrency") or 2)),
+            history_retention=str(raw.get("history_retention") or "days_90"),
             aria2_host_port=str(aria2.get("host_port") or ""),
             aria2_secret=str(aria2.get("secret") or ""),
             aria2_pause=bool(aria2.get("pause")),
@@ -461,9 +463,18 @@ async def retry_record(rec: dict, cfg: DownloadSettings, *, log: LogFn) -> None:
     item = DownloadItem(
         fid=rec["fid"], name=rec["filename"], size=int(rec["size_total"] or 0), local_path=Path(rec["dest_path"])
     )
-    lines = await download_items(
-        driver, [item], cfg, log=log, task_id=rec.get("task_id"), taskname=rec.get("taskname") or "",
-        account_id=acc.id, driver_key=rec["driver_key"],
-    )
+    # 与首下路径（task_service._download_for_task）同等的兜底：retry_record 由路由层 create_task
+    # 裸调度，取直链/驱动异常若不上抛进日志，只会烂在 uvicorn stderr 的
+    # "Task exception was never retrieved" 里 —— 账本与日志 tab 两头无痕，而 UI 已承诺"重下已开始"。
+    # 典型炸点在取直链阶段（_history_start 之前），重下失败不新增账本行；
+    # 极小概率的半途异常若留下非终态行，也由 reconcile 收口，不留悬挂。
+    try:
+        lines = await download_items(
+            driver, [item], cfg, log=log, task_id=rec.get("task_id"), taskname=rec.get("taskname") or "",
+            account_id=acc.id, driver_key=rec["driver_key"],
+        )
+    except Exception as exc:  # noqa: BLE001 后台重下异常不允许静默丢失，必须落日志
+        log("error", f"《{rec.get('taskname') or ''}》重下异常：{exc}")
+        return
     ok = any(x.startswith("✅") for x in lines)
     log("info" if ok else "warn", f"🔁 重下 {rec['filename']}：{lines or '无结果'}")

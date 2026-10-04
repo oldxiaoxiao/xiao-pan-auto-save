@@ -158,3 +158,34 @@ def test_retry_unknown_record_404():
         resp = c.post("/api/downloads/history/987654/retry")
     # 同样断言 detail：证明请求落在 history retry 处理器上，而不是路由缺失/被 job_id 抢先匹配
     assert resp.status_code == 404 and resp.json()["detail"] == "记录不存在"
+
+
+def test_prune_endpoint_passes_retention_from_setting(monkeypatch):
+    from backend.api import deps
+    from backend.services import download_history as hist
+
+    seen = {}
+
+    def spy(mode, retention="days_90"):
+        seen["args"] = (mode, retention)
+        return 3
+
+    monkeypatch.setattr(hist, "prune", spy)
+    monkeypatch.setattr(deps, "get_setting", lambda k: {"history_retention": "days_30"})
+    with TestClient(app) as c:
+        r = c.post("/api/downloads/history/prune", json={"mode": "auto"})
+    assert r.json() == {"ok": True, "removed": 3}
+    # lifespan 启动清理（auto+同 retention）与端点各调一次 spy，参数相同；反向可证端点取的是设置值而非硬编码
+    assert seen["args"] == ("auto", "days_30")
+
+
+def test_prune_endpoint_unknown_mode_defaults_to_auto(monkeypatch):
+    from backend.api import deps
+    from backend.services import download_history as hist
+
+    seen = {}
+    monkeypatch.setattr(hist, "prune", lambda mode, retention="days_90": seen.update({"mode": mode}) or 0)
+    monkeypatch.setattr(deps, "get_setting", lambda k: {})
+    with TestClient(app) as c:
+        assert c.post("/api/downloads/history/prune", json={"mode": "nonsense"}).json()["ok"] is True
+    assert seen["mode"] == "nonsense"  # 未识别的 mode 落到 auto 分支，不删任何数据

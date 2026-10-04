@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { api } from "../api/client";
 import { useTasksStore } from "../stores/tasks";
 import type { DownloadJob, DownloadRecord } from "../api/types";
@@ -61,6 +61,7 @@ const statusOptions = [
   { label: "已停止", value: "stopped" },
 ];
 let hTimer: number | undefined;
+let retryTimer: number | undefined;
 
 const hasOpen = computed(() => rows.value.some((r) => r.status === "queued" || r.status === "downloading"));
 
@@ -104,8 +105,28 @@ async function retry(row: DownloadRecord) {
     const r = await api.retryDownloadHistory(row.id);
     ElMessage.success(r.message);
     await loadHistory();
+    // 后端先取直链、后落账本行：上面的即时刷新大概率还看不到新记录（此刻也没有未完成行，
+    // 5s 轮询不会启动）。1.5s 后补刷一次让新行浮现，不用操作者再进出 tab。
+    window.clearTimeout(retryTimer);
+    retryTimer = window.setTimeout(loadHistory, 1500);
   } catch (e) {
     ElMessage.error((e as Error).message);
+  }
+}
+
+const pruneLabels = { auto: "按保留策略", failed: "失败记录", all: "全部" } as const;
+
+async function onPrune(mode: "auto" | "failed" | "all") {
+  try {
+    await ElMessageBox.confirm(`确认清理${pruneLabels[mode]}的下载历史？（不会删除磁盘文件）`, "清理历史", {
+      type: "warning",
+    });
+    const r = await api.pruneDownloadHistory(mode);
+    ElMessage.success(`已清理 ${r.removed} 条`);
+    loadHistory();
+  } catch (e) {
+    // ElMessageBox 取消时 reject "cancel"（非 Error），与 TasksView 惯例一致：静默返回
+    if (e !== "cancel" && e instanceof Error) ElMessage.error(e.message);
   }
 }
 
@@ -190,6 +211,7 @@ onBeforeUnmount(() => {
   window.clearInterval(timer);
   window.clearInterval(hTimer);
   window.clearTimeout(kwTimer);
+  window.clearTimeout(retryTimer);
   document.removeEventListener("visibilitychange", onVisible);
 });
 
@@ -273,6 +295,16 @@ function onVisible() {
             <el-option v-for="t in tasks.sorted" :key="t.id" :label="t.taskname" :value="t.id" />
           </el-select>
           <el-input v-model="query.keyword" placeholder="文件名 / 路径" clearable style="width: 240px" />
+          <el-dropdown @command="onPrune">
+            <el-button size="small">清理</el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="auto">按保留策略清理</el-dropdown-item>
+                <el-dropdown-item command="failed">只清失败记录</el-dropdown-item>
+                <el-dropdown-item command="all" divided>清空全部记录</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
 
         <el-table v-loading="hLoading" :data="rows" empty-text="暂无下载记录" row-key="id">

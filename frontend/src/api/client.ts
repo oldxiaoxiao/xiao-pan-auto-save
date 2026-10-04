@@ -163,6 +163,11 @@ export const api = {
   deleteDownloadHistory: (id: number) => request<{ ok: boolean }>(`/api/downloads/history/${id}`, { method: "DELETE" }),
   retryDownloadHistory: (id: number) =>
     request<{ ok: boolean; message: string }>(`/api/downloads/history/${id}/retry`, { method: "POST" }),
+  pruneDownloadHistory: (mode: "auto" | "failed" | "all") =>
+    request<{ ok: boolean; removed: number }>("/api/downloads/history/prune", {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    }),
 
   // 搜索
   suggestions: (q: string, d = false) =>

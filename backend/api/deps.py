@@ -21,6 +21,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
         "mode": "builtin",
         "dir": "",
         "concurrency": 2,
+        "history_retention": "days_90",
         "aria2": {"host_port": "", "secret": "", "pause": False},
         "emby": {"url": "", "token": ""},
     },

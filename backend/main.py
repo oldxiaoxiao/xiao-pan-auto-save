@@ -50,6 +50,21 @@ def reschedule_main_job() -> None:
     scheduler.reschedule(str(get_setting("crontab") or config.CRONTAB_DEFAULT), _main_job)
 
 
+async def _prune_job() -> None:
+    """下载历史清理（启动跑一次 + 每天凌晨四点），失败只记日志、绝不影响启动与主任务。"""
+    from .api.deps import get_setting
+    from .services import download_history
+
+    log = hub.make_logger("prune")
+    try:
+        retention = str((get_setting("download") or {}).get("history_retention") or "days_90")
+        removed = download_history.prune("auto", retention)
+        if removed:
+            log("info", f"下载历史清理：删除 {removed} 条（保留 {retention}）")
+    except Exception as exc:  # noqa: BLE001 清理失败不影响主运行
+        log("warn", f"下载历史清理失败：{exc}")
+
+
 async def _run_one_task(task_id: int) -> None:
     from datetime import date, datetime
 
@@ -104,6 +119,9 @@ async def lifespan(app: FastAPI):
     backup_db(config.DB_PATH, config.DATA_DIR / "backups")
     init_db()
     scheduler.start()
+    # 启动补一次清理（停机跨过凌晨四点的场景），再挂每日维护 job；replace_existing 保证重启不叠加
+    await _prune_job()
+    scheduler.add_daily("xiao_pan_prune", _prune_job)
     reschedule_main_job()
     reschedule_all_tasks()
     yield

@@ -494,3 +494,86 @@ async def test_retry_with_unsupported_driver_logs_and_returns(tmp_path, monkeypa
     assert calls == [] and any("驱动" in m for m in msgs)
 
 
+async def test_retry_download_items_exception_is_logged_not_raised(tmp_path, monkeypatch):
+    """后台重下里 download_items 炸出（如失效分享的陈旧 fid 抛 DriveError）必须落日志、不上抛。
+
+    retry_record 由路由层 create_task 裸调度，不设防则异常只出现在 uvicorn stderr
+    （"Task exception was never retrieved"），日志 tab 与账本两头无痕，而 UI 已提示"重下已开始"。
+    与首下路径 task_service._download_for_task 的兜底对齐；取直链失败本身仍不落账本行。
+    """
+    from backend.drivers.base import DriveError
+
+    rid = hist.start(
+        source="builtin", ref_id="retry-boom", task_id=927, taskname="追更", filename="a.mkv",
+        dest_path=str(tmp_path / "a.mkv"), size_total=1, fid="F", driver_key="fake", account_id=None,
+    )
+    hist.finish("retry-boom", source="builtin", status="failed", error="HTTP 500")
+    entered = []
+
+    async def boom(driver, items, cfg, *, log, **kw):
+        entered.append(1)
+        raise DriveError("分享已失效")
+
+    _register_fake_driver(monkeypatch)
+    monkeypatch.setattr(dl, "download_items", boom)
+    monkeypatch.setattr(dl, "_account_for", lambda rec: _Acc())
+    msgs = []
+    await dl.retry_record(  # 不抛异常：await 正常返回即证明异常没有上抛
+        hist.get_record(rid), dl.DownloadSettings(dir=str(tmp_path)), log=lambda lvl, m: msgs.append((lvl, m))
+    )
+    assert entered == [1]  # 确实走到了下载这一步
+    assert any(lvl == "error" and "追更" in m and "重下异常" in m and "分享已失效" in m for lvl, m in msgs)
+    assert len(_rows(927)) == 1  # 只有一条旧记录：炸在写入点之前，不新增账本行
+
+
+# ---- prune：保留策略与清理 ----
+
+
+def _seed_finished(ref: str, *, status: str = "done", age_days: int = 0) -> int:
+    rid = hist.start(
+        source="builtin", ref_id=ref, task_id=911, taskname="t", filename=ref, dest_path=f"/d/{ref}",
+        size_total=1, fid="F", driver_key="fake", account_id=None,
+    )
+    hist.finish(ref, source="builtin", status=status, size_done=1)
+    if age_days:
+        with session_scope() as s:
+            row = s.get(DownloadRecord, rid)
+            row.finished_at = datetime.now() - timedelta(days=age_days)
+            s.add(row)
+    return rid
+
+
+def _has(ref: str) -> bool:
+    return any(r.ref_id == ref for r in _rows())
+
+
+def test_prune_auto_uses_retention_days():
+    _seed_finished("p-old", age_days=120)
+    _seed_finished("p-new", age_days=1)
+    hist.start(  # 非终态记录不受自动清理影响
+        source="builtin", ref_id="p-open", task_id=911, taskname="t", filename="p-open", dest_path="/d/p-open",
+        size_total=1, fid="F", driver_key="fake", account_id=None,
+    )
+    assert hist.prune("auto", "days_90") >= 1
+    assert not _has("p-old") and _has("p-new") and _has("p-open")
+
+
+def test_prune_forever_removes_nothing():
+    _seed_finished("pf-old", age_days=400)
+    assert hist.prune("auto", "forever") == 0
+    assert _has("pf-old")
+
+
+def test_prune_failed_only_removes_failed():
+    _seed_finished("x-done", status="done")
+    _seed_finished("x-fail", status="failed")
+    assert hist.prune("failed") >= 1
+    assert _has("x-done") and not _has("x-fail")
+
+
+def test_prune_all_removes_records():
+    _seed_finished("y-done")
+    assert hist.prune("all") >= 1
+    assert not _has("y-done")
+
+

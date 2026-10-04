@@ -142,6 +142,42 @@ def delete_record(record_id: int) -> bool:
     return True
 
 
+def _retention_days(retention: str) -> int | None:
+    """days_90 → 90；forever / 非法值 → None（不清）。"""
+    if not str(retention).startswith("days_"):
+        return None
+    try:
+        return max(1, int(str(retention).split("_", 1)[1]))
+    except ValueError:
+        return None
+
+
+def prune(mode: str, retention: str = "days_90") -> int:
+    """清理账本。auto=按保留策略删过期终态记录；failed=只删失败；all=清空。返回删除条数。
+
+    三种模式都只删 DownloadRecord 行，绝不碰磁盘上已下载的文件。
+    auto 只收 TERMINAL：非终态记录归 reconcile 管，清理不得抢它的收口权。
+    未识别的 mode 落到 auto 分支（保守：宁可少删不可删错）。
+    """
+    with session_scope() as session:
+        if mode == "all":
+            stmt = select(DownloadRecord)
+        elif mode == "failed":
+            stmt = select(DownloadRecord).where(col(DownloadRecord.status) == "failed")
+        else:
+            days = _retention_days(retention)
+            if days is None:
+                return 0
+            cutoff = datetime.now() - timedelta(days=days)
+            stmt = select(DownloadRecord).where(
+                col(DownloadRecord.status).in_(TERMINAL), col(DownloadRecord.finished_at) < cutoff
+            )
+        rows = session.exec(stmt).all()
+        for row in rows:
+            session.delete(row)
+        return len(rows)
+
+
 STALE_HOURS = 24
 ACTIVE_STATES = ("queued", "downloading")
 
