@@ -281,8 +281,32 @@ def test_prune_endpoint_passes_retention_from_setting(monkeypatch):
     with TestClient(app) as c:
         r = c.post("/api/downloads/history/prune", json={"mode": "auto"})
     assert r.json() == {"ok": True, "removed": 3}
-    # lifespan 启动清理（auto+同 retention）与端点各调一次 spy，参数相同；反向可证端点取的是设置值而非硬编码
+    # 端点入参只剩这一种来源：启动清理在测试里被 XIAO_PAN_SKIP_STARTUP_PRUNE 跳过，
+    # seen 只可能来自端点本身 —— 反向可证端点取的是设置值而非硬编码
     assert seen["args"] == ("auto", "days_30")
+
+
+def test_startup_prune_skipped_by_env_flag(monkeypatch):
+    """XIAO_PAN_SKIP_STARTUP_PRUNE=1（conftest 已置）时 lifespan 不再启动清理；关掉则照跑。
+
+    启动清理是生产行为（补停机跨过凌晨四点的场景），但 pytest 下它会删掉其它用例
+    seed 的过期终态行——共享临时库里的静默串扰，必须有开关挡住。
+    """
+    from backend import config
+    from backend.services import download_history as hist
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(hist, "prune", lambda *a, **k: calls.append(a) or 0)
+
+    monkeypatch.setattr(config, "SKIP_STARTUP_PRUNE", True)
+    with TestClient(app):
+        pass
+    assert calls == []
+
+    monkeypatch.setattr(config, "SKIP_STARTUP_PRUNE", False)  # 开关关掉 = 生产语义，不能顺手失效
+    with TestClient(app):
+        pass
+    assert calls and calls[0][0] == "auto"
 
 
 def test_prune_endpoint_unknown_mode_defaults_to_auto(monkeypatch):

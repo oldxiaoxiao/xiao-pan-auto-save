@@ -120,7 +120,9 @@ async def lifespan(app: FastAPI):
     init_db()
     scheduler.start()
     # 启动补一次清理（停机跨过凌晨四点的场景），再挂每日维护 job；replace_existing 保证重启不叠加
-    await _prune_job()
+    # XIAO_PAN_SKIP_STARTUP_PRUNE=1（测试环境）只跳启动这一次，每日 job 照常注册
+    if not config.SKIP_STARTUP_PRUNE:
+        await _prune_job()
     scheduler.add_daily("xiao_pan_prune", _prune_job)
     reschedule_main_job()
     reschedule_all_tasks()
