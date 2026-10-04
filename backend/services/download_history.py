@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import stat
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, or_
 from sqlmodel import col, select
@@ -141,6 +142,102 @@ def delete_record(record_id: int) -> bool:
     return True
 
 
+STALE_HOURS = 24
+ACTIVE_STATES = ("queued", "downloading")
+
+
+def open_records() -> list[dict]:
+    with session_scope() as session:
+        rows = session.exec(select(DownloadRecord).where(col(DownloadRecord.status).in_(ACTIVE_STATES))).all()
+        return [r.model_dump() for r in rows]
+
+
+def _size_matches(path: str, size_total: int) -> bool:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    return st.st_size == size_total if size_total else st.st_size > 0
+
+
 async def reconcile(cfg) -> None:
-    """Task 4 实现非终态对账；此处先保持无副作用。"""
-    return None
+    """收口非终态记录：aria2 问 RPC → 文件 stat 兜底 → 超 24h 判失败。
+
+    cfg 为 DownloadSettings；调用方（路由层）负责读配置，本函数不碰 setting。
+    延迟导入 download_service 是为了避开与写入点的循环导入。
+    """
+    from ..core.download_registry import registry
+    from .download_service import aria2_rpc, aria2_status
+
+    rows = open_records()
+    if not rows:
+        return
+
+    running: set[str] = set()
+    results: dict[str, dict] = {}
+    if cfg.mode == "aria2" and cfg.aria2_host_port:
+        try:
+            running = {j["id"] for j in await aria2_status(cfg)}
+        except Exception:  # noqa: BLE001 aria2 不可达时静默降级到文件兜底
+            running = set()
+        asked = [r["ref_id"] for r in rows if r["source"] == "aria2" and r["ref_id"] not in running]
+        if asked:
+            try:
+                resp = await aria2_rpc(
+                    cfg, "system.multicall",
+                    [{"methodName": "aria2.tellDownloadResult", "params": [g]} for g in asked],
+                )
+                # system.multicall 的返回按 asked gid 顺序一一对应
+                for gid, entry in zip(asked, resp.get("result") or [], strict=False):
+                    if "errorMessage" in entry:
+                        continue  # gid 结果已被 aria2 丢弃，走文件兜底
+                    struct = (entry.get("result") or [None])[0]
+                    if struct:
+                        results[gid] = struct
+            except Exception:  # noqa: BLE001
+                results = {}
+
+    now = datetime.now()
+    for r in rows:
+        ref, source = r["ref_id"], r["source"]
+        skip = False
+        if source == "builtin":
+            job = registry.get(ref)
+            if job is None:
+                pass  # 进程重启后内存清空，落到文件兜底
+            elif job.status in TERMINAL:
+                finish(ref, source=source, status=job.status, size_done=job.done, size_total=job.total,
+                       error=job.error)
+                continue
+            else:
+                skip = True  # 本进程还在下，进行中 tab 负责展示
+        elif cfg.mode == "aria2" and cfg.aria2_host_port:
+            if ref in running:
+                skip = True  # aria2 仍在跑/排队，不动
+            else:
+                struct = results.get(ref)
+                if struct is not None:
+                    state = str(struct.get("status") or "")
+                    if state == "complete":
+                        finish(ref, source=source, status="done", size_done=int(struct.get("completedLength") or 0),
+                               size_total=int(struct.get("totalLength") or r["size_total"] or 0))
+                        continue
+                    if state in ("error", "removed"):
+                        finish(ref, source=source, status="failed",
+                               size_done=int(struct.get("completedLength") or 0),
+                               error=str(struct.get("error_message") or "aria2 未成功"))
+                        continue
+
+        if skip:
+            continue
+        # 兜底：文件到位 = 完成（同步 IO 走线程池，不卡事件循环）
+        state = await asyncio.to_thread(file_state, r["dest_path"])
+        matches = await asyncio.to_thread(_size_matches, r["dest_path"], int(r["size_total"] or 0))
+        if state == "ok" and matches:
+            finish(ref, source=source, status="done", size_done=r["size_total"], size_total=r["size_total"])
+            continue
+        if now - r["created_at"] >= timedelta(hours=STALE_HOURS):
+            finish(ref, source=source, status="failed",
+                   error=f"对账超时：下载器无响应或结果已丢弃（超过 {STALE_HOURS} 小时未确认）")

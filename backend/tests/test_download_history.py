@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from sqlmodel import select
+from datetime import datetime, timedelta
+
+import pytest
+from sqlmodel import col, select
 
 from backend.core.download_registry import registry
 from backend.database import session_scope
@@ -214,5 +217,145 @@ def test_delete_record_true_and_row_gone():
     assert hist.delete_record(rid) is True
     assert hist.get_record(rid) is None
     assert hist.delete_record(rid) is False  # 再删一次不存在
+
+
+# ---- reconcile：非终态对账 ----
+
+
+@pytest.fixture(autouse=True)
+def _close_leftover_open_records():
+    """共享临时库的隔离夹具：把此前用例遗留的非终态记录先收口。
+
+    否则 open_records 会把旧 queued 一起带进 multicall 的 asked 列表：
+    返回按位置对齐时 struct 会错位到别的 gid 上，"calls == []" 断言也会被旧记录触发。
+    对账用例只关心自己 seed 的那一条，先清场才能各用例自洽。
+    """
+    with session_scope() as s:
+        rows = s.exec(select(DownloadRecord).where(col(DownloadRecord.status).in_(("queued", "downloading")))).all()
+        for row in rows:
+            row.status = "stopped"
+            row.finished_at = datetime.now()
+            s.add(row)
+
+
+def _seed_open(ref: str, *, source: str = "aria2", dest: str = "/d/x.mkv", size: int = 100) -> int:
+    return hist.start(
+        source=source, ref_id=ref, task_id=901, taskname="T", filename="x.mkv", dest_path=dest,
+        size_total=size, fid="F", driver_key="fake", account_id=None,
+    )
+
+
+def _age(ref: str, hours: float) -> None:
+    with session_scope() as s:
+        row = s.exec(select(DownloadRecord).where(DownloadRecord.ref_id == ref)).first()
+        row.created_at = datetime.now() - timedelta(hours=hours)
+        s.add(row)
+
+
+def _aria2_cfg() -> dl.DownloadSettings:
+    return dl.DownloadSettings(mode="aria2", aria2_host_port="http://127.0.0.1:6800")
+
+
+def _patch_aria2(monkeypatch, *, active: list[dict], struct):
+    """active：aria2_status 返回的进行中 job（用 id 标识 gid）；struct：tellDownloadResult 单条结果。"""
+    calls: list[tuple] = []
+
+    async def fake_status(cfg):
+        return active
+
+    async def fake_rpc(cfg, method, *params):
+        calls.append((method, params))
+        if struct is None:
+            return {"result": [{"errorMessage": "gid not found"}]}
+        return {"result": [{"result": [struct]}]}
+
+    monkeypatch.setattr(dl, "aria2_status", fake_status)
+    monkeypatch.setattr(dl, "aria2_rpc", fake_rpc)
+    return calls
+
+
+def _status_of(ref: str) -> DownloadRecord:
+    with session_scope() as s:
+        return s.exec(select(DownloadRecord).where(DownloadRecord.ref_id == ref)).first()
+
+
+async def test_reconcile_aria2_complete_marks_done(tmp_path, monkeypatch):
+    _seed_open("g-ok", dest=str(tmp_path / "x.mkv"))
+    _patch_aria2(monkeypatch, active=[], struct={"status": "complete", "completedLength": "100", "totalLength": "100"})
+    await hist.reconcile(_aria2_cfg())
+    r = _status_of("g-ok")
+    assert r.status == "done" and r.size_done == 100 and r.finished_at is not None
+
+
+async def test_reconcile_aria2_error_marks_failed_with_message(tmp_path, monkeypatch):
+    _seed_open("g-err", dest=str(tmp_path / "y.mkv"))
+    _patch_aria2(monkeypatch, active=[], struct={"status": "error", "error_message": "直链过期", "completedLength": "10"})
+    await hist.reconcile(_aria2_cfg())
+    r = _status_of("g-err")
+    assert r.status == "failed" and r.error == "直链过期"
+
+
+async def test_reconcile_gid_still_running_keeps_queued(tmp_path, monkeypatch):
+    _seed_open("g-run", dest=str(tmp_path / "z.mkv"))
+    calls = _patch_aria2(monkeypatch, active=[{"id": "g-run", "status": "downloading"}], struct=None)
+    await hist.reconcile(_aria2_cfg())
+    assert _status_of("g-run").status == "queued"
+    assert calls == []  # 仍在跑的不该去问 tellDownloadResult
+
+
+async def test_reconcile_falls_back_to_file_stat(tmp_path, monkeypatch):
+    dest = tmp_path / "already.mkv"
+    dest.write_bytes(b"0" * 100)
+    _seed_open("g-file", dest=str(dest))
+    _patch_aria2(monkeypatch, active=[], struct=None)  # gid 已被 aria2 丢弃
+    await hist.reconcile(_aria2_cfg())
+    r = _status_of("g-file")
+    assert r.status == "done" and r.size_done == 100
+
+
+async def test_reconcile_partial_file_stays_queued_until_stale(tmp_path, monkeypatch):
+    dest = tmp_path / "half.mkv"
+    dest.write_bytes(b"0" * 50)  # 大小不符，不能算完成
+    _seed_open("g-half", dest=str(dest))
+    _patch_aria2(monkeypatch, active=[], struct=None)
+    await hist.reconcile(_aria2_cfg())
+    assert _status_of("g-half").status == "queued"
+
+
+async def test_reconcile_builtin_orphan_young_keeps_queued(tmp_path, monkeypatch):
+    """内置 job 随进程重启消失、文件也不在：不足 24h 先不动。"""
+    _seed_open("b-new", source="builtin", dest=str(tmp_path / "none.mkv"))
+    _patch_aria2(monkeypatch, active=[], struct=None)
+    await hist.reconcile(_aria2_cfg())
+    assert _status_of("b-new").status == "queued"
+
+
+async def test_reconcile_builtin_orphan_stale_marks_failed(tmp_path, monkeypatch):
+    _seed_open("b-old", source="builtin", dest=str(tmp_path / "none2.mkv"))
+    _age("b-old", 25)
+    _patch_aria2(monkeypatch, active=[], struct=None)
+    await hist.reconcile(_aria2_cfg())
+    r = _status_of("b-old")
+    assert r.status == "failed" and "对账超时" in r.error
+
+
+async def test_reconcile_adopts_builtin_terminal_from_registry(tmp_path, monkeypatch):
+    """内存 registry 已有终态但库里还挂着：以 registry 为准补写（finish 漏写时自愈）。"""
+    jid = registry.create(task_id=901, taskname="T", filename="f.mkv", dest_path="/d/f.mkv", total=10)
+    _seed_open(jid, source="builtin")
+    registry.update(jid, done=10, status="stopped", error="已停止")
+    _patch_aria2(monkeypatch, active=[], struct=None)
+    await hist.reconcile(_aria2_cfg())
+    assert _status_of(jid).status == "stopped"
+    registry.remove(jid)
+
+
+async def test_reconcile_skips_aria2_when_mode_is_builtin(tmp_path, monkeypatch):
+    """内置模式下不该去敲 aria2 RPC（cfg.mode 非 aria2 时直接走兜底）。"""
+    _seed_open("g-off", source="aria2", dest=str(tmp_path / "off.mkv"))
+    calls = _patch_aria2(monkeypatch, active=[], struct={"status": "complete"})
+    await hist.reconcile(dl.DownloadSettings(mode="builtin"))
+    assert calls == []
+    assert _status_of("g-off").status == "queued"  # 既没问 RPC 也没文件，先挂着
 
 
