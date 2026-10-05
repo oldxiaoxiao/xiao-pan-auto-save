@@ -98,7 +98,17 @@ def test_position_rejects_unknown_where(client):
     task = _create(client, "非法参数")
     resp = client.post(f"/api/tasks/{task['id']}/position", params={"where": "nonsense"})
     assert resp.status_code == 400
-    assert "top" in resp.json()["detail"] and "bottom" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "只能" in detail and "top" in detail and "bottom" in detail
+
+
+def test_position_defaults_to_top(client):
+    t1 = _create(client, "默认1")
+    t2 = _create(client, "默认2")
+    resp = client.post(f"/api/tasks/{t1['id']}/position")
+    assert resp.status_code == 200
+    assert resp.json()["sort_order"] == -2  # 现最小值 -1 再前一格
+    assert _order(client) == [t1["id"], t2["id"]]
 
 
 def test_position_unknown_task_404(client):

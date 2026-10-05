@@ -131,7 +131,4 @@ const lastRun = computed(() => relativeTime(props.task.last_run_at));
   color: var(--text-muted);
   font-size: 12px;
 }
-.more-btn {
-  color: var(--text-muted);
-}
 </style>
