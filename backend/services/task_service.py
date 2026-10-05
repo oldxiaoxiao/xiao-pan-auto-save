@@ -14,7 +14,7 @@ from ..core.logstream import hub
 from ..core.router import route_driver
 from ..core.scheduler import has_valid_schedule, task_due_today
 from ..database import session_scope
-from ..models import Account, Task
+from ..models import Account, Task, run_mode_of
 
 STATUS_ICONS = {
     "updated": "✅",
@@ -137,6 +137,11 @@ async def _run_tasks_inner(
         if task.shareurl_ban:
             summary["skipped"] += 1
             tlog("warn", f"《{task.taskname}》已标记失效（{task.shareurl_ban}），跳过")
+            continue
+        # 仅手动 / 一次性：任何自动触发（全局 crontab 与任务级作业）都不驱动，只能手动点。
+        if trigger == "scheduled" and run_mode_of(task) != "follow":
+            summary["skipped"] += 1
+            tlog("info", f"《{task.taskname}》执行方式为 {run_mode_of(task)}，不由定时器驱动")
             continue
         # 全局 sweep（task_ids=None）只驱动「无有效独立调度」的任务：已自带有效 schedule 的任务
         # 由其专属 job 触发，避免同时被主 crontab 双驱动（如"仅周日"cron 却在每日全局点被执行）。

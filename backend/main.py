@@ -69,13 +69,13 @@ async def _run_one_task(task_id: int) -> None:
     from datetime import date, datetime
 
     from .database import session_scope
-    from .models import Task
+    from .models import Task, run_mode_of
     from .services import task_service
 
     with session_scope() as s:
         row = s.get(Task, task_id)
-    if row is None or row.disabled:
-        scheduler.unschedule_task(task_id)  # 任务已删/停用 → 撤销自身定时器
+    if row is None or row.disabled or run_mode_of(row) != "follow":
+        scheduler.unschedule_task(task_id)  # 已删 / 停用 / 改成非自动形态 → 撤销自身定时器
         return
     if row.enddate:
         try:
@@ -94,11 +94,15 @@ def apply_task_schedule(task) -> None:
     from functools import partial
 
     from .database import session_scope
-    from .models import Task
+    from .models import Task, run_mode_of
 
     with session_scope() as s:
         row = s.get(Task, task.id)
-    if row is None or row.disabled:
+    if row is None:
+        scheduler.unschedule_task(task.id)
+        return
+    if row.disabled or run_mode_of(row) != "follow":
+        # 停用、仅手动、一次性 都不该有任务级定时器：撤销而不是注册
         scheduler.unschedule_task(task.id)
         return
     scheduler.reschedule_task(task.id, getattr(row, "schedule", "") or "", partial(_run_one_task, task.id))

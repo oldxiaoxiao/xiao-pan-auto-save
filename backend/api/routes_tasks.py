@@ -12,7 +12,7 @@ from starlette.responses import StreamingResponse
 
 from ..core.logstream import hub
 from ..database import session_scope
-from ..models import RUN_MODES, Task
+from ..models import RUN_MODES, Task, run_mode_of
 from ..schemas import TaskIn, TaskOut
 from ..services.task_service import above_sort_order, below_sort_order, run_tasks
 
@@ -23,6 +23,8 @@ def _to_out(task: Task) -> TaskOut:
     data = task.model_dump()
     data["runweek"] = task.runweek_list()
     data["last_run_at"] = task.last_run_at.isoformat() if task.last_run_at else None
+    # 老库升级出来的空串在这层归一化：前端与油猴列表永远看不到 ''
+    data["run_mode"] = run_mode_of(task)
     return TaskOut(**data)
 
 

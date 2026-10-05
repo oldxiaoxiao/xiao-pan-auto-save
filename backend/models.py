@@ -16,6 +16,16 @@ def _now() -> datetime:
 RUN_MODES: tuple[str, str, str] = ("follow", "manual", "once")  # 定时追更 / 仅手动 / 一次性
 
 
+def run_mode_of(task) -> str:
+    """读取执行形态：老库升级出来的空串与任何未知值一律按 follow（定时追更）。
+
+    新列由 _auto_add_columns() 以 NOT NULL DEFAULT '' 补齐，存量行拿到的是空串而不是 "follow"；
+    不归一化就会把用户的存量追更任务误判成"不自动跑"，静默停更。
+    """
+    mode = getattr(task, "run_mode", "") or ""
+    return mode if mode in RUN_MODES else "follow"
+
+
 class Account(SQLModel, table=True):
     __tablename__ = "account"
 
