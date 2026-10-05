@@ -102,7 +102,7 @@ def test_external_add_task_defaults_to_follow_and_rejects_bad_value(client):
     assert bad == {"success": False, "code": 2, "message": "执行方式非法: weekly"}
 
 
-# ---------- 调度层：非 follow 既不注册任务级作业，也不参与全局 sweep ----------
+# ---------- 调度层：非 follow 不注册任务级作业；扫周期只驱动「该由每日扫管」的行 ----------
 
 
 def _make_task(mode: str, **extra) -> int:
@@ -191,7 +191,9 @@ def test_run_one_task_unschedules_itself_when_mode_changed():
 
 
 @pytest.mark.asyncio
-async def test_scheduled_sweep_skips_non_follow_modes(monkeypatch):
+async def test_scheduled_sweep_skips_manual_and_stalled_once(monkeypatch):
+    """spec 4.3 修订：仅手动永不由扫驱动；一次性只在停摆（预算用尽）时让位。
+    「等放出」的一次性由每日扫驱动——那半边正例在 test_once_retry_budget.py。"""
     acc_id = _seed_account()
     monkeypatch.setattr(ts, "route_driver", lambda url: OkDriver)
     ran: list[int] = []
@@ -201,7 +203,10 @@ async def test_scheduled_sweep_skips_non_follow_modes(monkeypatch):
         return TaskRunResult(status="no_changes")
 
     monkeypatch.setattr(ts, "run_update_task", fake_run_update)
-    ids = [_make_task(m, account_id=acc_id) for m in ("manual", "once")]
+    ids = [
+        _make_task("manual", account_id=acc_id),
+        _make_task("once", account_id=acc_id, retry_attempts=ts.ONCE_RETRY_LIMIT),  # 停摆行
+    ]
     try:
         summary = await ts.run_tasks(trigger="scheduled")
         assert summary["skipped"] == 2 and summary["total"] == 2
@@ -886,7 +891,7 @@ async def test_summary_driven_closes_the_arithmetic(monkeypatch):
     这是前端 RunSummary 的显示契约（「本次处理」不能再和「跳过」重复计数），必须被测试钉住。"""
     acc_id = _seed_account()
     driven_id = _make_task("follow", account_id=acc_id)  # 无独立调度 → 定时扫驱动
-    once_id = _make_task("once", account_id=acc_id)  # 按形态跳过
+    once_id = _make_task("once", account_id=acc_id, retry_attempts=ts.ONCE_RETRY_LIMIT)  # 停摆（重试用尽）→ 跳过
     dead_id = _make_task("follow", account_id=acc_id, disabled=True)  # 按停用跳过
     monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
     ran: list[str] = []

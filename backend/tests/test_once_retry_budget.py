@@ -4,14 +4,22 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pytest
+
+from backend import main
+from backend.core.engine import TaskRunResult
 from backend.core.scheduler import enddate_passed
-from backend.models import Task
+from backend.database import session_scope
+from backend.main import app, scheduler
+from backend.models import Account, Task
+from backend.services import task_service as ts
 from backend.services.task_service import (
     ONCE_RETRY_DELAY_MINUTES,
     ONCE_RETRY_LIMIT,
     once_next_driver,
     scheduled_should_run,
 )
+from backend.tests.test_task_run_mode import DownloadOkDriver, _drop_account, _seed_account
 
 
 def _t(**kw) -> Task:
@@ -126,3 +134,170 @@ def test_auto_add_columns_gives_existing_rows_safe_defaults(monkeypatch):
             assert once_next_driver(once) == "daily"  # 补列后也不能一上来就停摆
     finally:
         old.dispose()
+
+
+@pytest.fixture(scope="module")
+def client():
+    """本模块自己要打 HTTP 端点；照 test_task_run_mode 的写法开 TestClient。"""
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture(autouse=True)
+def clean_db():
+    """本模块自建自清：`run_tasks(trigger="scheduled")` 不带 task_ids 时会载入全表，
+    别的环境里残留的行会让「只有这一行进了引擎」这类断言变成顺序敏感的随机失败。
+    """
+    from sqlmodel import delete
+
+    for model in (Task, Account):
+        with session_scope() as s:
+            s.exec(delete(model))
+    yield
+    for model in (Task, Account):
+        with session_scope() as s:
+            s.exec(delete(model))
+
+
+def _persist(**kw) -> int:
+    with session_scope() as s:
+        t = _t(**kw)
+        s.add(t)
+        s.commit()
+        s.refresh(t)
+        return int(t.id)
+
+
+def _reload(tid: int) -> Task:
+    with session_scope() as s:
+        return s.get(Task, tid)
+
+
+def _delete(*ids: int) -> None:
+    """删行必须连作业一起撤：DateTrigger 作业在调度器停止时只是躺在 pending 里，
+    下一个开 TestClient 的用例一 start 就会真的把它跑起来，串扰到别人的断言。
+    """
+    with session_scope() as s:
+        for tid in ids:
+            row = s.get(Task, tid)
+            if row:
+                s.delete(row)
+    for tid in ids:
+        main.scheduler.unschedule_task(tid)
+        main.scheduler.unschedule_retry(tid)
+
+
+def _naive_run_date(job) -> datetime:
+    """DateTrigger 会把 naive 时间补成本地时区（apscheduler/triggers/date.py），
+    直接拿它减 naive 的 `when` 会抛 TypeError，所以先剥回 naive。
+    """
+    run_date = job.trigger.run_date
+    return run_date.replace(tzinfo=None) if run_date.tzinfo else run_date
+
+
+def test_once_with_retry_due_registers_a_one_shot_job():
+    from apscheduler.triggers.date import DateTrigger
+
+    when = datetime.now() + timedelta(minutes=5)
+    tid = _persist(retry_attempts=1, next_retry_at=when)
+    try:
+        main.apply_task_schedule(_reload(tid))
+        job = scheduler.scheduler.get_job(f"xiao_pan_retry_{tid}")
+        assert job is not None and isinstance(job.trigger, DateTrigger)
+        assert abs((_naive_run_date(job) - when).total_seconds()) < 5
+        assert scheduler.scheduler.get_job(f"xiao_pan_task_{tid}") is None  # 不挂周期作业
+    finally:
+        _delete(tid)
+
+
+def test_retry_job_is_cleared_when_budget_exhausted_or_disabled():
+    tid = _persist(retry_attempts=3, next_retry_at=datetime.now() + timedelta(minutes=5))
+    try:
+        main.apply_task_schedule(_reload(tid))
+        assert scheduler.scheduler.get_job(f"xiao_pan_retry_{tid}") is None
+    finally:
+        _delete(tid)
+
+
+def test_reschedule_all_rebuilds_pending_retry_after_restart():
+    """内存 JobStore 重启即空，重启恢复必须完全靠库里的 next_retry_at。"""
+    tid = _persist(retry_attempts=2, next_retry_at=datetime.now() + timedelta(minutes=5))
+    try:
+        main.apply_task_schedule(_reload(tid))
+        scheduler.unschedule_retry(tid)
+        assert scheduler.scheduler.get_job(f"xiao_pan_retry_{tid}") is None
+        main.reschedule_all_tasks()
+        assert scheduler.scheduler.get_job(f"xiao_pan_retry_{tid}") is not None
+    finally:
+        _delete(tid)
+
+
+def test_ordinary_once_task_gets_no_task_level_job():
+    """没排到点时间的一次性任务只靠每日扫，不能顺手给它挂个周期作业。"""
+    tid = _persist()
+    try:
+        main.apply_task_schedule(_reload(tid))
+        assert scheduler.scheduler.get_job(f"xiao_pan_task_{tid}") is None
+        assert scheduler.scheduler.get_job(f"xiao_pan_retry_{tid}") is None
+    finally:
+        _delete(tid)
+
+
+@pytest.mark.asyncio
+async def test_retry_job_run_clears_the_slot_before_running(monkeypatch):
+    """到点先清 next_retry_at 再跑：否则判定会把这轮当成"等重试"而自我跳过。"""
+    seen: dict[str, object] = {}
+
+    async def fake_run(task_ids=None, trigger="manual"):
+        row = _reload(task_ids[0])
+        seen["next_retry_at"] = row.next_retry_at
+        seen["trigger"] = trigger
+        return {"run_id": "x"}
+
+    monkeypatch.setattr(ts, "run_tasks", fake_run)
+    tid = _persist(retry_attempts=1, next_retry_at=datetime.now() - timedelta(minutes=1))
+    try:
+        await main._run_retry_task(tid)
+        assert seen["next_retry_at"] is None and seen["trigger"] == "scheduled"
+        assert _reload(tid).next_retry_at is None
+    finally:
+        _delete(tid)
+
+
+@pytest.mark.asyncio
+async def test_retry_job_run_on_deleted_task_is_silent(monkeypatch):
+    """作业躺在内存里、行已被删：直接返回，既不抛异常也不凭空造出一次运行。"""
+    called: list[int] = []
+
+    async def fake_run(task_ids=None, trigger="manual"):
+        called.append(task_ids[0])
+        return {"run_id": "x"}
+
+    monkeypatch.setattr(ts, "run_tasks", fake_run)
+    await main._run_retry_task(999999)  # 库里没有这一行
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_daily_sweep_defers_to_retry_job(monkeypatch):
+    acc_id = _seed_account()
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+    ran: list[str] = []
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        ran.append(spec.taskname)
+        return TaskRunResult(status="no_changes")
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    waiting = _persist(taskname="等放出")  # driver=daily → 每日扫驱动
+    pending = _persist(taskname="等重试", retry_attempts=1, next_retry_at=datetime.now() + timedelta(minutes=5))
+    try:
+        summary = await ts.run_tasks(trigger="scheduled")
+        assert ran == ["等放出"]  # "等重试"必须让位给它的到点作业
+        assert summary["skipped"] == 1 and summary["driven"] == 1
+        assert _reload(pending).retry_attempts == 1  # 让位不等于吃预算
+    finally:
+        _delete(waiting, pending)
+        _drop_account(acc_id)

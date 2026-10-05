@@ -202,12 +202,12 @@ async def _run_tasks_inner(
             summary["disabled_skipped"] += 1
             tlog("info", f"《{task.taskname}》已停用，本次不驱动")
             continue
-        # 仅手动 / 一次性：任何自动触发（全局 crontab 与任务级作业）都不驱动，只能手动点。
+        # 仅手动 / 一次性：自动触发能不能驱动这一行，只问 scheduled_should_run（判定的唯一出处）。
         if trigger == "scheduled":
-            mode = run_mode_of(task)
-            if mode != "follow":
+            should, why = scheduled_should_run(task)
+            if not should:
                 summary["skipped"] += 1
-                tlog("info", f"《{task.taskname}》执行方式为 {mode}，不由定时器驱动")
+                tlog("info", f"《{task.taskname}》本次不由定时器驱动：{why}")
                 continue
         # 全局 sweep（task_ids 为空：None 或 []，与 load_tasks 的真值判断同口径）只驱动「无有效独立调度」的任务：
         # 已自带有效 schedule 的任务由其专属 job 触发，避免同时被主 crontab 双驱动（如"仅周日"cron 却在每日全局点被执行）。

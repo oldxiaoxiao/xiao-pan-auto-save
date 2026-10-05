@@ -7,6 +7,7 @@ from datetime import date, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
@@ -59,6 +60,20 @@ class TaskScheduler:
             func, trigger=trigger, id=job_id, replace_existing=True, max_instances=1, coalesce=True
         )
         return str(trigger)
+
+    def reschedule_retry_at(self, task_id: int, when, func) -> str:
+        """排一次"到点就跑"的重试作业；到点执行后由结局判定决定是否再排。"""
+        job_id = f"xiao_pan_retry_{task_id}"
+        self.scheduler.add_job(
+            func, trigger=DateTrigger(run_date=when), id=job_id, replace_existing=True,
+            max_instances=1, coalesce=True,
+        )
+        return job_id
+
+    def unschedule_retry(self, task_id: int) -> None:
+        job_id = f"xiao_pan_retry_{task_id}"
+        if self.scheduler.get_job(job_id):
+            self.scheduler.remove_job(job_id)
 
     def unschedule_task(self, task_id: int) -> None:
         job_id = f"xiao_pan_task_{task_id}"

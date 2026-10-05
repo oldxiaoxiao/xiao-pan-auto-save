@@ -90,20 +90,52 @@ async def _run_one_task(task_id: int) -> None:
         hub.make_logger("scheduled")("error", f"任务 {task_id} 运行异常：{exc}")
 
 
+async def _run_retry_task(task_id: int) -> None:
+    """一次性任务的到点重试：先清掉这一格，再走同一套运行与判定。
+
+    必须先清：once_next_driver 见 next_retry_at 非空会答"等重试作业"，
+    不清就等于这轮运行自己把自己跳过。
+    """
+    from .database import session_scope
+    from .models import Task
+    from .services import task_service
+
+    with session_scope() as s:
+        row = s.get(Task, task_id)
+        if row is None:
+            return
+        row.next_retry_at = None
+        s.add(row)
+    try:
+        await task_service.run_tasks(task_ids=[task_id], trigger="scheduled")
+    except Exception as exc:  # noqa: BLE001
+        hub.make_logger("scheduled")("error", f"任务 {task_id} 重试运行异常：{exc}")
+
+
 def apply_task_schedule(task) -> None:
     from functools import partial
 
     from .database import session_scope
     from .models import Task, run_mode_of
+    from .services.task_service import once_next_driver
 
     with session_scope() as s:
         row = s.get(Task, task.id)
     if row is None:
         scheduler.unschedule_task(task.id)
+        scheduler.unschedule_retry(task.id)
         return
-    if row.disabled or run_mode_of(row) != "follow":
-        # 停用、仅手动、一次性 都不该有任务级定时器：撤销而不是注册
-        scheduler.unschedule_task(task.id)
+    scheduler.unschedule_task(task.id)  # 形态可能从 follow 改成 once，旧周期作业必须先撤
+    driver = once_next_driver(row)
+    if row.disabled or run_mode_of(row) == "manual" or driver == "halted":
+        scheduler.unschedule_retry(task.id)
+        return
+    if run_mode_of(row) == "once":
+        # 一次性：只有排了到点时间才注册作业；否则交给每日扫"等放出"
+        if driver == "retry" and row.next_retry_at is not None:
+            scheduler.reschedule_retry_at(row.id, row.next_retry_at, partial(_run_retry_task, row.id))
+        else:
+            scheduler.unschedule_retry(task.id)
         return
     scheduler.reschedule_task(task.id, getattr(row, "schedule", "") or "", partial(_run_one_task, task.id))
 
