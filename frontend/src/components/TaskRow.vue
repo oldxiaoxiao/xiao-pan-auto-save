@@ -14,6 +14,31 @@ function onPosition(where: "top" | "bottom") {
   emit("position", where);
 }
 
+const WEEK_CN = ["日", "一", "二", "三", "四", "五", "六"];
+
+/** 更新频率口语化：本项目只有 interval:分钟 与 cron:<标准 5 段> 两种写法，够用了。
+ *  每天/每周X HH:MM、每 N 分钟；认不出来的写法（含非法值，后端会回退全局 crontab）返回空串，
+ *  由调用方显示「继承全局」。刻意不引 cron 解析库。 */
+function humanFrequency(schedule: string): string {
+  const raw = (schedule || "").trim();
+  const interval = /^interval:(\d+)$/i.exec(raw);
+  if (interval) return Number(interval[1]) > 0 ? `每 ${Number(interval[1])} 分钟` : "";
+  const body = /^cron:(.+)$/i.exec(raw)?.[1]?.trim();
+  const fields = (body || "").split(/\s+/);
+  if (fields.length !== 5) return "";
+  const [minute, hour, dom, month, dow] = fields;
+  // 只口语化「分/时 + 每月每天」这一族；带日期区间或月份限定的交给原始值，别硬编
+  if (dom !== "*" || month !== "*" || !/^\d{1,2}$/.test(minute) || !/^\d{1,2}$/.test(hour)) return "";
+  if (Number(minute) > 59 || Number(hour) > 23) return "";
+  const time = `${hour.padStart(2, "0")}:${minute.padStart(2, "0")}`;
+  if (dow === "*") return `每天 ${time}`;
+  if (!/^\d(?:,\d){0,6}$/.test(dow)) return "";
+  const nums = dow.split(",").map((d) => Number(d));
+  if (nums.some((d) => d > 7)) return ""; // cron 的周是 0-7（0 与 7 都是周日），越界当作认不出
+  const days = [...new Set(nums.map((d) => d % 7))];
+  return `每周${days.map((d) => WEEK_CN[d]).join("、")} ${time}`;
+}
+
 const chips = computed(() => {
   const t = props.task;
   const list: { key: string; text: string; primary?: boolean; success?: boolean }[] = [];
@@ -21,7 +46,11 @@ const chips = computed(() => {
   if (t.run_mode === "manual") list.push({ key: "m", text: "仅手动" });
   if (t.run_mode === "once" && !t.disabled) list.push({ key: "o", text: "一次性待执行", primary: true });
   if (t.run_mode === "once" && t.disabled) list.push({ key: "done", text: "已完成", success: true });
-  if (t.run_mode === "follow" && t.schedule) list.push({ key: "s", text: `频率 ${t.schedule}` });
+  if (t.run_mode === "follow" && t.schedule) {
+    const freq = humanFrequency(t.schedule);
+    // 非法/自定义到认不出的频率：后端确实回退了全局 crontab，这里就说实话
+    list.push({ key: "s", text: freq ? `频率 ${freq}` : "继承全局" });
+  }
   if (t.pattern) list.push({ key: "p", text: `正则 ${t.pattern}`, primary: true });
   if (t.replace) list.push({ key: "r", text: `替换 ${t.replace}` });
   if (t.ignore_extension) list.push({ key: "e", text: "忽略扩展名" });

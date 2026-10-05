@@ -103,20 +103,23 @@ watch(
     <div v-if="summary" class="summary">
       <div class="summary__title">本次运行统计（run_id: {{ summary.run_id }}）</div>
       <div class="stat-row">
-        <span
+        <span class="muted" title="本次载入的任务行数，含被跳过的行；= 实际运行 + 跳过 + 跳过已停用"
           >总数 <b>{{ summary.total }}</b></span
+        >
+        <span class="driven" title="本次真正驱动的任务数 = 总数 - 跳过 - 跳过已停用"
+          >实际运行 <b>{{ summary.driven }}</b></span
         >
         <span class="ok"
           >更新 <b>{{ summary.updated }}</b></span
+        >
+        <span class="bad"
+          >失败 <b>{{ summary.failed }}</b></span
         >
         <span class="muted"
           >跳过 <b>{{ summary.skipped }}</b></span
         >
         <span class="muted"
           >跳过已停用 <b>{{ summary.disabled_skipped }}</b></span
-        >
-        <span class="bad"
-          >失败 <b>{{ summary.failed }}</b></span
         >
       </div>
     </div>
@@ -192,6 +195,9 @@ watch(
 }
 .stat-row .ok {
   color: #1c9e6e;
+}
+.stat-row .driven {
+  color: var(--primary);
 }
 .stat-row .bad {
   color: var(--danger);

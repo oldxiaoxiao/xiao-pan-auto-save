@@ -205,7 +205,10 @@ export interface LogEntry {
 export interface RunSummary {
   run_id: string;
   trigger: string;
+  /** 本次载入的行数，**含停用行**（实际跑了几个看 driven）。 */
   total: number;
+  /** 实际驱动的行数 = total - skipped - disabled_skipped；后端派生，不单独计数。 */
+  driven: number;
   updated: number;
   skipped: number;
   /** 批量「立即运行」跳过的已停用任务数（行内「▶ 运行」不计）。 */
