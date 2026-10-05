@@ -12,7 +12,7 @@ from starlette.responses import StreamingResponse
 
 from ..core.logstream import hub
 from ..database import session_scope
-from ..models import Task
+from ..models import RUN_MODES, Task
 from ..schemas import TaskIn, TaskOut
 from ..services.task_service import above_sort_order, below_sort_order, run_tasks
 
@@ -26,6 +26,12 @@ def _to_out(task: Task) -> TaskOut:
     return TaskOut(**data)
 
 
+def _check_run_mode(value: str) -> None:
+    """执行方式非法必须报错，不能像 schedule 那样静默回退成每天跑。"""
+    if value not in RUN_MODES:
+        raise HTTPException(400, f"执行方式只能是 {' / '.join(RUN_MODES)}")
+
+
 @router.get("", response_model=list[TaskOut])
 async def list_tasks() -> list[TaskOut]:
     with session_scope() as session:
@@ -35,6 +41,7 @@ async def list_tasks() -> list[TaskOut]:
 
 @router.post("", response_model=TaskOut)
 async def create_task(body: TaskIn) -> TaskOut:
+    _check_run_mode(body.run_mode)
     with session_scope() as session:
         data = body.model_dump(exclude={"runweek"})
         # 新建置顶：请求里的 sort_order 不作数（表单恒发 0，会与当前首行相撞），
@@ -53,6 +60,7 @@ async def create_task(body: TaskIn) -> TaskOut:
 
 @router.put("/{task_id}", response_model=TaskOut)
 async def update_task(task_id: int, body: TaskIn) -> TaskOut:
+    _check_run_mode(body.run_mode)
     with session_scope() as session:
         task = session.get(Task, task_id)
         if not task:

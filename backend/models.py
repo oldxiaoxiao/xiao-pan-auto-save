@@ -13,6 +13,9 @@ def _now() -> datetime:
     return datetime.now()
 
 
+RUN_MODES: tuple[str, str, str] = ("follow", "manual", "once")  # 定时追更 / 仅手动 / 一次性
+
+
 class Account(SQLModel, table=True):
     __tablename__ = "account"
 
@@ -58,6 +61,7 @@ class Task(SQLModel, table=True):
     episode_end: int = 0  # 结束集（含），0=不限
     quality: str = ""  # 逗号分隔 token，如 "1080p,4k"，空=不限
     schedule: str = ""  # ""=继承全局；interval:N=每N分钟；cron:<expr>
+    run_mode: str = "follow"  # follow=定时追更 | manual=仅手动 | once=一次性（跑完自动停用）
     last_run_at: NaiveDatetime | None = None
     created_at: NaiveDatetime = Field(default_factory=_now)
 

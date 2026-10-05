@@ -27,6 +27,7 @@ class TaskIn(BaseModel):
     episode_end: int = 0
     quality: str = ""
     schedule: str = ""
+    run_mode: str = "follow"
 
 
 class TaskOut(TaskIn):

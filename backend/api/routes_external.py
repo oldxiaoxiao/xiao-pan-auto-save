@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlmodel import select
 
 from ..database import session_scope
-from ..models import ExternalApiToken, Task
+from ..models import RUN_MODES, ExternalApiToken, Task
 from ..services.task_service import above_sort_order
 
 router = APIRouter(tags=["external"])
@@ -92,6 +92,9 @@ async def add_task(request: Request) -> dict:
     for field in ("taskname", "shareurl", "savepath"):
         if not data.get(field):
             return {"success": False, "code": 2, "message": f"缺少必要字段: {field}"}  # 兼容原码
+    run_mode = data.get("run_mode", "follow")
+    if run_mode not in RUN_MODES:
+        return {"success": False, "code": 2, "message": f"执行方式非法: {run_mode}"}
     with session_scope() as session:
         task = Task(
             taskname=data["taskname"],
@@ -105,6 +108,7 @@ async def add_task(request: Request) -> dict:
             update_subdir_resave=bool(data.get("update_subdir_resave_mode")),
             enddate=data.get("enddate", ""),
             runweek=str(data.get("runweek", "[]")),
+            run_mode=run_mode,
             # 与网页新建同一条规则：排到列表最前（不给的话会落回模型默认 0，被 id 兜底排到中间）
             sort_order=above_sort_order(session),
         )
