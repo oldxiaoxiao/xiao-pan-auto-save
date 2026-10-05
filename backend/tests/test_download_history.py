@@ -228,9 +228,9 @@ def test_delete_record_true_and_row_gone():
 def _close_leftover_open_records():
     """共享临时库的隔离夹具：把此前用例遗留的非终态记录先收口。
 
-    否则 open_records 会把旧 queued 一起带进 multicall 的 asked 列表：
-    返回按位置对齐时 struct 会错位到别的 gid 上，"calls == []" 断言也会被旧记录触发。
-    对账用例只关心自己 seed 的那一条，先清场才能各用例自洽。
+    否则 open_records 会把旧 queued 一起带进对账询问的 gid 集合：
+    fake 按下到的 gid 返回结果，预期外的 gid 会 KeyError；"calls == []" 断言也会被旧记录触发。
+    对账用例只关心自己 seed 的那几条，先清场才能各用例自洽。
     """
     with session_scope() as s:
         rows = s.exec(select(DownloadRecord).where(col(DownloadRecord.status).in_(("queued", "downloading")))).all()
@@ -261,10 +261,12 @@ def _aria2_cfg() -> dl.DownloadSettings:
 def _patch_aria2(monkeypatch, *, active: list[dict], struct=None, structs: dict[str, dict | None] | None = None):
     """active：aria2_status 返回的进行中 job（用 id 标识 gid）。
 
-    struct：所有被问 gid 共用的单条 tellDownloadResult（None 表示 gid 已被 aria2 丢弃）；
-    structs：多 gid 用例按 gid 分别指定结果，值为 None 同样表示被丢弃。
-    返回条目从代码实际发出的 multicall 参数里读出 gid、按请求顺序逐条构造：
-    若实现把 asked 与 result 的 zip 写反或逆序，错配会直接反映到断言上，而不是被固定单条返回掩盖。
+    struct：所有被问 gid 共用的单条 aria2.tellStatus 结果；
+    structs：多 gid 用例按 gid 分别指定结果，值为 None 表示真机查不到该 gid
+            （aria2 丢弃结果后 RPC 返回 JSON-RPC error 体，不是异常——真机实测）。
+    真机没有 tellDownloadResult，也没有可用的 system.multicall（前导 token 会被拒），
+    所以这里按被问的那个 gid 返回它自己的结果体：实现若把某个 gid 的 struct 安到别的行上，
+    对应行的断言会直接失败。方法名不认识时同样返回真机那种 error 体，让实现走兜底而不是抛异常。
     """
     calls: list[tuple] = []
 
@@ -273,12 +275,11 @@ def _patch_aria2(monkeypatch, *, active: list[dict], struct=None, structs: dict[
 
     async def fake_rpc(cfg, method, *params):
         calls.append((method, params))
-        asked = [c["params"][0] for c in params[0]]  # multicall 每个子调用只带一个 gid
-        entries = []
-        for gid in asked:
-            s = struct if structs is None else structs[gid]  # KeyError 即代码问了预期外的 gid
-            entries.append({"errorMessage": f"{gid} not found"} if s is None else {"result": [s]})
-        return {"result": entries}
+        if method != "aria2.tellStatus":
+            return {"error": {"code": 1, "message": f"No such method: {method.removeprefix('aria2.')}"}}
+        gid = params[0]  # token 由 aria2_rpc 统一前置，业务函数收到的是裸 gid
+        s = struct if structs is None else structs[gid]  # KeyError 即代码问了预期外的 gid
+        return {"result": s} if s is not None else {"error": {"code": 1, "message": f"gid {gid} 不存在"}}
 
     monkeypatch.setattr(dl, "aria2_status", fake_status)
     monkeypatch.setattr(dl, "aria2_rpc", fake_rpc)
@@ -298,12 +299,53 @@ async def test_reconcile_aria2_complete_marks_done(tmp_path, monkeypatch):
     assert r.status == "done" and r.size_done == 100 and r.finished_at is not None
 
 
-async def test_reconcile_aria2_error_marks_failed_with_message(tmp_path, monkeypatch):
-    _seed_open("g-err", dest=str(tmp_path / "y.mkv"))
-    _patch_aria2(monkeypatch, active=[], struct={"status": "error", "error_message": "直链过期", "completedLength": "10"})
+async def test_reconcile_aria2_failure_reason_is_backfilled(tmp_path, monkeypatch):
+    """真机失败作业的理由字段是 camelCase errorMessage（实测），要原样进账本供排查。"""
+    dest = tmp_path / "y.mkv"
+    _seed_open("g-err", dest=str(dest))
+    _patch_aria2(monkeypatch, active=[], structs={
+        "g-err": {"status": "error", "errorCode": "22", "errorMessage": "直链过期", "completedLength": "10"},
+    })
     await hist.reconcile(_aria2_cfg())
     r = _status_of("g-err")
     assert r.status == "failed" and r.error == "直链过期"
+    assert not dest.exists()  # 文件从没落地：只能是 RPC 判出来的 failed
+
+
+async def test_reconcile_aria2_removed_marks_failed(tmp_path, monkeypatch):
+    _seed_open("g-gone", dest=str(tmp_path / "r.mkv"))
+    _patch_aria2(monkeypatch, active=[], struct={"status": "removed", "completedLength": "0"})
+    await hist.reconcile(_aria2_cfg())
+    assert _status_of("g-gone").status == "failed"
+
+
+async def test_reconcile_tellstatus_requests_lean_keys(tmp_path, monkeypatch):
+    """tellStatus 不传 keys 会把 files[] 整块带回来（真机实测几百条 uri），对账用不上：必须显式列字段。"""
+    _seed_open("g-keys", dest=str(tmp_path / "k.mkv"))
+    calls = _patch_aria2(monkeypatch, active=[], struct={"status": "complete", "completedLength": "100",
+                                                          "totalLength": "100"})
+    await hist.reconcile(_aria2_cfg())
+    assert [m for m, _ in calls] == ["aria2.tellStatus"]  # 不再有 system.multicall / tellDownloadResult
+    gid, keys = calls[0][1]
+    assert gid == "g-keys"
+    assert "files" not in keys
+    assert set(keys) >= {"gid", "status", "totalLength", "completedLength", "errorCode", "errorMessage"}
+
+
+async def test_reconcile_non_terminal_aria2_status_leaves_row_alone(tmp_path, monkeypatch):
+    """tellStatus 回 active/waiting/paused 时不许收口：即便文件已同大小在原地，也只能由进行中语义展示。"""
+    dest = tmp_path / "still-running.mkv"
+    dest.write_bytes(b"0" * 100)
+    for ref in ("g-active", "g-wait", "g-pause"):
+        _seed_open(ref, dest=str(dest))
+    _patch_aria2(monkeypatch, active=[], structs={
+        "g-active": {"status": "active", "completedLength": "1", "totalLength": "100"},
+        "g-wait": {"status": "waiting", "completedLength": "0", "totalLength": "100"},
+        "g-pause": {"status": "paused", "completedLength": "0", "totalLength": "100"},
+    })
+    await hist.reconcile(_aria2_cfg())
+    for ref in ("g-active", "g-wait", "g-pause"):
+        assert _status_of(ref).status == "queued"
 
 
 async def test_reconcile_gid_still_running_keeps_queued(tmp_path, monkeypatch):
@@ -311,7 +353,7 @@ async def test_reconcile_gid_still_running_keeps_queued(tmp_path, monkeypatch):
     calls = _patch_aria2(monkeypatch, active=[{"id": "g-run", "status": "downloading"}], struct=None)
     await hist.reconcile(_aria2_cfg())
     assert _status_of("g-run").status == "queued"
-    assert calls == []  # 仍在跑的不该去问 tellDownloadResult
+    assert calls == []  # 仍在跑的不该去问 tellStatus
 
 
 async def test_reconcile_falls_back_to_file_stat(tmp_path, monkeypatch):
@@ -370,41 +412,66 @@ async def test_reconcile_skips_aria2_when_mode_is_builtin(tmp_path, monkeypatch)
     assert _status_of("g-off").status == "queued"  # 既没问 RPC 也没文件，先挂着
 
 
-async def test_reconcile_multicall_aligns_results_per_asked_gid(tmp_path, monkeypatch):
-    """一次问两个开放 gid：第一个已被 aria2 丢弃（errorMessage 条目）、第二个有 complete 结果。
+async def test_reconcile_applies_each_gid_its_own_struct(tmp_path, monkeypatch):
+    """交错三个开放 gid：complete / error / 已被 aria2 丢弃，各行的结局只能来自它自己那条 struct。
 
-    返回按代码实际请求的 gid 顺序逐条构造；zip 操作数写反或 asked 逆序都会让两条互串结局
-    （被丢弃的错标 done、有结果的悬挂 queued），本用例即可抓住。
+    per-gid 调用把"按位置 zip"这个错配来源消掉了，但换了个错配面：结果按 gid 归档时必须
+    认得回同一行。g-drop 的文件不在、也不足 24h，只能保持 queued——若 struct 互串，
+    它会错标 done 或 g-full 会悬挂。
     """
-    _seed_open("g-drop", dest=str(tmp_path / "drop.mkv"))  # 文件不在：只能落 24h 兜底
+    _seed_open("g-drop", dest=str(tmp_path / "drop.mkv"))
     _seed_open("g-full", dest=str(tmp_path / "full.mkv"))
+    _seed_open("g-bad", dest=str(tmp_path / "bad.mkv"))
     _patch_aria2(monkeypatch, active=[], structs={
         "g-drop": None,
         "g-full": {"status": "complete", "completedLength": "100", "totalLength": "100"},
+        "g-bad": {"status": "error", "errorCode": "2", "errorMessage": "没有可用的直链", "completedLength": "0"},
     })
     await hist.reconcile(_aria2_cfg())
     assert _status_of("g-drop").status == "queued"  # 各归各：走文件兜底，不足 24h 先挂着
     r = _status_of("g-full")
-    assert r.status == "done" and r.size_done == 100 and r.finished_at is not None
+    assert r.status == "done" and r.size_done == 100 and r.finished_at is not None and not r.error
+    bad = _status_of("g-bad")
+    assert bad.status == "failed" and bad.error == "没有可用的直链"
 
 
 async def test_reconcile_aria2_error_field_accepts_both_spellings(tmp_path, monkeypatch):
-    """tellDownloadResult 结构体里错误字段两种拼写都要认：snake_case error_message（aria2 惯例）
-    与 camelCase errorMessage（与封装层一致）；两者皆无才落通用文案。"""
-    _seed_open("g-snake", dest=str(tmp_path / "s.mkv"))
+    """结果体里错误理由两种拼写都要认：camelCase errorMessage（真机实测字段）优先，
+    snake_case error_message 兼容；两者皆空但有非零 errorCode 时把码带上（可诊断），
+    连码都没有才落通用文案。"""
     _seed_open("g-camel", dest=str(tmp_path / "c.mkv"))
+    _seed_open("g-snake", dest=str(tmp_path / "s.mkv"))
+    _seed_open("g-code", dest=str(tmp_path / "e.mkv"))
     _seed_open("g-bare", dest=str(tmp_path / "b.mkv"))
     _patch_aria2(monkeypatch, active=[], structs={
-        "g-snake": {"status": "error", "error_message": "直链过期", "completedLength": "10"},
         "g-camel": {"status": "error", "errorMessage": "种子不足", "completedLength": "5"},
+        "g-snake": {"status": "error", "error_message": "直链过期", "completedLength": "10"},
+        "g-code": {"status": "error", "errorCode": "22", "errorMessage": "", "completedLength": "0"},
         "g-bare": {"status": "error", "completedLength": "0"},
     })
     await hist.reconcile(_aria2_cfg())
-    for ref in ("g-snake", "g-camel", "g-bare"):
+    for ref in ("g-camel", "g-snake", "g-code", "g-bare"):
         assert _status_of(ref).status == "failed"
-    assert _status_of("g-snake").error == "直链过期"
     assert _status_of("g-camel").error == "种子不足"  # 不能退化成通用文案
+    assert _status_of("g-snake").error == "直链过期"
+    assert "22" in _status_of("g-code").error  # 理由为空也要能从行里查出是哪个 aria2 错误码
     assert _status_of("g-bare").error == "aria2 未成功"
+
+
+async def test_reconcile_unreachable_daemon_raises_nothing(tmp_path, monkeypatch):
+    """daemon 不可达时逐 gid 的异常必须被咽下：对账跑在历史查询的 HTTP 请求里，不能冒泡。"""
+    _seed_open("g-dead", dest=str(tmp_path / "orphan.mkv"))
+
+    async def boom_status(cfg):
+        raise OSError("connection refused")
+
+    async def boom_rpc(cfg, method, *params):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(dl, "aria2_status", boom_status)
+    monkeypatch.setattr(dl, "aria2_rpc", boom_rpc)
+    await hist.reconcile(_aria2_cfg())  # 不抛
+    assert _status_of("g-dead").status == "queued"  # 既问不到也没文件：先挂着，等 24h 兜底
 
 
 async def test_reconcile_file_fallback_records_real_size_when_total_zero(tmp_path, monkeypatch):

@@ -222,7 +222,7 @@ def _file_check(path: str, size_total: int) -> tuple[str, bool, int]:
 
 
 async def reconcile(cfg) -> None:
-    """收口非终态记录：aria2 问 RPC → 文件 stat 兜底 → 超 24h 判失败。
+    """收口非终态记录：aria2 逐 gid 问 tellStatus → 文件 stat 兜底 → 超 24h 判失败。
 
     cfg 为 DownloadSettings；调用方（路由层）负责读配置，本函数不碰 setting。
     延迟导入 download_service 是为了避开与写入点的循环导入。
@@ -245,22 +245,36 @@ async def reconcile(cfg) -> None:
             running = set()
         asked = [r["ref_id"] for r in rows if r["source"] == "aria2" and r["ref_id"] not in running]
         if asked:
-            try:
-                resp = await aria2_rpc(
-                    cfg, "system.multicall",
-                    [{"methodName": "aria2.tellDownloadResult", "params": [g]} for g in asked],
-                )
-                # system.multicall 的返回按 asked gid 顺序一一对应
-                for gid, entry in zip(asked, resp.get("result") or [], strict=False):
-                    if "errorMessage" in entry:
-                        continue  # gid 结果已被 aria2 丢弃，走文件兜底
-                    struct = (entry.get("result") or [None])[0]
-                    if struct:
-                        results[gid] = struct
-            except Exception as exc:  # noqa: BLE001
-                # 同上：这一下炸了整轮 tellDownloadResult 都没了，不留一行日志就只剩猜
-                logger.debug("对账时批量询问 aria2 tellDownloadResult 失败，全部降级到文件兜底：%s", exc)
-                results = {}
+            # 真机 aria2 1.36.0 实测：listMethods 里没有 aria2.tellDownloadResult，
+            # system.multicall 又拒绝 aria2_rpc 前置的 token（"The parameter at 0 has wrong type"），
+            # 所以终态只能逐个 gid 问 aria2.tellStatus。显式列 keys：不传时真机会把整个 files[]
+            # （几百条 uri）带回来，对账一个字段也用不上。
+            keys = ["gid", "status", "totalLength", "completedLength", "errorCode", "errorMessage"]
+            # 并发上限：asked 正常只有几条，但后端崩溃重启后可能一次攒出成百上千行非终态记录，
+            # 而 reconcile 是在历史查询的 HTTP 请求里 await 的——不加闸会瞬间开出等量 httpx 连接
+            gate = asyncio.Semaphore(16)
+
+            async def ask(gid: str) -> dict | None:
+                """问单个 gid 的结果体；问不到（不可达 / JSON-RPC error）返回 None 交给文件兜底。"""
+                try:
+                    async with gate:
+                        resp = await aria2_rpc(cfg, "aria2.tellStatus", gid, keys)
+                except Exception as exc:  # noqa: BLE001 daemon 不可达时静默降级到文件兜底
+                    logger.debug("对账时询问 aria2 tellStatus 异常（gid %s），降级到文件兜底：%s", gid, exc)
+                    return None
+                if "error" in resp:
+                    # gid 结果已被 aria2 丢弃或从未存在：真机给的是 JSON-RPC error 体（实测
+                    # {"error":{"code":1,"message":"GID xxx is not found"}}），不是异常
+                    logger.debug("aria2 查不到 gid %s（%s），降级到文件兜底", gid, resp.get("error"))
+                    return None
+                return resp.get("result") or None
+
+            # gid 集合通常很小（非终态且不在活动队列），并发问完即可；gather 保序，
+            # 结果按 asked 里的 gid 归档，不存在按位置错配到别行的可能
+            structs = await asyncio.gather(*(ask(g) for g in asked), return_exceptions=True)
+            for gid, struct in zip(asked, structs, strict=False):
+                if isinstance(struct, dict):
+                    results[gid] = struct
 
     now = datetime.now()
     for r in rows:
@@ -288,11 +302,17 @@ async def reconcile(cfg) -> None:
                                size_total=int(struct.get("totalLength") or r["size_total"] or 0))
                         continue
                     if state in ("error", "removed"):
-                        # 结构体里错误字段两种拼写都读：snake（aria2 惯例）优先，camel 兜底
+                        # 失败理由：真机字段是 camelCase errorMessage，snake_case 兼容；
+                        # 两者皆空但有非零 errorCode 时把码带上，至少这行可诊断
+                        reason = str(struct.get("errorMessage") or struct.get("error_message") or "").strip()
+                        code = str(struct.get("errorCode") or "").strip()
+                        if not reason:
+                            reason = f"aria2 未成功（errorCode {code}）" if code not in ("", "0") else "aria2 未成功"
                         finish(ref, source=source, status="failed",
-                               size_done=int(struct.get("completedLength") or 0),
-                               error=str(struct.get("error_message") or struct.get("errorMessage") or "aria2 未成功"))
+                               size_done=int(struct.get("completedLength") or 0), error=reason)
                         continue
+                    if state in ("active", "waiting", "paused"):
+                        skip = True  # 仍在跑/排队（正常情况下这些 gid 来自 aria2_status），绝不据此收口
 
         if skip:
             continue

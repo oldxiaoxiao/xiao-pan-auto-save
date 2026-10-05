@@ -1,4 +1,4 @@
-"""aria2 真机端到端活体验证（opt-in）：投递 → 落盘 → 对账（RPC/文件兜底）→ 重下 → Emby 接线。
+"""aria2 真机端到端活体验证（opt-in）：投递 → 落盘 → 对账（tellStatus/文件兜底）→ 重下 → Emby 接线。
 
 默认跳过，普通套件永不依赖 Docker。启用方式（需真 aria2 环境就绪，见下）：
     XIAO_PAN_ARIA2_E2E=1 .venv/bin/python -m pytest backend/tests/test_download_aria2_live.py -q
@@ -47,6 +47,8 @@ SCRATCH = Path("/tmp/xiao-pan-aria2-e2e")
 DOWNLOADS = SCRATCH / "downloads"
 SERVE_DIR = SCRATCH / "serve"
 GID_RE = re.compile(r"[0-9a-f]{16}")  # 真 aria2 的 gid 是 16 位十六进制
+# 对账问 tellStatus 时显式要的字段（不传 keys 时真机会带回整个 files[]，实测几百条 uri，对账用不上）
+TELL_KEYS = ["gid", "status", "totalLength", "completedLength", "errorCode", "errorMessage"]
 
 
 def _daemon_version() -> str:
@@ -263,7 +265,40 @@ def e2e():
         shutil.rmtree(d, ignore_errors=True)
 
 
-# ---------------------------------------------------------------- 六项活体验证
+# ---------------------------------------------------------------- RPC 观测
+
+
+@pytest.fixture
+def rpc_spy(monkeypatch):
+    """记录生产代码经 aria2_rpc 实际发出的调用（method + 业务参数 + 真机原始响应）。
+
+    投递走 _aria2_submit 自带的 httpx payload，不经过 aria2_rpc，所以这里只会看到对账的问法。
+    """
+    seen: list[tuple] = []
+    original = dl.aria2_rpc
+
+    async def spy(cfg, method, *params):
+        resp = await original(cfg, method, *params)
+        seen.append((method, params, resp))
+        return resp
+
+    monkeypatch.setattr(dl, "aria2_rpc", spy)
+    return seen
+
+
+def _reassign_dest(ref: str, dest: str) -> None:
+    """把 scratch 库里的 dest_path 改指到别处（测试脚手架，不是生产路径）。
+
+    用途：让文件 stat 兜底当场失效，从而证明 done 只可能来自 RPC 结果。
+    """
+    with session_scope() as s:
+        row = s.exec(select(DownloadRecord).where(col(DownloadRecord.ref_id) == ref)
+                     .order_by(col(DownloadRecord.id).desc())).first()
+        row.dest_path = dest
+        s.add(row)
+
+
+# ---------------------------------------------------------------- 七项活体验证
 
 async def test_01_submit_writes_queued_row_and_file_lands(hub, e2e):
     """第 1+2 项：download_items aria2 模式投递真 daemon → 账本 queued 行（真 gid）→ 真机把文件落进挂载目录。"""
@@ -291,7 +326,7 @@ async def test_01_submit_writes_queued_row_and_file_lands(hub, e2e):
     ev("投递后账本行", r)
 
     struct = wait_result(gid, "complete")
-    ev("tellDownloadResult(complete)", struct)
+    ev("tellStatus(complete)", struct)
 
     dest = Path(r["dest_path"])
     assert dest.exists() and dest.stat().st_size == src["size"]
@@ -308,13 +343,15 @@ async def test_01_submit_writes_queued_row_and_file_lands(hub, e2e):
     assert head["headers"].get("user-agent") == "FakeUA/9.9"  # addUri header 选项原样到达源站
 
 
-async def test_02_reconcile_completes_row_with_backfill(hub, e2e):
-    """第 3 项：reconcile 把 queued 收口成 done，回填 size_done/size_total/finished_at。
+async def test_02_reconcile_completes_row_with_backfill(hub, e2e, rpc_spy):
+    """第 3 项：reconcile 用 aria2.tellStatus 把 queued 收口成 done，回填 size_done/size_total/finished_at。
 
-    真机分歧（记录，不在本提交修）：生产的问法 system.multicall + aria2.tellDownloadResult
-    在真 aria2 上整段不可达——listMethods 无 tellDownloadResult，multicall 拒绝前导 token，
-    子调用形状也与实现的解析假设不符。本用例先把这些原始响应打进证据，再断言 reconcile
-    仍经文件兜底完成收口、回填值与真机 tellStatus(complete) 一致。"""
+    这一项断言的是**机制**，不只是结果：
+    1. 生产代码发出的 RPC 确实是逐 gid 的 aria2.tellStatus（真机 listMethods 无 tellDownloadResult，
+       system.multicall 又拒绝 aria2_rpc 前置的 token，旧问法整段不可达——原始拒绝响应仍打进证据）；
+    2. done 只能来自那条结果体：先把账本行的 dest_path 改指到不存在的路径，文件 stat 兜底当场失效，
+       此时仍判 done 就是 tellStatus 的 complete 在起作用（磁盘上的真实文件保持原位，供落盘旁证）。
+    """
     src = source_file("t2")
     c = live_cfg("t2")
     e2e["dirs"].append(c.dir)
@@ -331,12 +368,16 @@ async def test_02_reconcile_completes_row_with_backfill(hub, e2e):
     ev("真机 listMethods 含 tellDownloadResult? ", "aria2.tellDownloadResult" in
        json.dumps(rpc("system.listMethods"), ensure_ascii=False))
     as_prod = rpc("system.multicall", [{"methodName": "aria2.tellDownloadResult", "params": [gid]}])
-    ev("按生产原样发的 multicall（前导 token）响应", as_prod)
-    assert "error" in as_prod  # 真机直接拒绝该载荷 → reconcile 的 RPC 结果分支拿不到任何 struct
+    ev("按旧实现原样发的 multicall（前导 token）响应", as_prod)
+    assert "error" in as_prod  # 真机直接拒绝该载荷 → 旧问法一条 struct 也拿不到
 
     struct = wait_result(gid, "complete")
     ev("对账前 daemon 端 tellStatus(complete)", struct)
     assert await dl.aria2_status(c) == [] or gid not in {j["id"] for j in await dl.aria2_status(c)}
+
+    real_dest = Path(ref_row(gid)["dest_path"])
+    assert real_dest.exists() and real_dest.stat().st_size == src["size"]  # 文件真落盘了
+    _reassign_dest(gid, str(SCRATCH / "e2e-absent-after-reconcile.mkv"))  # 断掉 stat 兜底
 
     before = ref_row(gid)
     assert before["status"] == "queued"
@@ -344,6 +385,14 @@ async def test_02_reconcile_completes_row_with_backfill(hub, e2e):
     await hist.reconcile(c)
     after = ref_row(gid)
     ev("对账后账本行", after)
+
+    asked_params = [p for m, p, _ in rpc_spy if m == "aria2.tellStatus"]
+    # 只打参数不打响应：万一字段清单不对，真机的整块 files[] 会糊进失败输出
+    assert asked_params == [(gid, TELL_KEYS)], f"对账应逐个 gid 按字段清单问 tellStatus，实到参数：{asked_params}"
+    assert {m for m, _, _ in rpc_spy} == {"aria2.tellStatus"}  # 不再有 system.multicall / tellDownloadResult
+    ev("生产 reconcile 收到的 tellStatus 原始响应（字段清单生效时无 files）", rpc_spy[0][2])
+    assert "error" not in rpc_spy[0][2]
+
     assert after["status"] == "done"
     assert after["size_done"] == src["size"] == int(struct["completedLength"])
     assert after["size_total"] == src["size"] == int(struct["totalLength"])
@@ -415,7 +464,7 @@ async def test_04_aria2_retry_relands_at_original_dest(hub, e2e, monkeypatch):
     ev("重下新行", new)
 
     struct = wait_result(new["ref_id"], "complete")
-    ev("重下 tellDownloadResult", struct)
+    ev("重下 tellStatus(complete)", struct)
     assert dest.exists() and hashlib.md5(dest.read_bytes()).hexdigest() == src["md5"]
 
     old_after = hist.get_record(rid)
@@ -446,3 +495,49 @@ async def test_05_emby_refresh_wired_on_success(hub, e2e):
     hit = posts[0]
     assert hit["path"] == "/emby/Library/Refresh?api_key=EMBY-E2E-TOKEN"
     ev("落盘旁证", wait_result(gid, "complete").get("status"))
+
+
+async def test_06_reconcile_marks_failed_from_real_aria2_error(hub, e2e, rpc_spy):
+    """失败收口的机制验证：真机判 error 且文件从未落地的行，reconcile 当场收口成 failed 并带上理由。
+
+    这正是旧实现（system.multicall + tellDownloadResult）在真机上唯一拿不到的那条路径——
+    修之前这种行会一路挂着到 24h 才被兜底判失败。直链指向 stub 上从不存在的路径 → 真机 HTTP 404。
+    """
+    c = live_cfg("t6")
+    e2e["dirs"].append(c.dir)
+    src = {"name": "e2e-source-never-written.bin", "size": 4096, "md5": ""}  # 从不写进 serve：直链必然 404
+    driver = LiveDlDriver(files={"FID-T6": src}, base=hub.docker_base)
+    item = dl.DownloadItem(fid="FID-T6", name="第6集.mkv", size=src["size"],
+                           local_path=Path(c.dir) / "失败" / "第6集.mkv")
+    lines = await dl.download_items(driver, [item], c, log=lambda *a: None, task_id=9606,
+                                    taskname="E2E失败收口", account_id=7, driver_key="fake")
+    assert lines[0].startswith("✅")
+    gid = snapshot(9606)[0]["ref_id"]
+    e2e["gids"].append(gid)
+    e2e["refs"].append((gid, "aria2"))
+
+    def once():
+        st = rpc("aria2.tellStatus", gid, ["status", "errorCode", "errorMessage", "completedLength"])
+        result = st.get("result") or {}
+        return result if result.get("status") == "error" else None
+
+    struct = wait_until(once, why=f"gid {gid} 进入 error 终态", timeout=60)
+    ev("真机 error 结果体", struct)
+    assert gid not in {j["id"] for j in await dl.aria2_status(c)}  # 已离开活动队列，对账会去问它
+    dest = Path(ref_row(gid)["dest_path"])
+    assert not dest.exists()  # 文件从没落地：stat 兜底只能判 missing，给不出 failed
+
+    assert ref_row(gid)["status"] == "queued"
+    await hist.reconcile(c)
+    after = ref_row(gid)
+    ev("失败收口后账本行", after)
+    assert [p for m, p, _ in rpc_spy if m == "aria2.tellStatus"] == [(gid, TELL_KEYS)]
+    assert {m for m, _, _ in rpc_spy} == {"aria2.tellStatus"}
+    assert after["status"] == "failed" and after["finished_at"] is not None
+    assert "对账超时" not in after["error"]  # 结论来自 RPC 终态，不是 24h 兜底
+    reason = str(struct.get("errorMessage") or "")
+    if reason:  # daemon 给了理由就原样进账本，用户与运维都不用猜
+        assert after["error"] == reason
+    else:  # 理由为空也必须能从行里看出是哪个 aria2 错误码
+        assert str(struct.get("errorCode")) in after["error"]
+    ev("对账写回的失败理由", after["error"])

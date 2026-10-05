@@ -117,8 +117,13 @@ prune(mode: str) -> int                                              # "auto" | 
 
 按 source 分派，共同兜底：
 
-1. `source=aria2`：先 `aria2.tellActive` / `aria2.tellWaiting` 确认哪些 gid 仍在跑 → 这些保持不动；其余用一次 `system.multicall` 问
-   `aria2.tellDownloadResult`，`complete` → `done`，有 `error` → `failed`，顺带回填 `size_done` / `size_total` / `finished_at`；
+1. `source=aria2`：先 `aria2.tellActive` / `aria2.tellWaiting` 确认哪些 gid 仍在跑 → 这些保持不动；其余**逐个 gid** 问
+   `aria2.tellStatus`（并发 `asyncio.gather`，显式带字段清单 `gid/status/totalLength/completedLength/errorCode/errorMessage`，
+   否则真机会把整个 `files[]` 带回来），`complete` → `done`，`error` / `removed` → `failed`（理由取 `errorMessage`，
+   兼容 `error_message`，两者皆空但有非零 `errorCode` 时把码写进 `error`），顺带回填 `size_done` / `size_total` / `finished_at`；
+   `active` / `waiting` / `paused` 一律不动；RPC 返回 JSON-RPC `error` 体（gid 已被丢弃或从未存在）→ 落到第 3 条兜底；
+   （更正：本节原写「一次 `system.multicall` 问 `aria2.tellDownloadResult`」，对真 aria2 1.36.0 活体验证后发现两处都不存在——
+   `listMethods` 无 `tellDownloadResult`，`multicall` 拒绝前导 `token:` 参数，整条 RPC 分支实为死代码，故改为逐 gid `tellStatus`）
 2. `source=builtin` 且 `ref_id` 在内存 registry 里仍是 active job：本进程还在下，**保持不动**（进行中 tab 负责展示它）；
 3. 上述问不到（gid 被 aria2 丢弃、进程重启导致 registry 清空、RPC 不可达）→ stat 目标文件，存在且大小与 `size_total` 一致（或 `size_total` 为 0 且非空）→ `done`；
 4. 仍不确定：以 `created_at` 为基准，距今 **< 24h 保持 `queued`**（可能真在下），**≥ 24h 判 `failed`**，
@@ -208,7 +213,8 @@ aria2 沿用 `test_download.py` 的打桩方式（`monkeypatch.setattr(dl.httpx,
 新增 `backend/tests/test_download_history.py`：
 
 - 生命周期完整：内置走 `start`→`finish` 只留一条记录（不是两条），`fid`/`driver_key`/`dest_path`/`ref_id` 齐全；aria2 投递后停在 `queued`；
-- `reconcile()` 分支：aria2 `tellDownloadResult` 回 `complete` → `done`；gid 仍在 `tellActive` → 保持不动；gid 查不到但文件同大小 → `done`；
+- `reconcile()` 分支：aria2 `tellStatus` 回 `complete` → `done`；回 `error`/`removed` → `failed` 且理由取 `errorMessage`；
+  gid 仍在 `tellActive` → 保持不动；gid 查不到（RPC 返回 `error` 体）但文件同大小 → `done`；
   builtin 且 registry 里仍 active → 保持不动；builtin 且 registry 已无此 job（模拟重启）+ 无文件 + ≥ 24h → `failed` 且 error 文案正确；< 24h → 保持 `queued`；
 - `file_state` 三态：`ok` / `missing` / stat 抛 `OSError` → `unknown`；
 - `prune()`：阈值内删除、`forever` 不删、`failed` 只删失败；
