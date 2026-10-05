@@ -677,3 +677,79 @@ async def test_run_once_disabled_row_second_run_stays_silent(monkeypatch):
     finally:
         _drop(tid)
         _drop_account(acc_id)
+
+
+# ---------- 批量「立即运行」跳过停用任务（行内「▶ 运行」例外） ----------
+
+
+@pytest.mark.asyncio
+async def test_bulk_run_skips_disabled_tasks(monkeypatch):
+    """全局「立即运行」=「暂停就该真暂停」：停用行不参与，未停用行照跑并计数。"""
+    acc_id = _seed_account()
+    dead = _make_task("follow", account_id=acc_id, disabled=True)
+    live = _make_task("manual", account_id=acc_id)  # 仅手动 + 未停用 → 批量点应参与
+    monkeypatch.setattr(ts, "route_driver", lambda url: OkDriver)
+    ran: list[str] = []
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        ran.append(spec.taskname)
+        return TaskRunResult(status="no_changes")
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    logs = _spy_logs(monkeypatch)
+    try:
+        summary = await ts.run_tasks(trigger="manual")  # 全局「立即运行」
+        assert summary["disabled_skipped"] == 1
+        assert ran == ["形态manual"]  # 停用那行一次都没进引擎
+        dead_logs = [msg for task_id, _, msg in logs if task_id == dead]
+        assert any("已停用" in m and "批量运行跳过" in m for m in dead_logs), dead_logs
+        assert not [m for m in dead_logs if "一次性任务" in m]
+    finally:
+        _drop(dead, live)
+        _drop_account(acc_id)
+
+
+@pytest.mark.asyncio
+async def test_single_run_of_disabled_task_still_works(monkeypatch):
+    acc_id = _seed_account()
+    tid = _make_task("once", account_id=acc_id, disabled=True)
+    monkeypatch.setattr(ts, "route_driver", lambda url: OkDriver)
+    called: list[int] = []
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        called.append(1)
+        return TaskRunResult(status="no_changes")
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    try:
+        await ts.run_tasks(task_ids=[tid], trigger="manual")
+        assert called == [1]  # 行内「运行」是明确的手工意图，不被停用规则挡
+    finally:
+        _drop(tid)
+        _drop_account(acc_id)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_sweep_of_disabled_task_reports_stopped_reason(monkeypatch):
+    """带有效 schedule 的停用任务被定时扫到时，原因必须写「停用」而不是「已配置独立调度」。"""
+    acc_id = _seed_account()
+    tid = _make_task("follow", account_id=acc_id, disabled=True, schedule="interval:30")
+    monkeypatch.setattr(ts, "route_driver", lambda url: OkDriver)
+    ran: list[int] = []
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        ran.append(1)
+        return TaskRunResult(status="no_changes")
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    logs = _spy_logs(monkeypatch)
+    try:
+        summary = await ts.run_tasks(trigger="scheduled")
+        assert summary["disabled_skipped"] == 1
+        assert ran == []
+        mine = [msg for task_id, _, msg in logs if task_id == tid]
+        assert any("已停用" in m for m in mine), mine
+        assert not [m for m in mine if "独立调度" in m]
+    finally:
+        _drop(tid)
+        _drop_account(acc_id)
