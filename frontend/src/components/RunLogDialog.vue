@@ -103,11 +103,12 @@ watch(
     <div v-if="summary" class="summary">
       <div class="summary__title">本次运行统计（run_id: {{ summary.run_id }}）</div>
       <div class="stat-row">
-        <span class="muted" title="本次载入的任务行数，含被跳过的行；= 实际运行 + 跳过 + 跳过已停用"
+        <span class="muted" title="本次载入的任务行数，含被跳过的行；= 本次处理 + 跳过 + 跳过已停用"
           >总数 <b>{{ summary.total }}</b></span
         >
-        <span class="driven" title="本次真正驱动的任务数 = 总数 - 跳过 - 跳过已停用"
-          >实际运行 <b>{{ summary.driven }}</b></span
+        <!-- 口径是「处理过」而不是「进了引擎」：没有支持的驱动／没有可用账号的行也算在内（后端 driven 派生） -->
+        <span class="driven" title="本次处理过的任务数 = 总数 - 跳过 - 跳过已停用；含因缺驱动/缺账号直接失败的行"
+          >本次处理 <b>{{ summary.driven }}</b></span
         >
         <span class="ok"
           >更新 <b>{{ summary.updated }}</b></span

@@ -205,9 +205,10 @@ export interface LogEntry {
 export interface RunSummary {
   run_id: string;
   trigger: string;
-  /** 本次载入的行数，**含停用行**（实际跑了几个看 driven）。 */
+  /** 本次载入的行数，**含停用行**（这一批处理了几个看 driven）。 */
   total: number;
-  /** 实际驱动的行数 = total - skipped - disabled_skipped；后端派生，不单独计数。 */
+  /** 读作「本次处理」的行数 = total - skipped - disabled_skipped；后端派生，不单独计数。
+   *  含「链接没有支持的驱动」「没有可用账号」这两类只加 failed 就跳过的行——它们被处理过但没进转存引擎。 */
   driven: number;
   updated: number;
   skipped: number;

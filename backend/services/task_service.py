@@ -90,7 +90,11 @@ def _pick_account(tasks_account_id: int | None, driver_key: str) -> Account | No
 
 
 async def run_tasks(task_ids: list[int] | None = None, trigger: str = "manual") -> dict:
-    """运行任务（全部或指定），聚合结果推送通知。返回摘要供 SSE/API 消费。"""
+    """运行任务（全部或指定），聚合结果推送通知。返回摘要供 SSE/API 消费。
+
+    摘要里的 driven 读作「本次处理」= 载入行数 − skipped − disabled_skipped，
+    包含「没有支持的驱动」「没有可用账号」这两行根本没进 run_update_task 的失败行，别当「实际驱动」用。
+    """
     run_id = uuid.uuid4().hex[:8]
     log = hub.make_logger(run_id)
     notify_lines: list[str] = []
@@ -119,6 +123,10 @@ async def run_tasks(task_ids: list[int] | None = None, trigger: str = "manual") 
     #   total = driven + skipped + disabled_skipped
     # total 来自 load_tasks 的全量行数，**刻意包含停用行**；disabled_skipped 也刻意不并入 skipped，
     # 因为通知要单独向用户交代这一类跳过。driven 不自己计数，只由三者恒等推出，避免第四个键漂移。
+    # 它的口径是「本次处理」，不是「实际驱动」（前端标签与此处注释同名）：
+    # 「没有支持的驱动」「没有可用账号」两行只累加 failed 就 continue，既没进 skipped 也没进 disabled_skipped，
+    # 于是被算进 driven —— 它们确实被这一批处理过，但一行都没进 run_update_task。
+    # 与其再加第四个键，不如把名字说准；真要「进引擎的行数」看 updated/failed 或直接看日志。
     summary["driven"] = summary["total"] - summary["skipped"] - summary["disabled_skipped"]
     return summary
 
@@ -161,12 +169,14 @@ async def _run_tasks_inner(
                 summary["skipped"] += 1
                 tlog("info", f"《{task.taskname}》执行方式为 {mode}，不由定时器驱动")
                 continue
-        # 全局 sweep（task_ids=None）只驱动「无有效独立调度」的任务：已自带有效 schedule 的任务
-        # 由其专属 job 触发，避免同时被主 crontab 双驱动（如"仅周日"cron 却在每日全局点被执行）。
+        # 全局 sweep（task_ids 为空：None 或 []，与 load_tasks 的真值判断同口径）只驱动「无有效独立调度」的任务：
+        # 已自带有效 schedule 的任务由其专属 job 触发，避免同时被主 crontab 双驱动（如"仅周日"cron 却在每日全局点被执行）。
         # schedule 为空或非法的任务仍留在 sweep 中，继承全局回退。
+        # 判空必须和上面停用那处一致用 `not task_ids`：[] 在 load_tasks 眼里就是「全部任务」，
+        # 这里若按 `is None` 便会全量载入 + 不跳停用之外的一项 + 把自带调度的行双驱动，正是本分支要防的组合。
         if (
             trigger == "scheduled"
-            and task_ids is None
+            and not task_ids
             and has_valid_schedule(getattr(task, "schedule", "") or "")
         ):
             summary["skipped"] += 1

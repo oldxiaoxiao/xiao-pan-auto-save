@@ -107,9 +107,9 @@ def test_external_add_task_defaults_to_follow_and_rejects_bad_value(client):
 
 def _make_task(mode: str, **extra) -> int:
     with session_scope() as s:
-        t = Task(
-            taskname=f"形态{mode}", shareurl="https://pan.quark.cn/s/x", savepath="/x", run_mode=mode, **extra
-        )
+        # shareurl 允许 extra 覆盖：按链接分流 route_driver 的用例要给它可辨认的 URL
+        fields = {"shareurl": "https://pan.quark.cn/s/x", **extra}
+        t = Task(taskname=f"形态{mode}", savepath="/x", run_mode=mode, **fields)
         s.add(t)
         s.commit()
         s.refresh(t)
@@ -687,7 +687,7 @@ async def test_bulk_run_skips_disabled_tasks(monkeypatch):
         assert summary["disabled_skipped"] == 1
         # 本模块的 autouse 夹具每个用例前后都清空 Task/Account/ExternalApiToken，
         # 所以这里 total==2 只数到本用例自己建的 2 行，不是全表断言；
-        # 且 total 刻意包含停用行（驱动数看 driven），留着它钉住这个语义。
+        # 且 total 刻意包含停用行（本次处理数看 driven），留着它钉住这个语义。
         assert summary["total"] == 2
         assert ran == ["形态manual"]  # 停用那行一次都没进引擎
         dead_logs = [msg for task_id, _, msg in logs if task_id == dead]
@@ -883,7 +883,7 @@ async def test_notification_omits_disabled_line_when_nothing_skipped(monkeypatch
 @pytest.mark.asyncio
 async def test_summary_driven_closes_the_arithmetic(monkeypatch):
     """混合批：total == driven + skipped + disabled_skipped。
-    这是前端 RunSummary 的显示契约（「实际运行」不能再和「跳过」重复计数），必须被测试钉住。"""
+    这是前端 RunSummary 的显示契约（「本次处理」不能再和「跳过」重复计数），必须被测试钉住。"""
     acc_id = _seed_account()
     driven_id = _make_task("follow", account_id=acc_id)  # 无独立调度 → 定时扫驱动
     once_id = _make_task("once", account_id=acc_id)  # 按形态跳过
@@ -910,9 +910,11 @@ async def test_summary_driven_closes_the_arithmetic(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_empty_task_ids_list_is_treated_as_global_sweep(monkeypatch):
-    """task_ids=[] 与 None 同义（load_tasks 也按真值判断）：不能悄悄变成「连停用行一起跑」。"""
+    """task_ids=[] 与 None 同义（load_tasks 也按真值判断）：
+    既不能悄悄变成「连停用行一起跑」，也不能变成「全量载入却把自带有效 schedule 的行双驱动」。"""
     acc_id = _seed_account()
     dead = _make_task("follow", account_id=acc_id, disabled=True)
+    scheduled = _make_task("follow", account_id=acc_id, schedule="interval:30")
     monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
     ran: list[str] = []
 
@@ -922,20 +924,81 @@ async def test_empty_task_ids_list_is_treated_as_global_sweep(monkeypatch):
 
     monkeypatch.setattr(ts, "run_update_task", fake_run_update)
     try:
+        # 定时口径下的 []：这一行就是「全局 sweep」，停用行要跳、带独立调度的行更要跳（防双驱动）
+        summary = await ts.run_tasks(task_ids=[], trigger="scheduled")
+        assert ran == [], "自带有效 schedule 的行被 [] 触发的全局 sweep 双驱动了"
+        assert summary["total"] == 2
+        assert summary["skipped"] == 1  # interval:30 那行：交给它自己的作业
+        assert summary["disabled_skipped"] == 1
+        ran.clear()
+        # 手工口径下的 []：仍然是「全部任务」，停用行照跳，未停用的行照跑（与 None 一致）
         summary = await ts.run_tasks(task_ids=[], trigger="manual")
-        assert ran == []
+        assert ran == ["形态follow"]
         assert summary["disabled_skipped"] == 1
     finally:
-        _drop(dead)
+        _drop(dead, scheduled)
+        _drop_account(acc_id)
+
+
+@pytest.mark.asyncio
+async def test_driven_is_rows_handled_not_rows_entering_the_engine(monkeypatch):
+    """driven 的口径是「本次处理」，不是「实际驱动」（复审项 3，前后端与注释三处同名）。
+
+    「route_driver 返回 None（没有支持的驱动）」与「_pick_account 返回 None（没有可用账号）」两条分支
+    只累加 failed 就 continue，既没进 skipped 也没进 disabled_skipped，于是被派生的 driven 计入 ——
+    可这两行根本没进 run_update_task。这里钉死两件事：
+      (a) driven == 真进引擎的行数 + 这两行没进引擎的失败行数（即 driven 不是引擎行数）；
+      (b) total == driven + skipped + disabled_skipped 的恒等式仍成立。
+    """
+    acc_id = _seed_account()  # driver_key="fake"
+    NO_DRIVER_URL = "https://pan.quark.cn/s/没有驱动"
+    NO_ACCOUNT_URL = "https://pan.quark.cn/s/没有账号"
+
+    class OtherKeyDriver(DownloadOkDriver):
+        """有驱动、但没有对应可用账号（库里的账号是 driver_key="fake"）。"""
+
+        key = "no-such-key"
+
+    def fake_route(url: str):
+        if url == NO_DRIVER_URL:
+            return None
+        return OtherKeyDriver if url == NO_ACCOUNT_URL else DownloadOkDriver
+
+    ok_id = _make_task("follow", account_id=acc_id)
+    no_driver_id = _make_task("follow", account_id=acc_id, shareurl=NO_DRIVER_URL)
+    no_account_id = _make_task("follow", shareurl=NO_ACCOUNT_URL)  # 不指定账号 → 按驱动键找，找不到
+    monkeypatch.setattr(ts, "route_driver", fake_route)
+    ran: list[str] = []
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        ran.append(spec.taskname)
+        return TaskRunResult(status="no_changes")
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    try:
+        summary = await ts.run_tasks(trigger="manual")
+        assert len(ran) == 1  # 只有第一行真的进了引擎
+        assert summary["failed"] == 2  # 无支持驱动 + 无可用账号
+        assert summary["skipped"] == 0 and summary["disabled_skipped"] == 0
+        assert summary["total"] == 3
+        assert summary["driven"] == len(ran) + summary["failed"] == 3
+        assert summary["total"] == summary["driven"] + summary["skipped"] + summary["disabled_skipped"]
+    finally:
+        _drop(ok_id, no_driver_id, no_account_id)
         _drop_account(acc_id)
 
 
 # ---------- 转存运行时间落库失败：不许拖垮整批（0ed6400 同类问题的 last_run_at 版） ----------
 
 
-def _scope_that_fails_first_last_run_write():
-    """只让第一次写 last_run_at 的落库抛错——模拟 SQLite 没有 WAL/busy_timeout 时的写锁失败。
-    其余读写（load_tasks、_pick_account、第二个任务的落库）照旧，把爆炸半径限制在这一步。"""
+def _scope_that_fails_every_last_run_write():
+    """每一次 last_run_at 落库都抛错——模拟 SQLite 没有 WAL/busy_timeout 时的写锁失败。
+
+    注意 state 是在 make_scope() 里造的，而 task_service 每个 session_scope() 都会重新调用它，
+    所以 fired 每次都从 False 起步：不是「只有第一次写炸」，而是**每个任务的落库都炸**
+    （load_tasks、_pick_account、_settle_once 那些 add 里没有带 last_run_at 的新值，照旧放行，
+    把爆炸半径限制在落库这一步）。这正好钉死更狠的口径：整批的写全挂也绝不能中断本批运行。
+    """
 
     def make_scope():
         state = {"fired": False}
@@ -965,7 +1028,8 @@ def _scope_that_fails_first_last_run_write():
 
 @pytest.mark.asyncio
 async def test_last_run_write_failure_does_not_kill_the_run_batch(monkeypatch):
-    """last_run_at 落库失败只许 warn：转存已成功的结果、本批余下任务、聚合通知都不许被带崩。"""
+    """last_run_at 落库失败只许 warn：转存已成功的结果、本批余下任务、聚合通知都不许被带崩。
+    这里两行的落库都会失败（不是只有第一行），钉的就是「整批写全挂也不中断」。"""
     acc_id = _seed_account()
     first_id = _make_task("follow", account_id=acc_id, auto_download=False)
     second_id = _make_task("manual", account_id=acc_id, auto_download=False)
@@ -977,22 +1041,23 @@ async def test_last_run_write_failure_does_not_kill_the_run_batch(monkeypatch):
         return _updated_result()
 
     monkeypatch.setattr(ts, "run_update_task", fake_run_update)
-    monkeypatch.setattr(ts, "session_scope", _scope_that_fails_first_last_run_write())
+    monkeypatch.setattr(ts, "session_scope", _scope_that_fails_every_last_run_write())
     pushed = _spy_push(monkeypatch)
     logs = _spy_logs(monkeypatch)
     try:
         await ts.run_tasks(task_ids=[first_id, second_id], trigger="manual")
-        # (a) 第一个任务落库炸了，第二个任务照样进引擎
+        # (a) 落库每次都炸（state 随 session_scope 重建），两个任务照样都得进引擎
         assert ran == ["形态follow", "形态manual"]
         # (b) 已产出的通知文案没被一起带崩：两个任务的成功转存都要推出去
         assert len(pushed) == 1
         assert "《形态follow》" in pushed[0][1] and "《形态manual》" in pushed[0][1]
-        # (c) 失败本身要在第一个任务的日志里以 warn 说明
-        mine = [(level, msg) for task_id, level, msg in logs if task_id == first_id]
-        assert any(
-            level == "warn" and "运行时间落库失败（不影响本次结果）" in msg and "database is locked" in msg
-            for level, msg in mine
-        ), mine
+        # (c) 失败本身要在**每个**任务的日志里以 warn 说明（落库每次都用全新 state，见上面 helper 的说明）
+        for tid in (first_id, second_id):
+            mine = [(level, msg) for task_id, level, msg in logs if task_id == tid]
+            assert any(
+                level == "warn" and "运行时间落库失败（不影响本次结果）" in msg and "database is locked" in msg
+                for level, msg in mine
+            ), mine
     finally:
         _drop(first_id, second_id)
         _drop_account(acc_id)
