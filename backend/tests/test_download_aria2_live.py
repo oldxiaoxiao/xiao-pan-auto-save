@@ -4,6 +4,14 @@
     XIAO_PAN_ARIA2_E2E=1 .venv/bin/python -m pytest backend/tests/test_download_aria2_live.py -q
 
 环境契约（由外部准备，本测试不创建/不停止任何容器）：
+- 准备 daemon（宿主机执行一次即可，用完 docker rm -f 回收）：
+      mkdir -p /tmp/xiao-pan-aria2-e2e/downloads && docker run -d --name xiao-pan-aria2-e2e \\
+        -p 127.0.0.1:6801:6800 -e PUID=$(id -u) -e PGID=$(id -g) \\
+        -e ARIA2_DIR=/tmp/xiao-pan-aria2-e2e/downloads \\
+        -v /tmp/xiao-pan-aria2-e2e/downloads:/tmp/xiao-pan-aria2-e2e/downloads \\
+        p3terx/aria2-pro
+  镜像自带的 rpc-secret 是 P3TERX（首次启动生成在 /config/aria2.conf，可 docker exec grep rpc-secret 复查）；
+  注意 PUID/PGID 必须传宿主机真实 uid/gid，且 ARIA2_DIR 要用 /tmp 而非 /private/tmp 的真实挂载路径。
 - aria2 1.36.0 守护进程：127.0.0.1:6801/jsonrpc，secret P3TERX，容器 xiao-pan-aria2-e2e；
 - 其下载目录在宿主机与容器内 bind-mount 于同一绝对路径 /tmp/xiao-pan-aria2-e2e/downloads，
   账本里的 dest_path 可直接在宿主机校验；
