@@ -89,8 +89,11 @@ def file_state(path: str, expected_size: int = 0, terminal: bool = True) -> str:
     - 非终态行（terminal=False，即 queued/downloading）：一律 unknown（UI「未校验」）。
       在途文件可能是 aria2 的预分配占位，"在不在"根本不说明问题——活体发现过 1097 字节
       占位配 3.5GB 预期被报成 ok（2026-10-05）。非终态不报 ok 之外还省掉一次 stat。
-    - 终态行：常规文件且（expected_size=0 或大小相符）→ ok；常规文件但大小不符 → partial
-      （UI「不完整」）；不存在 → missing；权限/挂载异常或非常规文件 → unknown。
+    - 终态行：常规文件、大小与账本相符、既没有 <name>.aria2 控制文件也不是稀疏预分配 → ok；
+      常规文件在但大小不符、或带着 aria2 的控制文件、或只有预分配的大小没有实际字节 → partial
+      （UI「不完整」）；不存在 → missing；权限/挂载异常或非常规文件 → unknown；
+      账本没记大小（expected_size=0）时状态照旧报 ok（文件确实在），但不算「验证过的完整」
+      （matches=False）：UI 之外没有任何调用方可以据此跳过或收口。
     """
     return _file_check(path, expected_size, terminal)[0]
 
@@ -202,16 +205,50 @@ def has_open_for_path(dest_path: str) -> bool:
     return any(r["dest_path"] == dest_path and r["created_at"] > cutoff for r in open_records())
 
 
+BLOCK_BYTES = 512  # st_blocks 的单位：macOS/Linux 都按 512 字节计（POSIX 约定，与块大小无关）
+
+
+def _aria2_control_present(path: str) -> bool:
+    """同目录是否留着 <文件名>.aria2 控制文件——aria2 在途/半途而废的铁证。
+
+    aria2 下载一个文件时会在目标旁建控制文件（活体实测 1097 字节），收尾才删。它还在就说明
+    这次下载没完成，此时磁盘上的字节数毫无意义。读控制文件本身出错（挂载抖动）时也判 True：
+    判不了就绝不轻说"完整"，宁可多下一次。
+    """
+    try:
+        os.stat(path + ".aria2")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _is_sparse(st: os.stat_result) -> bool:
+    """声明了大小却没真占块 = 预分配占位（aria2 --file-allocation 默认 prealloc 就这样）。
+
+    稀疏文件把整片大小「免费」摊出来，所以 st_size == 预期完全不代表下完。
+    注：块数报不准的文件系统（个别 FUSE/CIFS 挂载、Windows、透明压缩的 btrfs）会把完整文件也
+    读成稀疏，后果是多下一次而绝不会假跳过——判不准时一律倒向"重新下"，不把垃圾认成成品。
+    """
+    return st.st_blocks * BLOCK_BYTES < st.st_size
+
+
 def _file_check(path: str, size_total: int, terminal: bool = True) -> tuple[str, bool, int]:
     """全项目唯一「stat 并解读一个路径」的地方：一次 os.stat 同时给出到位状态、大小相符与真实字节。
 
     返回 (state, matches, size)：
-    - state：ok/missing/unknown/partial（partial=常规文件在但大小与预期不符，仅终态行会出现）；
-    - matches 仅在 state == "ok" 时有意义：size_total 为 0 时非空即到位，否则须精确相符；
-    - size 为实际字节数（stat 失败或非终态时 0），供 size_total 缺失时回填真实大小。
+    - state：ok/missing/unknown/partial（partial=常规文件在但不是验证过的完整文件，仅终态行会出现）；
+    - matches：**这个文件是不是"验证过的完整文件"**，唯一可以据此跳过/收口的凭据。四条全满足才 True：
+      常规文件、账本记了大小且 st_size == size_total、同目录没有 <name>.aria2 控制文件、
+      不是稀疏预分配（st_blocks*512 < st_size）。大小未知（0）时无从校验 → 一律 False，
+      两种模式都当"没验证过"重新下（评审 Important 3：旧的"非空即到位"让 aria2 模式把残留
+      半截文件永久假跳过，内置模式却重下，同一判据分叉成两套）；
+    - size 为实际字节数（stat 失败或非终态时 0），供日志与 UI 展示。
     - terminal=False（queued/downloading 行）：在途文件可能是 aria2 预分配占位，任何"到位"
       结论都是撒谎，直接 unknown 并跳过 stat（活体 2026-10-05：1097 字节占位被报成 ok）。
-    reconcile 用前两项判收口，file_state 取 state 给 UI，两者共用这一份语义。
+    file_state 取 state 给 UI；aria2 投递前预检、内置 _fetch_one 的短路、reconcile 的兜底
+    都用 state + matches —— 四个消费点一份判据，不再有任何变体。
     """
     if not terminal:
         return "unknown", False, 0
@@ -223,16 +260,17 @@ def _file_check(path: str, size_total: int, terminal: bool = True) -> tuple[str,
         return "unknown", False, 0
     if not stat.S_ISREG(st.st_mode):
         return "unknown", False, 0
-    # size_total=0（老行没记大小）：没有可比的大小，谈不上"不完整"，状态一律 ok，
-    # 空文件由 matches=False 挡住，reconcile 不会据此收口。
-    if size_total and st.st_size != size_total:
-        return "partial", False, st.st_size
-    matches = st.st_size == size_total if size_total else st.st_size > 0
-    return "ok", matches, st.st_size
+    size = st.st_size
+    if size_total and size != size_total:
+        return "partial", False, size
+    # 大小对得上也仍是占位：控制文件在 = aria2 还/曾在这条路径上干活；稀疏 = 声明大小没有字节
+    if _aria2_control_present(path) or _is_sparse(st):
+        return "partial", False, size
+    return "ok", bool(size_total) and size == size_total, size
 
 
 async def reconcile(cfg) -> None:
-    """收口非终态记录：aria2 逐 gid 问 tellStatus → 文件 stat 兜底 → 超 24h 判失败。
+    """收口非终态记录：aria2 逐 gid 问 tellStatus → 「验证过的完整文件」兜底 → 超 24h 判失败。
 
     cfg 为 DownloadSettings；调用方（路由层）负责读配置，本函数不碰 setting。
     延迟导入 download_service 是为了避开与写入点的循环导入。
@@ -326,10 +364,20 @@ async def reconcile(cfg) -> None:
 
         if skip:
             continue
-        # 兜底：文件到位 = 完成（同步 IO 走线程池，一次 stat 出齐状态与大小，不卡事件循环）
-        state, matches, size = await asyncio.to_thread(_file_check, r["dest_path"], int(r["size_total"] or 0))
+        # 兜底：文件是「验证过的完整文件」才算完成（同步 IO 走线程池，一次 stat 出齐状态与大小，
+        # 不卡事件循环）。这里的行按定义都是非终态（open_records 只给 queued/downloading），也就是
+        # "下载可能还在进行"，而 gid 这次问不到有太多种无害解释：daemon 重启丢了结果缓存、后端
+        # 切到内置模式、状态串不认识。评审 Important 2（活体）：旧实现只比 st_size == size_total，
+        # 于是 aria2 预分配出来的整片占位会把在途作业当场收口成 done —— 同一批提交刚在 UI 上宣布
+        # 这种占位不作数。收口只认 _file_check 的完整结论（稀疏与 .aria2 控制文件都已被它排除，
+        # 大小未知的行也验证不了），确认不了的留给下面 24h 规则这个唯一的终态退路。
+        # 这里传 terminal=True 不是把行当终态（这批行全是非终态），只是打开"允许对文件下结论"
+        # 那层开关；放行之后还得过 matches 这道闸，占位/稀疏/大小未知都判不出 done。
+        state, matches, size = await asyncio.to_thread(
+            _file_check, r["dest_path"], int(r["size_total"] or 0), terminal=True
+        )
         if state == "ok" and matches:
-            # size_total 为 0 时"非空即到位"，done 用 stat 到的真实字节数，不写 0
+            # matches 蕴含 size == size_total（大小未知时根本不会 True），done 直接用 stat 到的字节
             finish(ref, source=source, status="done", size_done=size, size_total=size)
             continue
         if now - r["created_at"] >= timedelta(hours=STALE_HOURS):

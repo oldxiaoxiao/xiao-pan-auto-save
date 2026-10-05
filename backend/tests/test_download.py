@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 import pytest
@@ -653,6 +654,38 @@ def _aria2_skip_driver(monkeypatch):
     return posted
 
 
+PLACEHOLDER_SIZE = 1 << 20  # 1MiB：远大于任何文件系统块，稀疏与实占字节的落差才看得出来
+
+
+def make_sparse_placeholder(path, size: int = PLACEHOLDER_SIZE):
+    """复刻 aria2 `--file-allocation` 的现场：目标声明整片大小，却一个字节数据都没写（全是洞）。
+
+    夹具自检（评审要求）：st_blocks 必须远小于 st_size，否则本机文件系统把块即时补齐了，
+    稀疏占位根本没复现出来 —— 这种情况下大声 skip，绝不静默通过。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        fh.truncate(size)
+    st = os.stat(path)
+    if st.st_blocks * 512 >= st.st_size:
+        pytest.skip(
+            f"稀疏占位复现失败：本文件系统即时分配了块（st_blocks*512={st.st_blocks * 512} "
+            f">= st_size={st.st_size}），「大小相符但没数据」这一现场在此 fs 上不存在"
+        )
+    return path
+
+
+class PlaceholderDriver(DlDriver):
+    """直链行带真实体积（1MiB）：DlDriver 的 size=10 太小，稀疏占位在块粒度上看不出来。"""
+
+    async def get_download_urls(self, fids):
+        self.requested.append(list(fids))
+        rows = [
+            {"fid": f, "file_name": f, "size": PLACEHOLDER_SIZE, "download_url": f"http://dl/{f}"} for f in fids
+        ]
+        return rows, "DLCK=1"
+
+
 @pytest.mark.asyncio
 async def test_aria2_existing_file_skips_without_adduri(tmp_path, monkeypatch):
     """活体翻车回归：dest 已是同名同大小的完整文件时，重下绝不投递 addUri。
@@ -691,13 +724,18 @@ async def test_aria2_existing_file_skips_without_adduri(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_aria2_missing_or_wrong_size_still_submits(tmp_path, monkeypatch):
-    """预检不许把好路堵死：目标不存在、大小不符仍照常投递；未知大小按「非空即到位」容忍。"""
+    """预检不许把好路堵死：目标不存在、大小不符、大小未知一律照常投递。
+
+    大小未知（网盘报 0）这一条是评审 Important 3 更正过的断言：批 4f0f2e6 曾按「非空即到位」
+    容忍，导致内置模式（要求已知大小才跳）与 aria2 模式（非空就跳）语义分叉，
+    残留的半截文件在 aria2 模式下被永久假跳过。现在两种模式同判：没验证过 = 重新下。
+    """
     posted = _aria2_skip_driver(monkeypatch)
     gone = tmp_path / "gone.mkv"
     partial = tmp_path / "partial.mkv"
     partial.write_bytes(b"0" * 5)  # size=10 预期却只有 5 字节 → 不符，必须重下
     unknown = tmp_path / "unknown.mkv"
-    unknown.write_bytes(b"0" * 7)  # 网盘报 0/未知：非空即视为到位（_file_check 同款容忍）
+    unknown.write_bytes(b"0" * 7)  # 网盘报 0/未知：无从校验 → 不许跳，必须重下
 
     class ZeroSizeDriver(DlDriver):
         async def get_download_urls(self, fids):
@@ -718,13 +756,180 @@ async def test_aria2_missing_or_wrong_size_still_submits(tmp_path, monkeypatch):
             ZeroSizeDriver(), items, c, log=lambda *a: None, task_id=task_id, driver_key="fake"
         )
         fids = [p["params"][-1]["out"] for p in posted]  # out 即文件名
-        assert fids == ["gone.mkv", "partial.mkv"]
-        assert "unknown.mkv" not in fids
-        assert "跳过（已存在）unknown.mkv" in lines[2]
-        assert lines[0].startswith("✅") and lines[1].startswith("✅")  # 投递成功也是 ✅，不只看跳过
+        assert fids == ["gone.mkv", "partial.mkv", "unknown.mkv"]
+        assert not any("跳过（已存在）" in line for line in lines)
+        assert all(line.startswith("✅") for line in lines)  # 投递成功也是 ✅，不只看跳过
+        assert sorted(r.status for r in _rows_for(task_id)) == ["queued", "queued", "queued"]
+    finally:
+        _drop_rows(task_id)
+
+
+@pytest.mark.asyncio
+async def test_aria2_preflight_never_skips_preallocated_placeholder(tmp_path, monkeypatch):
+    """评审 Critical 1（RED→GREEN）：投递前预检读的必须是真下完的文件，不能是 aria2 的残骸。
+
+    4f0f2e6 的预检只看 `st_size == 预期`，而 aria2 `--file-allocation` 预分配出来的占位大小
+    恰好等于整片（活体：3,509,370,877 字节占位 + 1097 字节 .aria2 控制文件）。失败的下载留下
+    这种残骸后，每次重下都同样 mint 一条 skipped 行计入「本地下载 N/M」并把垃圾推给 Emby，
+    UI 上没有任何动作能修好这个文件。真下完的完整文件仍然要跳（那是 4f0f2e6 的原意）。
+    """
+    posted = _aria2_skip_driver(monkeypatch)
+    sparse = make_sparse_placeholder(tmp_path / "prealloc.mkv")  # 大小对得上，但全是洞
+    controlled = tmp_path / "resuming.mkv"  # 字节齐了，但 aria2 还在下（同目录留控制文件）
+    controlled.write_bytes(b"0" * PLACEHOLDER_SIZE)
+    (tmp_path / "resuming.mkv.aria2").write_bytes(b"0" * 1097)
+    complete = tmp_path / "complete.mkv"  # 真下完的：控制文件已被 aria2 收尾删掉
+    complete.write_bytes(b"0" * PLACEHOLDER_SIZE)
+
+    items = [
+        dl.DownloadItem(fid="a-sparse", name="prealloc.mkv", size=PLACEHOLDER_SIZE, local_path=sparse),
+        dl.DownloadItem(fid="b-controlled", name="resuming.mkv", size=PLACEHOLDER_SIZE, local_path=controlled),
+        dl.DownloadItem(fid="c-complete", name="complete.mkv", size=PLACEHOLDER_SIZE, local_path=complete),
+    ]
+    c = cfg(tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800")
+    task_id = 981
+    try:
+        lines = await dl.download_items(
+            PlaceholderDriver(), items, c, log=lambda *a: None, task_id=task_id, driver_key="fake"
+        )
+        outs = [p["params"][-1]["out"] for p in posted if p["method"] == "aria2.addUri"]
+        assert outs == ["prealloc.mkv", "resuming.mkv"], "残骸必须重新投递，完整文件才允许跳过"
+        assert "跳过（已存在）complete.mkv" in lines[2]
+        assert not any("跳过" in line for line in lines[:2])
         assert sorted(r.status for r in _rows_for(task_id)) == ["queued", "queued", "skipped"]
     finally:
         _drop_rows(task_id)
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_never_skips_preallocated_placeholder(tmp_path, monkeypatch):
+    """Critical 1 的内置侧：_fetch_one 的短路判据必须与 aria2 预检同源（第三处变体也不许留下）。
+
+    内置下载器原来只比 `path.stat().st_size == size`，同一份预分配残骸在内置模式下也会被
+    当成「已存在」跳过；重下写完的字节必须让文件真的通过到位校验。
+    """
+    class Resp:
+        status_code = 200
+
+        async def aiter_bytes(self, _n):
+            for _ in range(PLACEHOLDER_SIZE // 4096):
+                yield b"1" * 4096
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class Client:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url, headers=None):
+            return Resp()
+
+    monkeypatch.setattr(dl.httpx, "AsyncClient", Client)
+    row = {"download_url": "http://dl/1", "size": PLACEHOLDER_SIZE}
+
+    sparse = make_sparse_placeholder(tmp_path / "prealloc.mp4")
+    ok, msg = await dl._fetch_one(row, dl.DownloadItem(fid="1", name="prealloc.mp4",
+                                                       size=PLACEHOLDER_SIZE, local_path=sparse), "", "UA")
+    assert ok and "跳过" not in msg, f"稀疏占位不许当已存在：{msg}"
+    assert hist._file_check(str(sparse), PLACEHOLDER_SIZE)[1] is True  # 重下后真的完整了
+
+    controlled = tmp_path / "resuming.mp4"
+    controlled.write_bytes(b"0" * PLACEHOLDER_SIZE)
+    (tmp_path / "resuming.mp4.aria2").write_bytes(b"0" * 1097)
+    ok2, msg2 = await dl._fetch_one(row, dl.DownloadItem(fid="2", name="resuming.mp4",
+                                                         size=PLACEHOLDER_SIZE, local_path=controlled), "", "UA")
+    assert ok2 and "跳过" not in msg2, f"aria2 控制文件在途不许当已存在：{msg2}"
+
+
+@pytest.mark.asyncio
+async def test_unknown_size_verdict_agrees_across_both_modes(tmp_path, monkeypatch):
+    """Important 3：网盘没报大小时两种模式必须同判 —— 都算「没验证过」，重新下。
+
+    旧语义只在 aria2 模式非空即跳（内置要求已知大小），残留半截文件在 aria2 下永久假跳过。
+    """
+    class Resp:
+        status_code = 200
+
+        async def aiter_bytes(self, _n):
+            yield b"2" * 7
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    streamed: list = []
+    posted: list = []
+
+    class Client:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url, headers=None):
+            streamed.append(url)
+            return Resp()
+
+        async def post(self, url, json):
+            posted.append(json)
+            return _GidResp()
+
+    class _GidResp:
+        def json(self):
+            return {"result": "gid-unknown-size"}
+
+    monkeypatch.setattr(dl.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
+
+    builtin_dest = tmp_path / "builtin" / "nolength.mkv"
+    builtin_dest.parent.mkdir(parents=True)
+    builtin_dest.write_bytes(b"0" * 7)  # 半截残留，且没人知道它该多大
+    ok, msg = await dl._fetch_one({"download_url": "http://dl/b", "size": 0},
+                                  dl.DownloadItem(fid="b", name="nolength.mkv", size=0, local_path=builtin_dest),
+                                  "", "UA")
+    assert ok and "跳过" not in msg and streamed == ["http://dl/b"]
+
+    aria_dir = tmp_path / "aria2"
+    aria_dir.mkdir()
+    aria_dest = aria_dir / "nolength.mkv"
+    aria_dest.write_bytes(b"0" * 7)
+    task_id = 982
+    try:
+        lines = await dl.download_items(
+            ZeroSizeRowDriver(), [dl.DownloadItem(fid="a", name="nolength.mkv", size=0, local_path=aria_dest)],
+            cfg(tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800"),
+            log=lambda *a: None, task_id=task_id, driver_key="fake",
+        )
+        assert lines[0].startswith("✅") and "跳过" not in lines[0]
+        assert [p["params"][-1]["out"] for p in posted if p["method"] == "aria2.addUri"] == ["nolength.mkv"]
+        assert [r.status for r in _rows_for(task_id)] == ["queued"]
+    finally:
+        _drop_rows(task_id)
+
+
+class ZeroSizeRowDriver(DlDriver):
+    """直链行 size=0（网盘不报体积）：两种模式在这里必须走同一条判据。"""
+
+    async def get_download_urls(self, fids):
+        self.requested.append(list(fids))
+        rows = [{"fid": f, "file_name": f, "size": 0, "download_url": f"http://dl/{f}"} for f in fids]
+        return rows, "DLCK=1"
 
 
 @pytest.mark.asyncio

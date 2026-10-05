@@ -12,7 +12,17 @@ from backend.database import session_scope
 from backend.models import DownloadRecord
 from backend.services import download_history as hist
 from backend.services import download_service as dl
-from backend.tests.test_download import DlDriver, cfg, saved
+from backend.tests.test_download import (
+    PLACEHOLDER_SIZE,
+    DlDriver,
+    PlaceholderDriver,
+    _aria2_skip_driver,
+    _drop_rows,
+    _rows_for,
+    cfg,
+    make_sparse_placeholder,
+    saved,
+)
 
 
 def _rows(task_id: int | None = None) -> list[DownloadRecord]:
@@ -195,7 +205,9 @@ def test_file_state_size_mismatch_is_partial_and_inflight_never_claims_ok(tmp_pa
     旧的 file_state 只看"常规文件在不在"，UI 显示「在」纯属撒谎。
 
     新语义：非终态行（queued/downloading）一律 unknown（UI 未校验），连 stat 都省；
-    终态行大小相符 ok、不符 partial（UI 不完整）；expected_size=0 保留"非空即 ok"。"""
+    终态行大小相符且不是占位才 ok、不符 partial（UI 不完整）；
+    expected_size=0 仍报 ok（文件在），但不算"验证过的完整"（matches=False，见
+    test_unknown_size_is_never_a_verified_complete_file）。"""
     placeholder = tmp_path / "half.mkv"
     placeholder.write_bytes(b"0" * 1097)
     total = 3_509_370_877  # 活体那集的真实字节数
@@ -220,6 +232,58 @@ def test_file_state_unknown_on_permission_error(monkeypatch):
     # 只替换模块命名空间里的 os（file_state 只用到 os.stat），不碰全局 os
     monkeypatch.setattr(hist, "os", types.SimpleNamespace(stat=boom))
     assert hist.file_state("/anywhere") == "unknown"
+
+
+# ---- 到位判据：大小相符 ≠ 下完（评审 Critical 1/Important 2 的地基） ----
+
+
+def test_preallocated_placeholder_is_not_complete(tmp_path):
+    """aria2 --file-allocation 的预分配残骸：声明大小与账本一致，字节却全是洞。
+
+    活体现场是 3,509,370,877 字节的占位配 1097 字节的 .aria2 控制文件 —— 只看 st_size
+    就会把它读成「已到位」，于是残骸上的每次重下都同样跳过，文件永远修不好。
+    """
+    sparse = make_sparse_placeholder(tmp_path / "prealloc.mkv")
+    assert hist.file_state(str(sparse), PLACEHOLDER_SIZE) == "partial"  # UI：不完整，绝不是「在」
+    state, matches, size = hist._file_check(str(sparse), PLACEHOLDER_SIZE)
+    assert (state, matches, size) == ("partial", False, PLACEHOLDER_SIZE)
+    # 同一大小、字节是真写进去的 → 仍然认 ok（4f0f2e6 想保护的正是这种跳过）
+    dense = tmp_path / "real.mkv"
+    dense.write_bytes(b"0" * PLACEHOLDER_SIZE)
+    assert hist.file_state(str(dense), PLACEHOLDER_SIZE) == "ok"
+    assert hist._file_check(str(dense), PLACEHOLDER_SIZE)[1] is True
+
+
+def test_aria2_control_file_means_not_complete(tmp_path):
+    """同目录留着 <name>.aria2 就是「aria2 还在这条路径上干活/半途而废」，不许当下载完成。"""
+    dest = tmp_path / "resuming.mkv"
+    dest.write_bytes(b"0" * PLACEHOLDER_SIZE)
+    control = tmp_path / "resuming.mkv.aria2"
+    control.write_bytes(b"0" * 1097)
+    assert hist.file_state(str(dest), PLACEHOLDER_SIZE) == "partial"
+    assert hist._file_check(str(dest), PLACEHOLDER_SIZE)[1] is False
+    control.unlink()  # 下载收尾后控制文件消失，这才算真到位
+    assert hist.file_state(str(dest), PLACEHOLDER_SIZE) == "ok"
+
+
+def test_unknown_size_is_never_a_verified_complete_file(tmp_path):
+    """Important 3：账本没记大小（0）时不给「到位」结论 —— 两种模式一律重新下。
+
+    状态仍报 ok（UI 的「在」只说明文件在那儿），但 matches=False：预检不据此跳过、
+    对账不据此收口，避免残留的半截文件在 aria2 模式下被永久假跳过。
+    """
+    dest = tmp_path / "nolength.bin"
+    dest.write_bytes(b"0" * 37)
+    state, matches, size = hist._file_check(str(dest), 0)
+    assert (state, matches, size) == ("ok", False, 37)
+    assert hist._file_check(str(dest), 0)[1] is False
+    # 稀疏/带控制文件的判据与预期大小无关：未知大小时一样认得出没下完
+    sparse = make_sparse_placeholder(tmp_path / "nolength.mkv")
+    assert hist.file_state(str(sparse), 0) == "partial"
+    other = tmp_path / "other.mkv"
+    other.write_bytes(b"0" * 37)
+    (tmp_path / "other.mkv.aria2").write_bytes(b"0" * 1097)
+    assert hist.file_state(str(other), 0) == "partial"
 
 
 def test_get_record_roundtrip():
@@ -387,6 +451,49 @@ async def test_reconcile_falls_back_to_file_stat(tmp_path, monkeypatch):
     assert r.status == "done" and r.size_done == 100
 
 
+async def test_reconcile_preallocated_placeholder_with_invisible_gid_stays_queued(tmp_path, monkeypatch):
+    """评审 Important 2（RED→GREEN）：问不到 gid 不等于下载结束，更不等于文件下完了。
+
+    open_records() 出来的行按定义是非终态（可能正在下）。gid 暂时隐形（daemon 重启丢了结果
+    缓存、后端切到内置模式、状态串不认识）时，旧实现拿 `st_size == size_total` 做兜底就会把
+    aria2 预分配占位当场收口成 done —— 同一批提交刚在 UI 上宣布这种占位不作数。
+    """
+    dest = make_sparse_placeholder(tmp_path / "midflight.mkv")
+    (tmp_path / "midflight.mkv.aria2").write_bytes(b"0" * 1097)
+    _seed_open("g-midflight", dest=str(dest), size=PLACEHOLDER_SIZE)
+    _patch_aria2(monkeypatch, active=[], struct=None)  # daemon 这次没答上话
+    await hist.reconcile(_aria2_cfg())
+    assert _status_of("g-midflight").status == "queued"  # 不许收口，等下一次对账/24h 兜底
+
+
+async def test_reconcile_inflight_placeholder_survives_switch_to_builtin_mode(tmp_path, monkeypatch):
+    """切到内置模式后，aria2 那边仍在下的作业只会被文件兜底看到；占位同样不许判成完成。"""
+    dest = make_sparse_placeholder(tmp_path / "mode-switch.mkv")
+    hist.start(
+        source="aria2", ref_id="g-mode", task_id=901, taskname="T", filename="mode-switch.mkv",
+        dest_path=str(dest), size_total=PLACEHOLDER_SIZE, fid="F", driver_key="fake", account_id=None,
+    )
+    await hist.reconcile(dl.DownloadSettings(mode="builtin", dir=str(tmp_path)))  # 完全不碰 RPC
+    assert _status_of("g-mode").status == "queued"
+
+
+async def test_reconcile_unverified_size_zero_row_is_not_closed_as_done(tmp_path, monkeypatch):
+    """Important 3 在对账侧的落点：size_total=0 无从校验 → 不收口，悬挂交给 24h 规则。
+
+    原用例断言的是「非空即到位」的容忍，正是评审要求取消的分叉判据（详见报告）。
+    """
+    dest = tmp_path / "nolength.bin"
+    dest.write_bytes(b"0" * 37)
+    _seed_open("g-nosize", dest=str(dest), size=0)
+    _patch_aria2(monkeypatch, active=[], struct=None)
+    await hist.reconcile(_aria2_cfg())
+    assert _status_of("g-nosize").status == "queued"
+    _age("g-nosize", 25)  # 24h 兜底仍然是唯一的终态退路
+    await hist.reconcile(_aria2_cfg())
+    r = _status_of("g-nosize")
+    assert r.status == "failed" and "对账超时" in r.error
+
+
 async def test_reconcile_partial_file_stays_queued_until_stale(tmp_path, monkeypatch):
     dest = tmp_path / "half.mkv"
     dest.write_bytes(b"0" * 50)  # 大小不符，不能算完成
@@ -495,17 +602,6 @@ async def test_reconcile_unreachable_daemon_raises_nothing(tmp_path, monkeypatch
     assert _status_of("g-dead").status == "queued"  # 既问不到也没文件：先挂着，等 24h 兜底
 
 
-async def test_reconcile_file_fallback_records_real_size_when_total_zero(tmp_path, monkeypatch):
-    """size_total=0 时"非空即到位"，done 要写 stat 到的真实字节数，不能留 size_done=0。"""
-    dest = tmp_path / "nolength.bin"
-    dest.write_bytes(b"0" * 37)
-    _seed_open("g-nosize", dest=str(dest), size=0)
-    _patch_aria2(monkeypatch, active=[], struct=None)
-    await hist.reconcile(_aria2_cfg())
-    r = _status_of("g-nosize")
-    assert r.status == "done" and r.size_done == 37 and r.size_total == 37
-
-
 # ---- retry_record：单文件重下 ----
 
 
@@ -543,6 +639,50 @@ async def test_retry_record_keeps_original_dest_path(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "_account_for", lambda rec: _Acc())
     await dl.retry_record(hist.get_record(rid), dl.DownloadSettings(dir=str(tmp_path)), log=lambda *a, **k: None)
     assert seen == [("FID1", dest, "T", 1)]
+
+
+async def test_retry_over_preallocated_placeholder_redownloads_and_reaches_done(tmp_path, monkeypatch):
+    """评审 Critical 1 的端到端（RED→GREEN）：残骸上的重下必须真投递，并且第二次下载能收到终态。
+
+    修复前这条路径每次都 mint 一条 skipped 行：计入「本地下载 N/M」、把垃圾推给 Emby，
+    而且没有任何 UI 动作能修好这个文件（每次重下都同样跳过）。修复后必须收敛：
+    投递 → queued → 字节真落盘 → done。
+    """
+    posted = _aria2_skip_driver(monkeypatch)  # aria2 可达 + 记录 addUri 的假 RPC
+    dest = make_sparse_placeholder(tmp_path / "剧" / "S01E194.mkv")
+    (dest.parent / "S01E194.mkv.aria2").write_bytes(b"0" * 1097)  # 与活体现场同形：占位 + 控制文件
+    rid = hist.start(
+        source="aria2", ref_id="retry-prealloc", task_id=983, taskname="追更", filename="S01E194.mkv",
+        dest_path=str(dest), size_total=PLACEHOLDER_SIZE, fid="FID-P", driver_key="fake", account_id=None,
+    )
+    hist.finish("retry-prealloc", source="aria2", status="failed", error="直链过期")
+
+    from backend.drivers import DRIVERS
+
+    monkeypatch.setitem(DRIVERS, "fake", PlaceholderDriver)  # 直链行带真实体积
+    monkeypatch.setattr(dl, "_account_for", lambda rec: _Acc())
+    try:
+        await dl.retry_record(
+            hist.get_record(rid), cfg(tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800"),
+            log=lambda *a, **k: None,
+        )
+
+        rows = _rows_for(983)
+        assert sorted(r.status for r in rows) == ["failed", "queued"], [(r.ref_id, r.status) for r in rows]
+        assert [p for p in posted if p["method"] == "aria2.addUri"], "残骸不许再被当成已到位而跳过"
+        fresh = _status_of("gid-skip-test")  # 假 RPC 恒返回这个 gid
+        assert fresh.status == "queued" and fresh.size_total == PLACEHOLDER_SIZE
+        assert fresh.dest_path == str(dest)
+
+        # 第二次下载真的把字节写进去了（aria2 收尾会带走控制文件）→ 对账认 done
+        dest.write_bytes(b"0" * PLACEHOLDER_SIZE)
+        (dest.parent / "S01E194.mkv.aria2").unlink()
+        _patch_aria2(monkeypatch, active=[], struct=None)  # gid 结果被 daemon 丢弃，只能看文件
+        await hist.reconcile(_aria2_cfg())
+        done = _status_of("gid-skip-test")
+        assert done.status == "done" and done.size_done == PLACEHOLDER_SIZE
+    finally:
+        _drop_rows(983)
 
 
 async def test_retry_without_account_logs_and_returns(tmp_path, monkeypatch):

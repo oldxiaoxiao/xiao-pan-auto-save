@@ -1,10 +1,12 @@
 """本地下载：转存成功后把新文件落到本地磁盘。
 
 两种模式（协议对齐原项目 aria2 插件）：
-- builtin：服务端 httpx 流式下载，.part 临时文件 + 完成后改名，已存在且同大小则跳过，
+- builtin：服务端 httpx 流式下载，.part 临时文件 + 完成后改名，目标是「验证过的完整文件」则跳过，
   按配置并发数并行；
 - aria2：JSON-RPC addUri 投递直链任务（带网盘 Cookie/UA 头），支持 pause 挂起；
-  投递前同样做「目标已到位则跳过」预检，绝不撞名重下整片。
+  投递前用同一份判据做预检，完整文件不重下，残骸/占位一律重投。
+「验证过的完整文件」= 常规文件 + 账本已知大小精确相符 + 无 <name>.aria2 控制文件 + 非稀疏预分配
+（见 download_history._file_check，全项目唯一一份 stat 解读）。
 下载成功后如配置了 Emby，触发一次媒体库刷新。
 """
 
@@ -281,7 +283,12 @@ async def _fetch_one(row: dict, item: DownloadItem, cookie_str: str, ua: str, *,
     path = item.local_path
     path.parent.mkdir(parents=True, exist_ok=True)
     size = int(row.get("size") or item.size or 0)
-    if path.exists() and size and path.stat().st_size == size:
+    # 「目标已经是验证过的完整文件」全项目只有一份判据：download_history._file_check。
+    # 这里以前自己写 `path.exists() and size and st_size == size`（第三处变体），只看大小就把
+    # aria2 --file-allocation 预分配出来的整片占位读成"已存在"而跳过（评审 Critical 1）；
+    # 大小未知的行也曾在两种模式间分叉（内置重下、aria2 假跳过，Important 3）。
+    state, matches, _st = history._file_check(str(path), size)
+    if state == "ok" and matches:
         if job_id:
             registry.update(job_id, status="skipped")
         return True, f"跳过（已存在）{item.name}"
@@ -415,11 +422,14 @@ async def _aria2_submit(
                 continue
             _inflight_paths.add(key)
             try:
-                # 投递前到位预检（与内置 _fetch_one 同款短路）：目标已是完整文件就直接跳过，
-                # 不再投给 daemon。缺这层的活体翻车（2026-10-05）：对已下完的 S01E194.mkv 点重下，
-                # aria2 撞名不改写而是自动改名 .1.mkv 重下整片 3.5GB，新行 dest_path 却仍记原路径，
-                # 对账把原文件误判成本次下载的结果。语义复用 download_history._file_check 这唯一
-                # 一处 stat 解读（全项目不再写第三变体）：已知大小须精确相符，未知大小非空即到位。
+                # 投递前到位预检：目标是「验证过的完整文件」就直接跳过，不投给 daemon。缺这层的活体
+                # 翻车（2026-10-05）：对已下完的 S01E194.mkv 点重下，aria2 撞名不改写而是自动改名
+                # .1.mkv 重下整片 3.5GB，新行 dest_path 却仍记原路径，对账把原文件误判成本次下载的结果。
+                # 判据复用 download_history._file_check 这唯一一处 stat 解读（内置 _fetch_one、对账兜底、
+                # UI 的 file_state 用的是同一份，全项目没有第二变体）：常规文件 + 已知大小精确相符 +
+                # 没有 <name>.aria2 控制文件 + 不是预分配稀疏占位，四条齐了才叫到位；大小未知（0）
+                # 一律"没验证过"→ 照常投递（评审 Critical 1/Important 3：只看大小会把 aria2 失败后
+                # 留下的整片占位读成已到位，于是每次重下都同样跳过，这个文件在 UI 里永远修不好）。
                 # 顺序选「在途守卫在前、预检在后」：aria2 会预分配整片大小的占位文件，投递窗口内
                 # 并发进来的第二次点击若先做预检，会把没下完的占位误判成完整而假跳过；先过守卫，
                 # 同路径在途动作一律吃「已有下载在途」，预检只面对无在途的终态文件。
