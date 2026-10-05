@@ -155,5 +155,11 @@ async def run_all() -> StreamingResponse:
 
 @router.post("/{task_id}/run")
 async def run_one(task_id: int) -> StreamingResponse:
-    """立即运行单个任务，SSE 流式返回日志。"""
+    """立即运行单个任务，SSE 流式返回日志。
+
+    对一次性任务，这一按就是「手动再次开启」：先归零预算再跑，否则用尽后永远出不来。
+    """
+    from ..services.task_service import reset_once_budget
+
+    reset_once_budget(task_id)
     return _sse_stream([task_id], "manual")

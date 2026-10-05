@@ -579,7 +579,7 @@ def test_download_for_task_returns_counts_and_keeps_notify_line(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_once_no_changes_logs_pending_hint(monkeypatch):
-    """分享还没放资源（一次性任务最常见的场景）：保持启用，且必须在任务日志里说明仍在待执行。"""
+    """分享还没放资源（一次性任务最常见的场景）：保持启用、不吃预算，且日志要写明「不占重试预算」。"""
     acc_id = _seed_account()
     tid = _make_task("once", account_id=acc_id, auto_download=False)
     monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
@@ -592,9 +592,11 @@ async def test_run_once_no_changes_logs_pending_hint(monkeypatch):
     try:
         await ts.run_tasks(task_ids=[tid], trigger="manual")
         with session_scope() as s:
-            assert s.get(Task, tid).disabled is False
+            row = s.get(Task, tid)
+            assert row.disabled is False
+            assert row.retry_attempts == 0 and row.next_retry_at is None  # 没放出 ≠ 失败
         mine = [msg for task_id, _, msg in logs if task_id == tid]
-        assert any("本次没有新增资源" in m and "保持待执行" in m for m in mine), mine
+        assert any("本次没有新增资源" in m and "不占重试预算" in m for m in mine), mine
     finally:
         _drop(tid)
         _drop_account(acc_id)

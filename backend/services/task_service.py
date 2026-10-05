@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlmodel import Session, func, select
 
@@ -66,6 +66,10 @@ def scheduled_should_run(task) -> tuple[bool, str]:
         return True, ""
     if driver == "retry":
         return False, "等到点重试作业驱动，每日扫不让位就会双驱动"
+    # halted 的三个原因按 once_next_driver 的同源判序各配一个单谓词，别再整链复制一遍：
+    # disabled 最先（完成后过期=完成，不是到期），过期其次，最后才是预算用尽。
+    if not task.disabled and enddate_passed(task):
+        return False, "已过截止日期"
     if int(getattr(task, "retry_attempts", 0) or 0) >= ONCE_RETRY_LIMIT and not task.disabled:
         return False, "重试已用尽"
     return False, "已完成或已停用"
@@ -367,31 +371,91 @@ def _once_verdict(task, result, counts: DownloadCounts) -> tuple[bool, str]:
 
 
 def _settle_once(task, result, counts: DownloadCounts, tlog) -> None:
-    """判定通过才停用；已停用则不再动作（幂等）。
+    """一次性任务的三种结局：拿到手 → 停用；还没放出 → 不占预算；真失败 → 吃一次预算。
 
-    这是旁路记账：落库失败（SQLite 没开 WAL/busy_timeout，见 database.py 建引擎处）只记一条 warn，
-    绝不能把异常抛回运行循环——否则本批余下任务不跑，已生成的 notify_lines 也一起丢掉，
-    而前端只会看到一个干净的 done。口径对齐 download_service 的下载账本（「账本是旁路观测，绝不中断下载」）。
+    这是旁路记账：落库失败只记一条 warn，绝不抛回运行循环——否则本批余下任务不跑，
+    已生成的 notify_lines 也一起丢掉，而前端只看到干净的 done。口径同下载账本。
     """
-    done, reason = _once_verdict(task, result, counts)
-    if not done:
-        if run_mode_of(task) == "once" and not task.disabled:
-            tlog("warn", f"《{task.taskname}》一次性任务未完成：{reason}，保持待执行")
+    if run_mode_of(task) != "once":
         return
+    done, reason = _once_verdict(task, result, counts)
+    now = datetime.now()
     try:
         with session_scope() as session:
             row = session.get(Task, task.id)
-            # 写库前复查这一行现在的真实形态，不采信运行开始时的快照：
-            # 转存 + 大下载要花几分钟，期间用户把它改回「定时追更」的话，
-            # apply_task_schedule 已经给它挂回作业，这里再停用就会留下「已停用 + 有定时作业」的矛盾态。
-            if row is None or row.disabled or run_mode_of(row) != "once":
-                return  # 运行中被删除／已被别处停用／已改回 follow：不动作，避免写出半行
-            row.disabled = True
+            if row is None or row.disabled:
+                return  # 运行中被删/已被别处停用：不动作
+            mode_now = run_mode_of(row)
+            if mode_now != "once":
+                return  # 期间用户改回「定时追更」：不再由这里停用或计数
+            if done:
+                row.disabled = True
+                row.retry_attempts = 0
+                row.next_retry_at = None
+                action = "info"
+                msg = f"《{row.taskname}》一次性任务已完成并自动停用（{reason}）"
+            elif result.status == "no_changes":
+                row.next_retry_at = None  # 还没放出：不占预算，等下一次每日扫再来看
+                action = "info"
+                msg = f"《{row.taskname}》本次没有新增资源（还没放出或早已转存过），不占重试预算，等下次定时检查"
+            else:
+                row.retry_attempts = int(row.retry_attempts or 0) + 1
+                if row.retry_attempts >= ONCE_RETRY_LIMIT:
+                    row.next_retry_at = None
+                    action = "warn"
+                    msg = (
+                        f"《{row.taskname}》三次重试仍未成功（{reason}），已停止自动重试；"
+                        "点该行「▶ 运行」可重新开始"
+                    )
+                else:
+                    row.next_retry_at = now + timedelta(minutes=ONCE_RETRY_DELAY_MINUTES)
+                    action = "warn"
+                    msg = (
+                        f"《{row.taskname}》本次未成功（{reason}），"
+                        f"{ONCE_RETRY_DELAY_MINUTES} 分钟后重试（{row.retry_attempts}/{ONCE_RETRY_LIMIT}）"
+                    )
             session.add(row)
-    except Exception as exc:  # noqa: BLE001 收口是旁路记账，失败不影响本批运行
+    except Exception as exc:  # noqa: BLE001 旁路记账
         tlog("warn", f"《{task.taskname}》一次性收口失败（不影响运行）：{exc}")
         return
-    tlog("info", f"《{task.taskname}》一次性任务已完成并自动停用（{reason}）")
+    tlog(action, msg)
+    _resync_schedule(task.id)  # 写完到点时间/停用，必须让作业与数据对齐，否则重启前这一格没人跑
+
+
+def _resync_schedule(task_id: int) -> None:
+    """写完 next_retry_at / disabled 后让调度器与数据对齐；导不到就只记日志，不影响主流程。"""
+    try:
+        from ..main import apply_task_schedule
+
+        with session_scope() as session:
+            row = session.get(Task, task_id)
+        if row is not None:
+            apply_task_schedule(row)
+    except Exception as exc:  # noqa: BLE001
+        hub.publish("warn", f"任务 {task_id} 调度同步失败：{exc}")
+
+
+def reset_once_budget(task_id: int) -> None:
+    """行内「▶ 运行」= 重新给三次预算；只对 once 行生效，不偷偷取消停用。
+
+    清 next_retry_at 之后必须把已排上的到点作业也撤掉：否则这一格稍后还会自己跑一次，
+    用户看到的就成了"点一下运行，五分钟后又莫名跑了一次"。
+    """
+    try:
+        with session_scope() as session:
+            row = session.get(Task, task_id)
+            if row is None or run_mode_of(row) != "once":
+                return
+            had_slot = row.next_retry_at is not None
+            row.retry_attempts = 0
+            row.next_retry_at = None
+            session.add(row)
+        if had_slot:
+            from ..main import scheduler
+
+            scheduler.unschedule_retry(task_id)
+    except Exception as exc:  # noqa: BLE001 旁路写库
+        hub.publish("warn", f"任务 {task_id} 重置重试预算失败：{exc}")
 
 
 async def _push(title: str, content: str, push_config: dict, settings: dict, log) -> None:

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 
 import pytest
 
 from backend import main
-from backend.core.engine import TaskRunResult
+from backend.core.engine import SavedFile, TaskRunResult
 from backend.core.scheduler import enddate_passed
 from backend.database import session_scope
 from backend.main import app, scheduler
@@ -347,3 +348,130 @@ async def test_daily_sweep_drives_once_row_holding_a_valid_schedule(monkeypatch)
     finally:
         _delete(stale)
         _drop_account(acc_id)
+
+
+# ---------- 结局写库：三种结局 + 手动重新开启（Task 3） ----------
+
+
+def test_expired_once_row_says_past_deadline_not_completed():
+    """过期停摆的行不能报「已完成或已停用」——用户会以为资源到手，其实是过了截止日期。"""
+    ok, why = scheduled_should_run(_t(enddate="2020-01-01"))
+    assert not ok and "截止日期" in why
+    # 判序与 once_next_driver 一致：disabled 优先于过期（完成后再过期的行，原因仍该是完成/停用）
+    ok, why = scheduled_should_run(_t(disabled=True, enddate="2020-01-01"))
+    assert not ok and why == "已完成或已停用"
+
+
+def _run_once(monkeypatch, status: str, *, download_lines=None, auto_download=False, attempts=0):
+    """跑一次带指定结局的运行，返回 (id, 落库后的行)。"""
+    acc_id = _seed_account()
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+
+    files = [SavedFile(share_name="1.mp4", final_name="1.mp4", new_fid="f1", dest_path="/x/1.mp4")]
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        return TaskRunResult(status=status, files=files if status == "updated" else [], message="转存炸了")
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    if download_lines is not None:
+        from backend.services import download_service
+
+        async def fake_download(*a, **k):
+            return download_lines
+
+        monkeypatch.setattr(download_service, "download_task_files", fake_download)
+
+    tid = _persist(account_id=acc_id, auto_download=auto_download, retry_attempts=attempts)
+    asyncio.run(ts.run_tasks(task_ids=[tid], trigger="manual"))
+    return tid, _reload(tid)
+
+
+def test_no_release_does_not_consume_budget(monkeypatch):
+    _tid, row = _run_once(monkeypatch, "no_changes")
+    assert row.disabled is False and row.retry_attempts == 0 and row.next_retry_at is None
+
+
+def test_real_failure_consumes_one_and_schedules_five_minutes(monkeypatch):
+    _tid, row = _run_once(monkeypatch, "failed")
+    assert row.retry_attempts == 1 and row.disabled is False
+    assert row.next_retry_at is not None
+    delta = (row.next_retry_at - datetime.now()).total_seconds()
+    assert 4 * 60 - 20 <= delta <= 5 * 60 + 20
+
+
+def test_third_failure_exhausts_the_budget(monkeypatch):
+    _tid, row = _run_once(monkeypatch, "failed", attempts=2)
+    assert row.retry_attempts == 3 and row.next_retry_at is None and row.disabled is False
+
+
+def test_download_failure_also_counts_as_real_failure(monkeypatch):
+    _tid, row = _run_once(
+        monkeypatch, "updated", auto_download=True, download_lines=["✅ 1.mp4", "❌ 2.mp4: HTTP 500"]
+    )
+    assert row.retry_attempts == 1 and row.disabled is False and row.next_retry_at is not None
+
+
+def test_success_settles_and_clears_everything(monkeypatch):
+    _tid, row = _run_once(monkeypatch, "updated", auto_download=True, download_lines=["✅ 1.mp4"], attempts=2)
+    assert row.disabled is True and row.retry_attempts == 0 and row.next_retry_at is None
+
+
+def test_manual_run_resets_the_budget(client, monkeypatch):
+    """点行内「▶ 运行」= 重新给三次预算，并撤掉已排上的那一格，这是"手动再次开启"的唯一入口。"""
+    acc_id = _seed_account()
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+    tid = _persist(retry_attempts=1, next_retry_at=datetime.now() + timedelta(minutes=5), account_id=acc_id)
+    main.apply_task_schedule(_reload(tid))  # 先让到点作业真实存在
+    assert scheduler.scheduler.get_job(f"xiao_pan_retry_{tid}") is not None
+
+    async def fake_run(task_ids=None, trigger="manual"):
+        return {"run_id": "x", "total": 1, "updated": 0, "skipped": 0, "failed": 0,
+                "disabled_skipped": 0, "driven": 1, "notify_lines": 0}
+
+    monkeypatch.setattr(ts, "run_tasks", fake_run)
+    try:
+        resp = client.post(f"/api/tasks/{tid}/run")  # TestClient 会把 SSE 响应体读完，后台任务自然跑完
+        assert resp.status_code == 200
+        row = _reload(tid)
+        assert row.retry_attempts == 0 and row.next_retry_at is None
+        # 那一格必须一起撤掉，否则用户看到的是"点一下运行，五分钟后又莫名跑了一次"
+        assert scheduler.scheduler.get_job(f"xiao_pan_retry_{tid}") is None
+    finally:
+        _delete(tid)
+        _drop_account(acc_id)
+
+
+def test_settle_once_write_failure_is_swallowed(monkeypatch):
+    """收口自己吞异常：抛回运行循环就会砍掉整批（旁路记账铁律，口径同 50028e1/0ed6400）。
+
+    直接打 `_settle_once` 而不是整条 `run_tasks`：`test_task_run_mode` 里现成的
+    `_scope_that_fails_on_disable_writes` 只在 `disabled` 被置真时抛，模拟不了
+    "写 retry_attempts / next_retry_at 时锁库"，所以这里换成对所有 Task 写入都抛的桩，
+    把 `last_run_at` 那次写库排除在爆炸半径之外。
+    """
+    from contextlib import contextmanager
+
+    from backend.services.task_service import DownloadCounts
+
+    @contextmanager
+    def failing_scope():
+        with session_scope() as session:
+            real_add = session.add
+
+            def add(obj):
+                if isinstance(obj, Task):
+                    raise RuntimeError("database is locked")
+                return real_add(obj)
+
+            session.add = add
+            yield session
+
+    tid = _persist()
+    monkeypatch.setattr(ts, "session_scope", failing_scope)
+    try:
+        ts._settle_once(_reload(tid), TaskRunResult(status="failed", message="转存炸了"), DownloadCounts(),
+                        lambda level, msg: None)  # 不许抛
+        assert _reload(tid).retry_attempts == 0  # 写不进去就是没写，不能假装加了
+    finally:
+        monkeypatch.undo()
+        _delete(tid)
