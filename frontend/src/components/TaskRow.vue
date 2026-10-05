@@ -16,13 +16,52 @@ function onPosition(where: "top" | "bottom") {
 
 const WEEK_CN = ["日", "一", "二", "三", "四", "五", "六"];
 
+// cron 五段的取值范围，与后端 CronTrigger.from_crontab 同口径。周字段刻意是 0-6：
+// APScheduler 的 crontab 不认 7（`cron:0 9 * * 7` 后端直接拒），前端若按「0 与 7 都是周日」渲染
+// 就会宣传一个根本没建起来的专属作业，实际悄悄回落到全局 sweep。
+const CRON_RANGE: [number, number][] = [
+  [0, 59],
+  [0, 23],
+  [1, 31],
+  [1, 12],
+  [0, 6],
+];
+// 单段文法：* / 数字 / 名字（月、周段才有 MON、JAN 这类），可带 -区间 与 /步长，逗号成列表
+const CRON_ITEM = /^(?:\*|\d+|[A-Za-z]{3,9})(?:-(?:\d+|[A-Za-z]{3,9}))?(?:\/(?:\*|\d+))?$/;
+
+function cronFieldOk(field: string, index: number): boolean {
+  const [lo, hi] = CRON_RANGE[index];
+  const allowsName = index >= 3; // 只有月段(3)与周段(4)有英文名
+  return field.split(",").every((item) => {
+    if (!CRON_ITEM.test(item)) return false;
+    if (!allowsName && /[A-Za-z]/.test(item)) return false;
+    const nums = item.match(/\d+/g)?.map(Number) ?? [];
+    if (nums.some((n) => n < lo || n > hi)) return false;
+    const range = /^(\d+)-(\d+)/.exec(item);
+    return !range || Number(range[1]) <= Number(range[2]); // 区间不许倒挂（2-1 后端同样拒）
+  });
+}
+
+/** 后端 has_valid_schedule 会不会收下这个 schedule —— 收下才给它建专属作业，才「不归全局 sweep 管」。
+ *  刻意不引 cron 解析库，只镜像判定口径里肉眼可见的部分：前缀、段数、数字越界、区间倒挂。 */
+function hasOwnSchedule(raw: string): boolean {
+  if (!raw) return false;
+  if (/^interval:/i.test(raw)) return /^interval: *[+-]?\d+$/i.test(raw); // 后端 int() 失败即拒，成功则 max(1,N) 钳位
+  const body = /^cron:(.+)$/i.exec(raw)?.[1]?.trim();
+  if (body === undefined) return false; // 没有 interval:/cron: 前缀，后端一概不收
+  const fields = body.split(/\s+/);
+  return fields.length === 5 && fields.every(cronFieldOk); // from_crontab 只吃 5 段
+}
+
 /** 更新频率口语化：本项目只有 interval:分钟 与 cron:<标准 5 段> 两种写法，够用了。
- *  每天/每周X HH:MM、每 N 分钟；认不出来的写法（含非法值，后端会回退全局 crontab）返回空串，
- *  由调用方显示「继承全局」。刻意不引 cron 解析库。 */
-function humanFrequency(schedule: string): string {
-  const raw = (schedule || "").trim();
-  const interval = /^interval:(\d+)$/i.exec(raw);
-  if (interval) return Number(interval[1]) > 0 ? `每 ${Number(interval[1])} 分钟` : "";
+ *  能达意的预设（每 N 分钟 / 每天 HH:MM / 每周X HH:MM）说人话，其余（自定义 cron、interval:0 这种
+ *  被后端钳到 1 分钟的值）返回空串交给调用方原样显示 —— 空串只代表「我说不清」，不代表「继承全局」。 */
+function humanFrequency(raw: string): string {
+  const interval = /^interval:( *[+-]?\d+)$/i.exec(raw);
+  if (interval) {
+    const mins = Number(interval[1]);
+    return mins > 0 ? `每 ${mins} 分钟` : ""; // <=0 后端钳成 1 分钟，与其编个「每 0 分钟」不如原样显示
+  }
   const body = /^cron:(.+)$/i.exec(raw)?.[1]?.trim();
   const fields = (body || "").split(/\s+/);
   if (fields.length !== 5) return "";
@@ -34,9 +73,18 @@ function humanFrequency(schedule: string): string {
   if (dow === "*") return `每天 ${time}`;
   if (!/^\d(?:,\d){0,6}$/.test(dow)) return "";
   const nums = dow.split(",").map((d) => Number(d));
-  if (nums.some((d) => d > 7)) return ""; // cron 的周是 0-7（0 与 7 都是周日），越界当作认不出
-  const days = [...new Set(nums.map((d) => d % 7))];
+  if (nums.some((d) => d > 6)) return ""; // 7 后端不认（见 CRON_RANGE），这里也跟着当认不出
+  const days = [...new Set(nums)];
   return `每周${days.map((d) => WEEK_CN[d]).join("、")} ${time}`;
+}
+
+/** 频率徽标文案。「继承全局」只有在后端真的不给它建作业（schedule 空／非法值回退）时才是实话；
+ *  形如 cron: 每 5 分钟（星号斜杠开头）、interval:0 这种后端照收的自定义值必须原样显示，否则就是骗用户。 */
+function frequencyChip(schedule: string): string {
+  const raw = (schedule || "").trim();
+  const nice = humanFrequency(raw);
+  if (nice) return `频率 ${nice}`;
+  return hasOwnSchedule(raw) ? `频率 ${raw}` : "继承全局";
 }
 
 const chips = computed(() => {
@@ -47,9 +95,9 @@ const chips = computed(() => {
   if (t.run_mode === "once" && !t.disabled) list.push({ key: "o", text: "一次性待执行", primary: true });
   if (t.run_mode === "once" && t.disabled) list.push({ key: "done", text: "已完成", success: true });
   if (t.run_mode === "follow" && t.schedule) {
-    const freq = humanFrequency(t.schedule);
-    // 非法/自定义到认不出的频率：后端确实回退了全局 crontab，这里就说实话
-    list.push({ key: "s", text: freq ? `频率 ${freq}` : "继承全局" });
+    // 自定义但合法的频率后端会给它建专属作业（task_service 也拒绝让全局 sweep 驱动它），
+    // 这时候说「继承全局」就是谎报；口语化不出来的原样显示。
+    list.push({ key: "s", text: frequencyChip(t.schedule) });
   }
   if (t.pattern) list.push({ key: "p", text: `正则 ${t.pattern}`, primary: true });
   if (t.replace) list.push({ key: "r", text: `替换 ${t.replace}` });
