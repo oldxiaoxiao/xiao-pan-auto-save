@@ -484,3 +484,47 @@ async def test_aria2_submit_sends_absolute_dir(tmp_path, monkeypatch):
     opts = posted[0]["params"][-1]
     assert os.path.isabs(opts["dir"]), opts["dir"]
     assert opts["dir"].replace("\\", "/").endswith("data/downloads-rel/动漫/剧")
+
+
+@pytest.mark.asyncio
+async def test_aria2_submit_dir_keeps_symlink_prefix(tmp_path, monkeypatch):
+    """回归（aria2 真机活体发现）：投递的 dir 必须保留用户配置路径的字面量，含符号链接层。
+
+    macOS 宿主的 /tmp 常是指向 /private/tmp 的软链，而 aria2 容器只挂载字面的 /tmp/... 路径；
+    resolve() 会把 dir 改写成容器内不存在的 realpath，真机立刻 errorCode 18 失败
+    （见 test_download_aria2_live.py 的原始 struct）。abspath 只补绝对、不展开软链。"""
+    import os
+    from pathlib import Path as _P
+
+    posted = []
+
+    class R:
+        def json(self):
+            return {"result": "g1"}
+
+    class C:
+        def __init__(self, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json):
+            posted.append(json)
+            return R()
+
+    real = tmp_path / "real_mount"
+    real.mkdir()
+    link = tmp_path / "mnt"
+    os.symlink(real, link)  # 任何 OS 上都构造出「配置路径带软链」的场景
+    monkeypatch.setattr(dl.httpx, "AsyncClient", C)
+    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
+    monkeypatch.setattr(dl, "_emby_refresh", lambda c, log: _noop())
+    c = DownloadSettings(mode="aria2", dir=str(link / "down"), aria2_host_port="http://127.0.0.1:6800")
+    await dl.download_task_files(DlDriver(), [saved("1")], c)
+    opts = posted[0]["params"][-1]
+    assert os.path.isabs(opts["dir"])
+    assert opts["dir"] == str(_P(link, "down", "动漫/剧"))  # 字面软链前缀原样投递，未被 realpath 改写

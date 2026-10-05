@@ -403,7 +403,10 @@ async def _aria2_submit(
             # aria2 不会自建缺失目录，投递前先建好目标目录（与内置下载器一致）。
             # dir 必须用绝对路径：aria2 常在容器内运行，相对路径会按容器 CWD 解析，
             # 导致文件落进容器而非宿主机挂载目录（内置下载器跑在宿主机不受影响）。
-            dest_dir = item.local_path.parent.resolve()
+            # 用 abspath 而非 resolve：resolve 会展开符号链接——macOS 宿主的 /tmp 实为
+            # /private/tmp 的软链，容器里只挂载字面 /tmp/... 路径，改写后真机直接
+            # errorCode 18 失败（2026-10-05 活体验证发现）；abspath 只补绝对、保留字面挂载路径。
+            dest_dir = Path(os.path.abspath(item.local_path.parent))
             dest_dir.mkdir(parents=True, exist_ok=True)
             params: list = [
                 [row["download_url"]],
