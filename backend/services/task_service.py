@@ -194,23 +194,26 @@ async def _run_tasks_inner(
                     session.add(row)
 
         icon = STATUS_ICONS.get(result.status)
+        # 一次性判定要覆盖所有状态（含 no_changes / 转存失败），故计数先给默认值，
+        # 只有真正走了下载才在下面覆盖；收口统一在分支之后调一次。
+        counts = DownloadCounts()
         if result.status == "updated":
             summary["updated"] += 1
             notify_lines.append(f"✅《{task.taskname}》添加追更：\n{result.render()}")
             tlog("info", f"《{task.taskname}》新增 {len(result.files)} 项")
-            counts = DownloadCounts()
             if getattr(task, "auto_download", False):
                 # 下载在锁外：本地/aria2 可与其它任务的转存并行，不占用转存串行段
                 counts = await _download_for_task(
                     driver, task, result, settings, notify_lines, tlog, account_id=account.id
                 )
-            _settle_once(task, result, counts, tlog)
         elif result.status == "no_changes":
             tlog("info", f"《{task.taskname}》没有新的转存")
         else:
             summary["failed"] += 1
             notify_lines.append(f"{icon}《{task.taskname}》：{result.message}")
             tlog("error", f"《{task.taskname}》{result.status}：{result.message}")
+        # 收口只此一处：非 once / 已停用的行由 _once_verdict 与 _settle_once 的守卫拦掉，不会多打日志
+        _settle_once(task, result, counts, tlog)
 
     if notify_lines:
         await _push("小盘自动转存运行结果", "\n".join(notify_lines), push_config, settings, log)

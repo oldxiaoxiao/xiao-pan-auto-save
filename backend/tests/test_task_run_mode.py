@@ -275,6 +275,36 @@ def test_legacy_blank_row_projects_as_follow_in_api(client):
         _drop(tid)
 
 
+def _drop_account(*ids: int) -> None:
+    """清掉本模块测试自己 seed 的账号（Task 由 _drop 负责）。"""
+    with session_scope() as s:
+        for acc_id in ids:
+            row = s.get(Account, acc_id)
+            if row:
+                s.delete(row)
+
+
+def _spy_logs(monkeypatch) -> list[tuple[int | None, str, str]]:
+    """包一层 hub.make_logger，按 (task_id, level, msg) 收全运行日志。
+
+    返回的列表跨测试共享同一 DB，故断言必须按本测试建出来的 task id 过滤。
+    """
+    collected: list[tuple[int | None, str, str]] = []
+    real_make_logger = ts.hub.make_logger
+
+    def spy_make_logger(run_id="", task_id=None):
+        inner = real_make_logger(run_id, task_id)
+
+        def spy(level, msg, **kw):
+            collected.append((task_id, level, msg))
+            inner(level, msg, **kw)
+
+        return spy
+
+    monkeypatch.setattr(ts.hub, "make_logger", spy_make_logger)
+    return collected
+
+
 # ---------- 一次性收口：新增 + 下载全成功才算跑完 ----------
 
 
@@ -552,3 +582,98 @@ def test_download_for_task_returns_counts_and_keeps_notify_line(monkeypatch):
         assert any(level == "warn" and "不支持下载" in msg for level, msg in logs)
     finally:
         _drop(tid)
+
+
+# ---------- 收口提示补全：没拿到新增 / 转存失败也要告诉用户「还在待执行」 ----------
+
+
+@pytest.mark.asyncio
+async def test_run_once_no_changes_logs_pending_hint(monkeypatch):
+    """分享还没放资源（一次性任务最常见的场景）：保持启用，且必须在任务日志里说明仍在待执行。"""
+    acc_id = _seed_account()
+    tid = _make_task("once", account_id=acc_id, auto_download=False)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        return TaskRunResult(status="no_changes")
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    logs = _spy_logs(monkeypatch)
+    try:
+        await ts.run_tasks(task_ids=[tid], trigger="manual")
+        with session_scope() as s:
+            assert s.get(Task, tid).disabled is False
+        mine = [msg for task_id, _, msg in logs if task_id == tid]
+        assert any("本次没有新增资源" in m and "保持待执行" in m for m in mine), mine
+    finally:
+        _drop(tid)
+        _drop_account(acc_id)
+
+
+@pytest.mark.asyncio
+async def test_run_once_transfer_failed_logs_pending_hint(monkeypatch):
+    """转存失败：保持启用并写明「转存未成功」，用户才知道一次性任务没白跑也没跑完。"""
+    acc_id = _seed_account()
+    tid = _make_task("once", account_id=acc_id, auto_download=False)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        return TaskRunResult(status="failed", message="转存被风控")
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    logs = _spy_logs(monkeypatch)
+    try:
+        await ts.run_tasks(task_ids=[tid], trigger="manual")
+        with session_scope() as s:
+            assert s.get(Task, tid).disabled is False
+        mine = [msg for task_id, _, msg in logs if task_id == tid]
+        assert any("转存未成功" in m for m in mine), mine
+    finally:
+        _drop(tid)
+        _drop_account(acc_id)
+
+
+@pytest.mark.asyncio
+async def test_run_follow_no_changes_emits_no_once_line(monkeypatch):
+    """收口提示只对一次性任务说：follow 任务 no_changes 时一行「一次性任务」文案都不能有。"""
+    acc_id = _seed_account()
+    tid = _make_task("follow", account_id=acc_id, auto_download=False)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        return TaskRunResult(status="no_changes")
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    logs = _spy_logs(monkeypatch)
+    try:
+        await ts.run_tasks(task_ids=[tid], trigger="manual")
+        mine = [msg for task_id, _, msg in logs if task_id == tid]
+        assert [m for m in mine if "一次性任务" in m] == []
+        assert any("没有新的转存" in m for m in mine)  # 原有文案不受影响
+    finally:
+        _drop(tid)
+        _drop_account(acc_id)
+
+
+@pytest.mark.asyncio
+async def test_run_once_disabled_row_second_run_stays_silent(monkeypatch):
+    """已完成（停用）的一次性任务再手动点一次：既不重复报完成，也不报未完成。"""
+    acc_id = _seed_account()
+    tid = _make_task("once", account_id=acc_id, auto_download=False, disabled=True)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        return _updated_result()
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    logs = _spy_logs(monkeypatch)
+    try:
+        await ts.run_tasks(task_ids=[tid], trigger="manual")
+        mine = [msg for task_id, _, msg in logs if task_id == tid]
+        assert [m for m in mine if "已完成并自动停用" in m] == []
+        assert [m for m in mine if "未完成" in m] == []
+        with session_scope() as s:
+            assert s.get(Task, tid).disabled is True
+    finally:
+        _drop(tid)
+        _drop_account(acc_id)
