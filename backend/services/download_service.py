@@ -3,7 +3,8 @@
 两种模式（协议对齐原项目 aria2 插件）：
 - builtin：服务端 httpx 流式下载，.part 临时文件 + 完成后改名，已存在且同大小则跳过，
   按配置并发数并行；
-- aria2：JSON-RPC addUri 投递直链任务（带网盘 Cookie/UA 头），支持 pause 挂起。
+- aria2：JSON-RPC addUri 投递直链任务（带网盘 Cookie/UA 头），支持 pause 挂起；
+  投递前同样做「目标已到位则跳过」预检，绝不撞名重下整片。
 下载成功后如配置了 Emby，触发一次媒体库刷新。
 """
 
@@ -13,6 +14,7 @@ import asyncio
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -413,6 +415,30 @@ async def _aria2_submit(
                 continue
             _inflight_paths.add(key)
             try:
+                # 投递前到位预检（与内置 _fetch_one 同款短路）：目标已是完整文件就直接跳过，
+                # 不再投给 daemon。缺这层的活体翻车（2026-10-05）：对已下完的 S01E194.mkv 点重下，
+                # aria2 撞名不改写而是自动改名 .1.mkv 重下整片 3.5GB，新行 dest_path 却仍记原路径，
+                # 对账把原文件误判成本次下载的结果。语义复用 download_history._file_check 这唯一
+                # 一处 stat 解读（全项目不再写第三变体）：已知大小须精确相符，未知大小非空即到位。
+                # 顺序选「在途守卫在前、预检在后」：aria2 会预分配整片大小的占位文件，投递窗口内
+                # 并发进来的第二次点击若先做预检，会把没下完的占位误判成完整而假跳过；先过守卫，
+                # 同路径在途动作一律吃「已有下载在途」，预检只面对无在途的终态文件。
+                expected = int(row.get("size") or item.size or 0)
+                state, matches, _st = history._file_check(str(item.local_path), expected)
+                if state == "ok" and matches:
+                    # 账本按内置路径同款落一行终态 skipped。内置行以 registry job_id、aria2 行以 daemon
+                    # gid 为键，而跳过的尝试从未投递、两头都没有 id——按 DownloadRegistry.create
+                    # 的做法铸一个 uuid4 hex 前 12 位作 ref_id；终态行不进 open_records，
+                    # 这个非 gid 的 ref 永远不会被 reconcile 拿去问 tellStatus。
+                    ref_id = uuid.uuid4().hex[:12]
+                    _history_start(log, source="aria2", ref_id=ref_id, item=item, size=expected, task_id=task_id,
+                                   taskname=taskname, account_id=account_id, driver_key=driver_key)
+                    # 不传 size_done/size_total：与内置 skipped 行同形（size_total=start 落的预期大小，
+                    # size_done 保持默认 0——下载从未开始）。
+                    history.finish(ref_id, source="aria2", status="skipped")
+                    log("info", f"📥 跳过（已存在）{item.name}")  # 与内置路径的运行日志同款
+                    lines.append(f"✅ 跳过（已存在）{item.name}")
+                    continue
                 # aria2 不会自建缺失目录，投递前先建好目标目录（与内置下载器一致）。
                 # dir 必须用绝对路径：aria2 常在容器内运行，相对路径会按容器 CWD 解析，
                 # 导致文件落进容器而非宿主机挂载目录（内置下载器跑在宿主机不受影响）。

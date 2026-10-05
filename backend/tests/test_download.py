@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
+from sqlmodel import col, select
 
 from backend.core.engine import SavedFile
+from backend.database import session_scope
 from backend.drivers.base import CloudDrive, FsItem, ShareRef
+from backend.models import DownloadRecord
+from backend.services import download_history as hist
 from backend.services import download_service as dl
 from backend.services.download_service import DownloadSettings, resolve_local, safe_name
 
@@ -599,3 +605,162 @@ async def test_aria2_submit_dir_keeps_symlink_prefix(tmp_path, monkeypatch):
     opts = posted[0]["params"][-1]
     assert os.path.isabs(opts["dir"])
     assert opts["dir"] == str(_P(link, "down", "动漫/剧"))  # 字面软链前缀原样投递，未被 realpath 改写
+
+
+# ---- aria2 投递前的「目标已到位」预检（2026-10-05 活体翻车：重下整片被改名 .1.mkv 重下）----
+
+
+def _gid_client(posted: list, gid: str = "gid-skip-test"):
+    """假 RPC 客户端：记录收到的每一次 addUri 投递，恒返回成功 gid。"""
+
+    class R:
+        def json(self):
+            return {"result": gid}
+
+    class C:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json):
+            posted.append(json)
+            return R()
+
+    return C
+
+
+def _rows_for(task_id: int) -> list[DownloadRecord]:
+    with session_scope() as s:
+        return list(s.exec(select(DownloadRecord).where(DownloadRecord.task_id == task_id)).all())
+
+
+def _drop_rows(*task_ids: int) -> None:
+    with session_scope() as s:
+        for r in s.exec(select(DownloadRecord).where(col(DownloadRecord.task_id).in_(task_ids))).all():
+            s.delete(r)
+
+
+def _aria2_skip_driver(monkeypatch):
+    """装好「aria2 可达」与假 RPC 客户端，返回投递记录列表。"""
+    posted: list = []
+    monkeypatch.setattr(dl.httpx, "AsyncClient", _gid_client(posted))
+    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
+    return posted
+
+
+@pytest.mark.asyncio
+async def test_aria2_existing_file_skips_without_adduri(tmp_path, monkeypatch):
+    """活体翻车回归：dest 已是同名同大小的完整文件时，重下绝不投递 addUri。
+
+    daemon 撞名不改写而是自动改名（S01E194.mkv → S01E194.1.mkv）重下整片 3.5GB，
+    新行 dest_path 却仍记原路径，对账把原文件误判成本次下载——账本描述了一次从未落到
+    记录路径的下载。内置下载器对此短路记 skipped，aria2 模式必须同款语义。"""
+    posted = _aria2_skip_driver(monkeypatch)
+    dest = tmp_path / "剧" / "S01E194.mkv"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"0" * 10)  # DlDriver 直链行 size=10：同大小 → 已到位
+    item = dl.DownloadItem(fid="ep194", name="S01E194.mkv", size=10, local_path=dest)
+    c = cfg(tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800")
+    task_id = 971
+    try:
+        lines = await dl.download_items(
+            DlDriver(), [item], c, log=lambda *a: None,
+            task_id=task_id, taskname="凡人", account_id=7, driver_key="fake",
+        )
+        # 1) 一次 addUri 都没投出去（活体缺陷的直接证据）
+        assert [p for p in posted if p["method"] == "aria2.addUri"] == []
+        # 2) 摘要行与内置同款：✅ 前缀（通知聚合按它计数）+ 跳过文案
+        assert len(lines) == 1 and lines[0].startswith("✅") and "跳过（已存在）" in lines[0]
+        assert dest.read_bytes() == b"0" * 10  # 原文件分毫未动
+        # 3) 账本恰一行、终态 skipped、字段齐全；ref_id 无 gid 可用 → uuid4 hex 前 12 位（同 registry.create）
+        rows = _rows_for(task_id)
+        assert len(rows) == 1, [(r.ref_id, r.status) for r in rows]
+        r = rows[0]
+        assert r.status == "skipped" and r.source == "aria2"
+        assert r.dest_path == str(dest) and r.fid == "ep194" and r.taskname == "凡人"
+        assert r.driver_key == "fake" and r.account_id == 7 and r.size_total == 10
+        assert re.fullmatch(r"[0-9a-f]{12}", r.ref_id) and r.ref_id != "gid-skip-test"
+    finally:
+        _drop_rows(task_id)
+
+
+@pytest.mark.asyncio
+async def test_aria2_missing_or_wrong_size_still_submits(tmp_path, monkeypatch):
+    """预检不许把好路堵死：目标不存在、大小不符仍照常投递；未知大小按「非空即到位」容忍。"""
+    posted = _aria2_skip_driver(monkeypatch)
+    gone = tmp_path / "gone.mkv"
+    partial = tmp_path / "partial.mkv"
+    partial.write_bytes(b"0" * 5)  # size=10 预期却只有 5 字节 → 不符，必须重下
+    unknown = tmp_path / "unknown.mkv"
+    unknown.write_bytes(b"0" * 7)  # 网盘报 0/未知：非空即视为到位（_file_check 同款容忍）
+
+    class ZeroSizeDriver(DlDriver):
+        async def get_download_urls(self, fids):
+            rows = [
+                {"fid": f, "file_name": f, "size": 0, "download_url": f"http://dl/{f}"} for f in fids
+            ]
+            return rows, "DLCK=1"
+
+    items = [
+        dl.DownloadItem(fid="a-gone", name="gone.mkv", size=10, local_path=gone),
+        dl.DownloadItem(fid="b-partial", name="partial.mkv", size=10, local_path=partial),
+        dl.DownloadItem(fid="c-unknown", name="unknown.mkv", size=0, local_path=unknown),
+    ]
+    c = cfg(tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800")
+    task_id = 972
+    try:
+        lines = await dl.download_items(
+            ZeroSizeDriver(), items, c, log=lambda *a: None, task_id=task_id, driver_key="fake"
+        )
+        fids = [p["params"][-1]["out"] for p in posted]  # out 即文件名
+        assert fids == ["gone.mkv", "partial.mkv"]
+        assert "unknown.mkv" not in fids
+        assert "跳过（已存在）unknown.mkv" in lines[2]
+        assert lines[0].startswith("✅") and lines[1].startswith("✅")  # 投递成功也是 ✅，不只看跳过
+        assert sorted(r.status for r in _rows_for(task_id)) == ["queued", "queued", "skipped"]
+    finally:
+        _drop_rows(task_id)
+
+
+@pytest.mark.asyncio
+async def test_aria2_skipped_row_survives_reconcile(tmp_path, monkeypatch):
+    """skipped 是终态：open_records 永不取它，uuid ref_id（非 gid）也绝不会被拿去问 tellStatus。"""
+    ref = "a" * 12  # 与 mint 出来的 ref_id 同形：12 位 hex、不是 daemon gid
+    dest = tmp_path / "survive.mkv"
+    hist.start(
+        source="aria2", ref_id=ref, task_id=973, taskname="T", filename="survive.mkv",
+        dest_path=str(dest), size_total=10, fid="F", driver_key="fake", account_id=None,
+    )
+    hist.finish(ref, source="aria2", status="skipped")
+    # 钉住机制本身：终态行绝不进 open_records
+    assert ref not in {r["ref_id"] for r in hist.open_records()}
+    # 真问一次账：混一条同 ref 形态的 open 行（g-live），reconcile 只许问它、不碰 skipped
+    open_ref = "b" * 12
+    hist.start(
+        source="aria2", ref_id=open_ref, task_id=974, taskname="T", filename="live.mkv",
+        dest_path=str(tmp_path / "live.mkv"), size_total=10, fid="F", driver_key="fake", account_id=None,
+    )
+    calls = []
+
+    async def fake_status(_c):
+        return []
+
+    async def fake_rpc(_c, method, *params):
+        calls.append(params[0])
+        return {"result": {"status": "active", "completedLength": "1", "totalLength": "10"}}
+
+    monkeypatch.setattr(dl, "aria2_status", fake_status)
+    monkeypatch.setattr(dl, "aria2_rpc", fake_rpc)
+    try:
+        await hist.reconcile(cfg(tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800"))
+        assert open_ref in calls and ref not in calls
+        row = _rows_for(973)[0]
+        assert row.status == "skipped" and row.error == "" and row.size_total == 10
+        assert row.finished_at is not None
+    finally:
+        _drop_rows(973, 974)
