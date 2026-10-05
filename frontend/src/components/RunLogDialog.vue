@@ -112,6 +112,9 @@ watch(
         <span class="muted"
           >跳过 <b>{{ summary.skipped }}</b></span
         >
+        <span class="muted"
+          >跳过已停用 <b>{{ summary.disabled_skipped }}</b></span
+        >
         <span class="bad"
           >失败 <b>{{ summary.failed }}</b></span
         >

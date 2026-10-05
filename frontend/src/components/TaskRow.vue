@@ -16,14 +16,19 @@ function onPosition(where: "top" | "bottom") {
 
 const chips = computed(() => {
   const t = props.task;
-  const list: { key: string; text: string; primary?: boolean }[] = [];
+  const list: { key: string; text: string; primary?: boolean; success?: boolean }[] = [];
+  // 执行方式徽标排在形态细节之前；「已完成」由 once + 已停用派生（无法区分停用来源，已知瑕疵）
+  if (t.run_mode === "manual") list.push({ key: "m", text: "仅手动" });
+  if (t.run_mode === "once" && !t.disabled) list.push({ key: "o", text: "一次性待执行", primary: true });
+  if (t.run_mode === "once" && t.disabled) list.push({ key: "done", text: "已完成", success: true });
+  if (t.run_mode === "follow" && t.schedule) list.push({ key: "s", text: `频率 ${t.schedule}` });
   if (t.pattern) list.push({ key: "p", text: `正则 ${t.pattern}`, primary: true });
   if (t.replace) list.push({ key: "r", text: `替换 ${t.replace}` });
   if (t.ignore_extension) list.push({ key: "e", text: "忽略扩展名" });
   if (t.update_subdir) {
     list.push({ key: "u", text: `子目录追更${t.update_subdir_resave ? "[重存]" : "[递归]"}` });
   }
-  if (t.startfid) list.push({ key: "s", text: "已选起始文件" });
+  if (t.startfid) list.push({ key: "sf", text: "已选起始文件" });
   if (t.auto_download) list.push({ key: "dl", text: `本地下载${t.download_subdir ? "[含子目录]" : ""}` });
   if (t.enddate) list.push({ key: "d", text: `截止 ${t.enddate}` });
   if (t.runweek && t.runweek.length && t.runweek.length < 7) list.push({ key: "w", text: weekText(t.runweek) });
@@ -31,6 +36,9 @@ const chips = computed(() => {
 });
 
 const lastRun = computed(() => relativeTime(props.task.last_run_at));
+
+/** 一次性任务停用即「已完成」：此时不再显示灰「停用」，改由绿徽标说明状态。 */
+const isOnceDone = computed(() => props.task.run_mode === "once" && props.task.disabled);
 </script>
 
 <template>
@@ -43,7 +51,7 @@ const lastRun = computed(() => relativeTime(props.task.last_run_at));
         <span class="name">{{ task.taskname }}</span>
         <span v-if="dirty" class="dot-unsaved" title="未保存" />
         <span v-if="task.shareurl_ban" class="badge badge--danger">失效</span>
-        <span v-if="task.disabled" class="badge badge--muted">停用</span>
+        <span v-if="task.disabled && !isOnceDone" class="badge badge--muted">停用</span>
         <span v-else-if="lastRun" class="badge badge--muted">{{ lastRun }}</span>
       </div>
       <div class="path text-muted mono">→ {{ task.savepath }}</div>
@@ -51,7 +59,13 @@ const lastRun = computed(() => relativeTime(props.task.last_run_at));
         {{ task.shareurl }}
       </div>
       <div class="chips">
-        <span v-for="c in chips" :key="c.key" class="chip" :class="{ 'is-primary': c.primary }">{{ c.text }}</span>
+        <span
+          v-for="c in chips"
+          :key="c.key"
+          class="chip"
+          :class="{ 'is-primary': c.primary, 'is-success': c.success }"
+          >{{ c.text }}</span
+        >
       </div>
     </div>
     <div class="ops" @click.stop>

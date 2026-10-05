@@ -88,6 +88,10 @@ a {
   background: var(--primary-soft);
   color: var(--primary);
 }
+.chip.is-success {
+  background: #e7f6ef;
+  color: #1c9e6e;
+}
 
 .badge {
   display: inline-flex;

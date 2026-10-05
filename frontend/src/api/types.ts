@@ -1,5 +1,8 @@
 /** 与后端 API 契约一一对齐的类型定义。 */
 
+/** 执行方式：follow=定时追更（受定时器驱动）| manual=仅手动 | once=一次性（拿到新增且下载全成功后自动停用）。 */
+export type RunMode = "follow" | "manual" | "once";
+
 /** GET/POST/PUT /api/tasks 的任务字段（不含 id 的请求体使用 TaskPayload）。 */
 export interface TaskPayload {
   taskname: string;
@@ -23,12 +26,15 @@ export interface TaskPayload {
   episode_end: number;
   quality: string;
   schedule: string;
+  run_mode: RunMode;
 }
 
 export interface Task extends TaskPayload {
   id: number;
   shareurl_ban: string;
   last_run_at: string | null;
+  /** 后端 _to_out 已按 run_mode_of 归一化，响应里只会是 follow / manual / once 三值之一。 */
+  run_mode: RunMode;
 }
 
 /** GET /api/accounts 返回（无 cookie 明文，仅掩码）。 */
@@ -202,6 +208,8 @@ export interface RunSummary {
   total: number;
   updated: number;
   skipped: number;
+  /** 批量「立即运行」跳过的已停用任务数（行内「▶ 运行」不计）。 */
+  disabled_skipped: number;
   failed: number;
   notify_lines: number;
   error?: string;

@@ -3,11 +3,18 @@ import { reactive, ref, watch, computed } from "vue";
 import { ElMessage } from "element-plus";
 import FileSelector from "./FileSelector.vue";
 import SearchSuggest from "./SearchSuggest.vue";
-import type { Account, Task, TaskPayload } from "../api/types";
+import type { Account, RunMode, Task, TaskPayload } from "../api/types";
 import { MAGIC_VARIABLES } from "../constants";
 import { WEEK_LABELS } from "../utils";
 
 const QUALITY_OPTIONS = ["4K", "2160P", "1080P", "720P", "x265", "HDR"];
+
+/** 执行方式：决定「要不要自动跑」，与「停用」（临时暂停一切）分工不同。 */
+const RUN_MODE_OPTIONS: { value: RunMode; label: string; hint: string }[] = [
+  { value: "follow", label: "定时追更", hint: "按更新频率/全局调度自动追更" },
+  { value: "manual", label: "仅手动", hint: "永不自动跑，只在点「运行」时执行" },
+  { value: "once", label: "一次性", hint: "只手动跑；拿到新增且下载全部成功后自动停用" },
+];
 
 const props = defineProps<{
   task: Task | null;
@@ -36,6 +43,7 @@ function blank(): TaskPayload & { startfid_name: string } {
     enddate: "",
     runweek: [],
     auto_download: true,
+    run_mode: "follow" as RunMode,
     download_subdir: false,
     download_savepath: "",
     disabled: false,
@@ -57,6 +65,9 @@ const qualityList = computed({
   set: (v: string[]) => (draft.quality = v.join(",")),
 });
 const advancedOpen = ref<string[]>([]); // 高级区默认收起
+
+// 只有「定时追更」才需要配置频率/星期/截止日期；其余形态收起来，但 draft.schedule 等值按设计保留不清空。
+const isFollow = computed(() => draft.run_mode === "follow");
 
 // —— 更新频率 ——
 const SCHEDULE_PRESETS = [
@@ -226,6 +237,16 @@ const hasId = computed(() => props.task?.id ?? null);
         <el-switch v-model="draft.auto_download" />
       </div>
       <div class="f f--wide">
+        <label class="field-label">执行方式</label>
+        <el-radio-group v-model="draft.run_mode">
+          <el-radio-button v-for="o in RUN_MODE_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</el-radio-button>
+        </el-radio-group>
+        <div class="hint">{{ RUN_MODE_OPTIONS.find((o) => o.value === draft.run_mode)?.hint }}</div>
+        <div v-if="!isFollow && draft.disabled" class="hint">
+          该行当前为停用状态；改回「定时追更」后需手动取消停用才会恢复自动运行。
+        </div>
+      </div>
+      <div v-if="isFollow" class="f f--wide">
         <label class="field-label">更新频率</label>
         <el-select v-model="scheduleMode" style="width: 100%">
           <el-option v-for="p in SCHEDULE_PRESETS" :key="p.value" :label="p.label" :value="p.value" />
@@ -314,7 +335,7 @@ const hasId = computed(() => props.task?.id ?? null);
             />
           </div>
 
-          <div class="f">
+          <div v-if="isFollow" class="f">
             <label class="field-label">截止日期 (enddate)</label>
             <el-date-picker
               v-model="draft.enddate"
@@ -331,7 +352,7 @@ const hasId = computed(() => props.task?.id ?? null);
             </el-select>
           </div>
 
-          <div class="f f--wide">
+          <div v-if="isFollow" class="f f--wide">
             <label class="field-label">按星期运行（不选 = 每天）</label>
             <div class="weeks">
               <button
