@@ -602,6 +602,7 @@ def apply_task_schedule(task) -> None:
         else:
             scheduler.unschedule_retry(task.id)
         return
+    scheduler.unschedule_retry(task.id)  # 落到 follow 就是周期追更：遗留的到点重试作业必须先撤，否则改形态后仍会被提前跑一次
     scheduler.reschedule_task(task.id, getattr(row, "schedule", "") or "", partial(_run_one_task, task.id))
 ```
 
@@ -635,7 +636,9 @@ def apply_task_schedule(task) -> None:
 
 局部变量 `mode` 随之消失 —— 下面第 177 行之后的分支不读它，若 ruff 报未使用就把那行 `mode = run_mode_of(task)` 一起删掉，不要留成死码。
 
-它下面那条 `has_valid_schedule` 分支**保持原样不动**：它管的是 `follow` 行自带独立调度时不被全局扫双驱动，与本判定正交（`once_next_driver` 对 follow 直接答 `none`，接不住这件事）。
+它下面那条 `has_valid_schedule` 分支：计划初稿说"保持原样"，**执行期作废**。评审发现 `once` + 有效独立 `schedule` 的行会先被 `scheduled_should_run` 判成 `daily`、再被这条分支以「已配置独立调度」跳过，而 `apply_task_schedule` 从不给 once 行注册任务级作业 —— 于是没有任何驱动方，违反 spec 4.3 的「once 且无到点时间 → 参与每日扫」。初稿的正交性论证只覆盖了 `follow` 方向。裁决：这条分支只对 `follow` 行生效（判据用 `run_mode_of(task) == "follow"`），中文文案与 `skipped` 计数口径不变，分支上方那段把 once 也一起描述进去的注释要改成实情。
+
+同理，`apply_task_schedule` 的 follow 落点也要 `scheduler.unschedule_retry(task.id)`：把 once 改成 follow 后，遗留的到点作业仍会提前跑一次并顺手清掉 `next_retry_at`。两处各配一条测试，见 Task 2 Step 1。
 
 - [ ] **Step 6: 跑测试确认通过**
 
