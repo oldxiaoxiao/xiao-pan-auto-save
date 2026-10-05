@@ -22,8 +22,9 @@
 - **前置失败不落库**：`取直链失败`、`驱动不支持下载`、`目录递归为空`、`aria2 投递失败` 这类还没建立 job 就挂掉的情况，
   继续只出现在任务日志里，账本里没有对应记录。账本记的是"下载动作的完整生命周期"，不是"下载意愿的清单"。
 - **后台轮询 aria2**：不起常驻 job 拉 aria2 状态，改为查询时对账（见 4.4）。
-- **任意记录都可重下**：不做"仅失败记录可点重下"的状态判断。任意历史记录的按钮都可点，文件若已在且同大小会自然进 `skipped`；
-  少一组按状态分支的禁用逻辑，行为也可预期（点完成记录 = 确认文件还在）。
+- **任意记录都可重下**：不做"仅失败记录可点重下"的状态判断。任意历史记录的按钮都可点，目标若是
+  **验证过的完整文件**（判据见 4.4 第 3 条）会自然进 `skipped`；少一组按状态分支的禁用逻辑，行为也可预期
+  （点完成记录 = 确认文件还在且真下完了；点失败记录 = 补下，残骸不会被当成已到位）。
 - **改动转存的串行锁**：下载本来就跑在全局转存锁之外（`task_service.py:177`），重下同样只走下载段、不触发转存，
   不碰这把锁。
 
@@ -63,8 +64,11 @@
 | `created_at` | NaiveDatetime | 记录建立时间 |
 | `finished_at` | NaiveDatetime \| None | 进终态时间；`prune()` 按它淘汰 |
 
-**不存 `file_state`**：文件在不在是随时间变化的事实，写进账本会把记录污染成一次性快照。它作为查询时的派生字段返回（见 4.3），
-取值 `ok` / `missing` / `unknown`（不用布尔值，因为"读不到"既不是存在也不是丢失，必须能表达第三种）。
+**不存 `file_state`**：文件在不在是随时间变化的事实，写进账本会把记录污染成一次性快照。它作为查询时的派生字段返回（见 4.3）。
+（第三次更正，2026-10-05：本节原写「取值 `ok` / `missing` / `unknown`」三态。实装后是**四态**
+`ok` / `partial` / `missing` / `unknown`，且**按行的终态门控**——`queued`/`downloading` 行一律 `unknown`，
+连 stat 都省。理由与 4.4 第 3 条同源：aria2 会预分配整片大小的占位文件，"大小对得上"根本不代表下完，
+非终态行报 `ok` 就是把在途作业说成已完成。不用布尔值的原因不变：读不到既不是存在也不是丢失。）
 
 ### 4.2 分层与新模块
 
@@ -95,7 +99,7 @@ prune(mode: str) -> int                                              # "auto" | 
 | 端点 | 变化 | 说明 |
 | --- | --- | --- |
 | `GET /api/downloads` | 语义收窄 | 只返回进行中（内置 `snapshot()` + aria2 `tellActive/tellWaiting`）。已确认唯一消费者是 `DownloadsView.vue`，外部 API 未暴露，改动不外溢 |
-| `GET /api/downloads/history` | 新增 | 查 DB。`page`(默认 1) / `page_size`(默认 50，上限 200) / `status`(逗号分隔多选) / `task_id` / `keyword`(匹配 filename、dest_path)。按 `created_at` 倒序，返回 `{items, total}`，每条附派生字段 `file_state`: `ok` / `missing` / `unknown` |
+| `GET /api/downloads/history` | 新增 | 查 DB。`page`(默认 1) / `page_size`(默认 50，上限 200) / `status`(逗号分隔多选) / `task_id` / `keyword`(匹配 filename、dest_path)。按 `created_at` 倒序，返回 `{items, total}`，每条附派生字段 `file_state`: `ok` / `partial` / `missing` / `unknown`（四态，且按行终态门控，见 4.1 第三次更正） |
 | `POST /api/downloads/history/{id}/retry` | 新增 | 单条重下，见 4.6。**起后台任务、不 await 下载**，立即返回 `{ok: bool, message: str}` |
 | `DELETE /api/downloads/history/{id}` | 新增 | 删记录，**不动磁盘文件** |
 | `POST /api/downloads/history/prune` | 新增 | body `{mode: "auto" \| "all" \| "failed"}`，返回删除条数 |
@@ -125,7 +129,17 @@ prune(mode: str) -> int                                              # "auto" | 
    （更正：本节原写「一次 `system.multicall` 问 `aria2.tellDownloadResult`」，对真 aria2 1.36.0 活体验证后发现两处都不存在——
    `listMethods` 无 `tellDownloadResult`，`multicall` 拒绝前导 `token:` 参数，整条 RPC 分支实为死代码，故改为逐 gid `tellStatus`）
 2. `source=builtin` 且 `ref_id` 在内存 registry 里仍是 active job：本进程还在下，**保持不动**（进行中 tab 负责展示它）；
-3. 上述问不到（gid 被 aria2 丢弃、进程重启导致 registry 清空、RPC 不可达）→ stat 目标文件，存在且大小与 `size_total` 一致（或 `size_total` 为 0 且非空）→ `done`；
+3. 上述问不到（gid 被 aria2 丢弃、进程重启导致 registry 清空、RPC 不可达）→ stat 目标文件，只认
+   **验证过的完整文件**才 `done`。判据是 `download_history._file_check` 这全项目唯一一处 stat 解读，四条齐了才算数：
+   常规文件、账本记了大小且 `st_size == size_total`、同目录没有 `<name>.aria2` 控制文件、不是稀疏预分配
+   （`st_blocks * 512 < st_size`）。
+   （第三次更正：本节原写「存在且大小与 `size_total` 一致（或 `size_total` 为 0 且非空）→ `done`」。两处都不成立——
+   ① aria2 的 `--file-allocation`（默认 prealloc）在投递瞬间就把目标文件**按整片大小**预创建出来（稀疏，不占实际块），
+   活体现场是 3,509,370,877 字节的占位旁边挂着 1097 字节的 `.aria2` 控制文件，所以"大小相符"根本区分不出
+   下完的文件和刚建好的占位；对账拿它收口，就会把 gid 暂时问不到的**在途作业**（daemon 重启丢结果缓存、后端切到
+   内置模式、状态串不认识）当场判成 `done`。② `size_total` 为 0 时无从校验，"非空即到位"会让残留的半截文件
+   被永久假跳过；现在大小未知一律算"没验证过"，两种下载模式同判——重新下。
+   确认不了的留给第 4 条，24h 规则是唯一的终态退路。）
 4. 仍不确定：以 `created_at` 为基准，距今 **< 24h 保持 `queued`**（可能真在下），**≥ 24h 判 `failed`**，
    `error` = `"对账超时：下载器无响应或结果已丢弃"`。
 
@@ -172,7 +186,7 @@ download_task_files(driver, saved: list[SavedFile], cfg, ...) -> list[str]
 `frontend/src/views/DownloadsView.vue` 拆成两个 tab（不是三个）：
 
 - **进行中**（默认）：现有表格原样保留（进度条、速度、停止/暂停/继续），1.5s 轮询 `GET /api/downloads`，tab 标签带数量角标。
-- **历史**：`GET /api/downloads/history`。列 = 任务 / 文件 / 体积 / 状态 / **文件**（在·已丢失·未校验）/ 完成时间 / 目标路径 / 操作（重下、删记录）。
+- **历史**：`GET /api/downloads/history`。列 = 任务 / 文件 / 体积 / 状态 / **文件**（在·不完整·已丢失·未校验）/ 完成时间 / 目标路径 / 操作（重下、删记录）。
   顶部筛选 = 状态多选 + 任务下拉 + 关键词，底部 `el-pagination`。
 
 拆两个而非「进行中/已完成/失败」三个的原因：完成、失败、已停止、跳过都是同一张表上的 `status` 过滤条件，
@@ -214,9 +228,13 @@ aria2 沿用 `test_download.py` 的打桩方式（`monkeypatch.setattr(dl.httpx,
 
 - 生命周期完整：内置走 `start`→`finish` 只留一条记录（不是两条），`fid`/`driver_key`/`dest_path`/`ref_id` 齐全；aria2 投递后停在 `queued`；
 - `reconcile()` 分支：aria2 `tellStatus` 回 `complete` → `done`；回 `error`/`removed` → `failed` 且理由取 `errorMessage`；
-  gid 仍在 `tellActive` → 保持不动；gid 查不到（RPC 返回 `error` 体）但文件同大小 → `done`；
+  gid 仍在 `tellActive` → 保持不动；gid 查不到（RPC 返回 `error` 体）但目标是**验证过的完整文件** → `done`；
+  gid 查不到而文件只是 aria2 预分配占位（整片大小的稀疏文件 / 旁边有 `<name>.aria2`）→ **保持 `queued`**，不许当场收口；
   builtin 且 registry 里仍 active → 保持不动；builtin 且 registry 已无此 job（模拟重启）+ 无文件 + ≥ 24h → `failed` 且 error 文案正确；< 24h → 保持 `queued`；
-- `file_state` 三态：`ok` / `missing` / stat 抛 `OSError` → `unknown`；
+- `file_state` 四态 + 终态门控：`ok` / `partial`（大小不符、稀疏占位、有 `.aria2` 控制文件）/ `missing` /
+  stat 抛 `OSError` → `unknown`；非终态行一律 `unknown`；`size_total=0` 不是"验证过的完整"（`matches=False`）；
+  占位用例必须以**真稀疏文件**为夹具（`truncate` 不写字节）并自检 `st_blocks * 512 < st_size`，
+  文件系统即时补块时大声 skip，不许静默通过；
 - `prune()`：阈值内删除、`forever` 不删、`failed` 只删失败；
 - **写库失败不冒泡**：`session_scope` 抛异常时 `download_items()` 仍返回正确结果行，且不留下半截记录之外的影响。
 
