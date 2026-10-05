@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 
 import pytest
 from fastapi.testclient import TestClient
@@ -336,7 +337,8 @@ def _updated_result() -> TaskRunResult:
         (False, DownloadCounts(), "updated", True, "已获取新增资源"),
         (True, DownloadCounts(executed=True, attempted=2, ok=2), "updated", True, "已获取新增资源"),
         (True, DownloadCounts(executed=True, attempted=1, ok=1), "updated", True, "已获取新增资源"),
-        (True, DownloadCounts(executed=True, attempted=2, ok=1, failed=1), "updated", False, "1 项下载失败"),
+        (True, DownloadCounts(executed=True, attempted=2, ok=1, failed=1), "updated", False,
+         "1 项下载失败（可到下载页逐条重下）"),
         (True, DownloadCounts(executed=False), "updated", False, "下载未实际执行"),
         (True, DownloadCounts(executed=True, attempted=0), "updated", False, "下载未实际执行"),
         (False, DownloadCounts(), "no_changes", False, "本次没有新增资源"),
@@ -385,9 +387,13 @@ async def test_run_once_auto_disables_after_success(monkeypatch):
     try:
         await ts.run_tasks(task_ids=[tid], trigger="manual")
         with session_scope() as s:
-            assert s.get(Task, tid).disabled is True
+            row = s.get(Task, tid)
+            assert row.disabled is True
+            # 停用写的是第二个事务：不能把上一个事务刚落好的 last_run_at 覆盖成空
+            assert row.last_run_at is not None
     finally:
         _drop(tid)
+        _drop_account(acc_id)
 
 
 @pytest.mark.asyncio
@@ -469,27 +475,16 @@ async def test_run_once_stays_enabled_when_no_changes(monkeypatch):
     async def fake_run_update(driver, spec, magic_regex=None, log=None):
         return TaskRunResult(status="no_changes")
 
-    logs: list[tuple[str, str]] = []
-    real_make_logger = ts.hub.make_logger
-
-    def spy_make_logger(run_id="", task_id=None):
-        inner = real_make_logger(run_id, task_id)
-
-        def spy(level, msg, **kw):
-            logs.append((level, msg))
-            inner(level, msg, **kw)
-
-        return spy
-
     monkeypatch.setattr(ts, "run_update_task", fake_run_update)
-    monkeypatch.setattr(ts.hub, "make_logger", spy_make_logger)
+    logs = _spy_logs(monkeypatch)
     try:
         await ts.run_tasks(task_ids=[once_id, follow_id], trigger="manual")
         with session_scope() as s:
             assert s.get(Task, once_id).disabled is False
             assert s.get(Task, follow_id).disabled is False
-        # 「未完成」告警只对一次性任务说：判定为"非一次性任务"的运行不得刷这条
-        assert not [msg for level, msg in logs if level == "warn" and "未完成" in msg and "形态follow" in msg]
+        # 「未完成」告警只对一次性任务说：判定为"非一次性任务"的运行不得为该条刷 warn
+        mine = [(level, msg) for task_id, level, msg in logs if task_id == follow_id]
+        assert not [msg for level, msg in mine if level == "warn" and "未完成" in msg]
     finally:
         _drop(once_id, follow_id)
 
@@ -520,29 +515,19 @@ async def test_run_once_is_idempotent_on_second_manual_run(monkeypatch):
     async def fake_run_update(driver, spec, magic_regex=None, log=None):
         return _updated_result()
 
-    logs: list[tuple[str, str]] = []
-    real_make_logger = ts.hub.make_logger
-
-    def spy_make_logger(run_id="", task_id=None):
-        inner = real_make_logger(run_id, task_id)
-
-        def spy(level, msg, **kw):
-            logs.append((level, msg))
-            inner(level, msg, **kw)
-
-        return spy
-
     monkeypatch.setattr(ts, "run_update_task", fake_run_update)
-    monkeypatch.setattr(ts.hub, "make_logger", spy_make_logger)
+    logs = _spy_logs(monkeypatch)
     try:
         await ts.run_tasks(task_ids=[tid], trigger="manual")
-        first = [msg for _, msg in logs if "一次性任务已完成" in msg]
+        mine = [msg for task_id, _, msg in logs if task_id == tid]
+        first = [msg for msg in mine if "一次性任务已完成" in msg]
         assert len(first) == 1
         logs.clear()
 
         await ts.run_tasks(task_ids=[tid], trigger="manual")
-        assert [msg for _, msg in logs if "一次性任务已完成" in msg] == []
-        assert [msg for _, msg in logs if "未完成" in msg] == []
+        mine = [msg for task_id, _, msg in logs if task_id == tid]
+        assert [msg for msg in mine if "一次性任务已完成" in msg] == []
+        assert [msg for msg in mine if "未完成" in msg] == []
         with session_scope() as s:
             assert s.get(Task, tid).disabled is True
     finally:
@@ -700,9 +685,13 @@ async def test_bulk_run_skips_disabled_tasks(monkeypatch):
     try:
         summary = await ts.run_tasks(trigger="manual")  # 全局「立即运行」
         assert summary["disabled_skipped"] == 1
+        # 本模块的 autouse 夹具每个用例前后都清空 Task/Account/ExternalApiToken，
+        # 所以这里 total==2 只数到本用例自己建的 2 行，不是全表断言；
+        # 且 total 刻意包含停用行（驱动数看 driven），留着它钉住这个语义。
+        assert summary["total"] == 2
         assert ran == ["形态manual"]  # 停用那行一次都没进引擎
         dead_logs = [msg for task_id, _, msg in logs if task_id == dead]
-        assert any("已停用" in m and "批量运行跳过" in m for m in dead_logs), dead_logs
+        assert any("已停用" in m and "本次不驱动" in m for m in dead_logs), dead_logs
         assert not [m for m in dead_logs if "一次性任务" in m]
     finally:
         _drop(dead, live)
@@ -752,4 +741,190 @@ async def test_scheduled_sweep_of_disabled_task_reports_stopped_reason(monkeypat
         assert not [m for m in mine if "独立调度" in m]
     finally:
         _drop(tid)
+        _drop_account(acc_id)
+
+
+# ---------- 运行汇总契约：收口写库不许拖垮整批、停用跳过要说给用户、算术要闭合 ----------
+
+
+def _spy_push(monkeypatch) -> list[tuple[str, str]]:
+    """收全交给 _push 的 (标题, 正文)：通知文案是对用户的契约，断言正文而不是断言渠道实现。"""
+    pushed: list[tuple[str, str]] = []
+
+    async def spy_push(title, content, push_config, settings, log):
+        pushed.append((title, content))
+
+    monkeypatch.setattr(ts, "_push", spy_push)
+    return pushed
+
+
+@contextmanager
+def _scope_that_fails_on_disable_writes():
+    """只让「把行置为 disabled」这一次落库抛错——模拟 SQLite 没有 WAL/busy_timeout 时的写锁失败，
+    其余读写（load_tasks、last_run_at、停用复查）照旧，好把爆炸半径限制在一次性收口这一步。"""
+    with session_scope() as session:
+        real_add = session.add
+
+        def add(obj):
+            if isinstance(obj, Task) and getattr(obj, "disabled", False):
+                raise RuntimeError("database is locked")
+            return real_add(obj)
+
+        session.add = add
+        yield session
+
+
+@pytest.mark.asyncio
+async def test_settle_write_failure_does_not_kill_the_run_batch(monkeypatch):
+    """账本式写库（一次性收口停用）失败是旁路观测：本批余下任务照跑、已产出的通知文案照发。"""
+    acc_id = _seed_account()
+    once_id = _make_task("once", account_id=acc_id, auto_download=False)
+    follow_id = _make_task("follow", account_id=acc_id, auto_download=False)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+    ran: list[str] = []
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        ran.append(spec.taskname)
+        return _updated_result()
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    monkeypatch.setattr(ts, "session_scope", _scope_that_fails_on_disable_writes)
+    pushed = _spy_push(monkeypatch)
+    logs = _spy_logs(monkeypatch)
+    try:
+        await ts.run_tasks(task_ids=[once_id, follow_id], trigger="manual")
+        mine = [msg for task_id, _, msg in logs if task_id == once_id]
+        assert any("一次性收口失败（不影响运行）" in m for m in mine), mine
+        assert "形态follow" in ran  # (a) 收口炸了之后的那个任务照样进引擎
+        assert len(pushed) == 1  # (b) 已经产出的通知文案没被一起带崩
+        assert "《形态once》" in pushed[0][1] and "《形态follow》" in pushed[0][1]
+        with session_scope() as s:
+            assert s.get(Task, once_id).disabled is False  # 收口没写成，行仍保持待执行
+    finally:
+        _drop(once_id, follow_id)
+        _drop_account(acc_id)
+
+
+@pytest.mark.asyncio
+async def test_settle_once_gives_up_when_mode_switched_back_mid_run(monkeypatch):
+    """转存 + 大下载要跑几分钟：期间用户把这行改回定时追更，收口必须放弃停用，
+    否则它会变成「已停用 + 仍挂着定时作业」的矛盾态（apply_task_schedule 在改回时已重新注册）。"""
+    acc_id = _seed_account()
+    tid = _make_task("once", account_id=acc_id, auto_download=False)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        with session_scope() as s:  # 运行途中改回 follow
+            row = s.get(Task, tid)
+            row.run_mode = "follow"
+            s.add(row)
+        return _updated_result()
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    logs = _spy_logs(monkeypatch)
+    try:
+        await ts.run_tasks(task_ids=[tid], trigger="manual")
+        mine = [msg for task_id, _, msg in logs if task_id == tid]
+        assert not [m for m in mine if "已完成并自动停用" in m], mine
+        with session_scope() as s:
+            row = s.get(Task, tid)
+            assert row.disabled is False
+            assert row.run_mode == "follow"
+    finally:
+        _drop(tid)
+        _drop_account(acc_id)
+
+
+@pytest.mark.asyncio
+async def test_bulk_run_notification_states_disabled_skipped(monkeypatch):
+    """spec 4.4：通知要写明这次跳过了几个已停用任务，否则用户会以为漏跑。"""
+    acc_id = _seed_account()
+    dead = _make_task("follow", account_id=acc_id, disabled=True)
+    live = _make_task("follow", account_id=acc_id)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        return _updated_result()
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    pushed = _spy_push(monkeypatch)
+    try:
+        summary = await ts.run_tasks(trigger="manual")
+        assert summary["disabled_skipped"] == 1
+        assert len(pushed) == 1
+        assert "⏸️ 本次跳过 1 个已停用任务" in pushed[0][1]
+    finally:
+        _drop(dead, live)
+        _drop_account(acc_id)
+
+
+@pytest.mark.asyncio
+async def test_notification_omits_disabled_line_when_nothing_skipped(monkeypatch):
+    """一个停用行都没跳过时不许出现「跳过 0 个已停用任务」这种噪音。"""
+    acc_id = _seed_account()
+    live = _make_task("follow", account_id=acc_id)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        return _updated_result()
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    pushed = _spy_push(monkeypatch)
+    try:
+        summary = await ts.run_tasks(trigger="manual")
+        assert summary["disabled_skipped"] == 0
+        assert len(pushed) == 1
+        assert "已停用任务" not in pushed[0][1]
+    finally:
+        _drop(live)
+        _drop_account(acc_id)
+
+
+@pytest.mark.asyncio
+async def test_summary_driven_closes_the_arithmetic(monkeypatch):
+    """混合批：total == driven + skipped + disabled_skipped。
+    这是前端 RunSummary 的显示契约（「实际运行」不能再和「跳过」重复计数），必须被测试钉住。"""
+    acc_id = _seed_account()
+    driven_id = _make_task("follow", account_id=acc_id)  # 无独立调度 → 定时扫驱动
+    once_id = _make_task("once", account_id=acc_id)  # 按形态跳过
+    dead_id = _make_task("follow", account_id=acc_id, disabled=True)  # 按停用跳过
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+    ran: list[str] = []
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        ran.append(spec.taskname)
+        return TaskRunResult(status="no_changes")
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    try:
+        summary = await ts.run_tasks(trigger="scheduled")
+        assert summary["driven"] == 1
+        assert summary["skipped"] == 1
+        assert summary["disabled_skipped"] == 1
+        assert summary["total"] == summary["driven"] + summary["skipped"] + summary["disabled_skipped"]
+        assert len(ran) == 1  # 只有那一个未停用 follow 行进了引擎
+    finally:
+        _drop(driven_id, once_id, dead_id)
+        _drop_account(acc_id)
+
+
+@pytest.mark.asyncio
+async def test_empty_task_ids_list_is_treated_as_global_sweep(monkeypatch):
+    """task_ids=[] 与 None 同义（load_tasks 也按真值判断）：不能悄悄变成「连停用行一起跑」。"""
+    acc_id = _seed_account()
+    dead = _make_task("follow", account_id=acc_id, disabled=True)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+    ran: list[str] = []
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        ran.append(spec.taskname)
+        return TaskRunResult(status="no_changes")
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    try:
+        summary = await ts.run_tasks(task_ids=[], trigger="manual")
+        assert ran == []
+        assert summary["disabled_skipped"] == 1
+    finally:
+        _drop(dead)
         _drop_account(acc_id)

@@ -115,6 +115,11 @@ async def run_tasks(task_ids: list[int] | None = None, trigger: str = "manual") 
     except Exception as exc:
         log("error", f"运行中断：{exc!r}")
     summary["notify_lines"] = len(notify_lines)
+    # 汇总算术契约（前端 frontend/src/api/types.ts 的 RunSummary 与此互指，测试钉死）：
+    #   total = driven + skipped + disabled_skipped
+    # total 来自 load_tasks 的全量行数，**刻意包含停用行**；disabled_skipped 也刻意不并入 skipped，
+    # 因为通知要单独向用户交代这一类跳过。driven 不自己计数，只由三者恒等推出，避免第四个键漂移。
+    summary["driven"] = summary["total"] - summary["skipped"] - summary["disabled_skipped"]
     return summary
 
 
@@ -143,9 +148,11 @@ async def _run_tasks_inner(
         # 全局/批量「立即运行」跳过停用任务：停用=暂停一切。行内单个「运行」按钮例外
         # （task_ids 非空即用户明确指定了这一行），便于手工重试已完成的一次性任务。
         # 必须排在 has_valid_schedule 之前：停用行即便带着有效 schedule，原因也该是「停用」而不是「独立调度」。
-        if task.disabled and task_ids is None:
+        # 判空用 `not task_ids` 而不是 `task_ids is None`：load_tasks 也是按真值取行的，
+        # 传 [] 在它眼里就是「全部任务」，这里若按 is None 就会让 [] 变成「连停用行一起跑」，两处语义要一致。
+        if task.disabled and not task_ids:
             summary["disabled_skipped"] += 1
-            tlog("info", f"《{task.taskname}》已停用，批量运行跳过")
+            tlog("info", f"《{task.taskname}》已停用，本次不驱动")
             continue
         # 仅手动 / 一次性：任何自动触发（全局 crontab 与任务级作业）都不驱动，只能手动点。
         if trigger == "scheduled":
@@ -222,8 +229,14 @@ async def _run_tasks_inner(
             summary["failed"] += 1
             notify_lines.append(f"{icon}《{task.taskname}》：{result.message}")
             tlog("error", f"《{task.taskname}》{result.status}：{result.message}")
-        # 收口只此一处：非 once / 已停用的行由 _once_verdict 与 _settle_once 的守卫拦掉，不会多打日志
+        # 收口只此一处：非 once / 已停用的行由 _once_verdict 与 _settle_once 的守卫拦掉，不会多打日志；
+        # 它自己吞掉写库异常（见 _settle_once 文档），所以这里裸调用也不会中断本批剩余任务与通知。
         _settle_once(task, result, counts, tlog)
+
+    # spec 4.4：停用行是「按用户意愿没跑」，必须在通知里显式交代数量，否则用户会以为漏跑。
+    # 只在非零时出现，避免「跳过 0 个已停用任务」这种噪音。
+    if summary["disabled_skipped"]:
+        notify_lines.append(f"⏸️ 本次跳过 {summary['disabled_skipped']} 个已停用任务")
 
     if notify_lines:
         await _push("小盘自动转存运行结果", "\n".join(notify_lines), push_config, settings, log)
@@ -288,23 +301,36 @@ def _once_verdict(task, result, counts: DownloadCounts) -> tuple[bool, str]:
         if not counts.executed or counts.attempted == 0:
             return False, "下载未实际执行（驱动不支持或没有待下载文件）"
         if counts.failed:
-            return False, f"{counts.failed} 项下载失败"
+            # spec 4.3：失败提示要指向下载页，用户在那儿能逐条重下，而不是只会重跑整个任务
+            return False, f"{counts.failed} 项下载失败（可到下载页逐条重下）"
     return True, "已获取新增资源"
 
 
 def _settle_once(task, result, counts: DownloadCounts, tlog) -> None:
-    """判定通过才停用；已停用则不再动作（幂等）。"""
+    """判定通过才停用；已停用则不再动作（幂等）。
+
+    这是旁路记账：落库失败（SQLite 没开 WAL/busy_timeout，见 database.py 建引擎处）只记一条 warn，
+    绝不能把异常抛回运行循环——否则本批余下任务不跑，已生成的 notify_lines 也一起丢掉，
+    而前端只会看到一个干净的 done。口径对齐 download_service 的下载账本（「账本是旁路观测，绝不中断下载」）。
+    """
     done, reason = _once_verdict(task, result, counts)
     if not done:
         if run_mode_of(task) == "once" and not task.disabled:
             tlog("warn", f"《{task.taskname}》一次性任务未完成：{reason}，保持待执行")
         return
-    with session_scope() as session:
-        row = session.get(Task, task.id)
-        if row is None or row.disabled:
-            return  # 任务运行中被删除／已被别处停用：不动作，避免写出半行
-        row.disabled = True
-        session.add(row)
+    try:
+        with session_scope() as session:
+            row = session.get(Task, task.id)
+            # 写库前复查这一行现在的真实形态，不采信运行开始时的快照：
+            # 转存 + 大下载要花几分钟，期间用户把它改回「定时追更」的话，
+            # apply_task_schedule 已经给它挂回作业，这里再停用就会留下「已停用 + 有定时作业」的矛盾态。
+            if row is None or row.disabled or run_mode_of(row) != "once":
+                return  # 运行中被删除／已被别处停用／已改回 follow：不动作，避免写出半行
+            row.disabled = True
+            session.add(row)
+    except Exception as exc:  # noqa: BLE001 收口是旁路记账，失败不影响本批运行
+        tlog("warn", f"《{task.taskname}》一次性收口失败（不影响运行）：{exc}")
+        return
     tlog("info", f"《{task.taskname}》一次性任务已完成并自动停用（{reason}）")
 
 
