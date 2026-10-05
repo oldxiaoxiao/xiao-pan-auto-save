@@ -68,6 +68,21 @@ class DownloadItem:
 
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
+# 同路径在途下载守卫：内置下载器正在落盘的 dest_path（解析后）集合。
+# 查库的 has_open_for_path 拦不住"取直链窗口"里的第二次点击——账本行要等取到直链才写入，
+# 这层在进程内于登记 registry/写账本之前直接按路径拦截，检查+登记之间无 await，
+# asyncio 单线程语义天然原子，无需加锁。仅覆盖单 uvicorn worker（本项目默认单进程），跨进程并发不在范围内。
+_inflight_paths: set[str] = set()
+
+
+def _inflight_key(path: str | Path) -> str:
+    return str(Path(path).resolve())
+
+
+def is_downloading(path: str) -> bool:
+    """该目标路径是否已有内置下载在途（重下路由用，不暴露集合本身）。"""
+    return _inflight_key(path) in _inflight_paths
+
 
 def safe_name(name: str) -> str:
     cleaned = _UNSAFE.sub("_", (name or "").strip()).lstrip(".")
@@ -227,22 +242,31 @@ async def _builtin_download(
         row = by_fid.get(item.fid)
         if not row:
             return f"❌ 取直链失败: {item.name}"
-        size = int(row.get("size") or item.size or 0)
-        job_id = registry.create(
-            task_id=task_id, taskname=taskname, filename=item.name,
-            dest_path=str(item.local_path), total=size,
-        )
-        _history_start(log, source="builtin", ref_id=job_id, item=item, size=size, task_id=task_id,
-                       taskname=taskname, account_id=account_id, driver_key=driver_key)
-        async with sem:
-            try:
-                ok, msg = await _fetch_one(row, item, cookie_str, ua, job_id=job_id)
-            except Exception as exc:  # noqa: BLE001
-                registry.update(job_id, status="failed", error=str(exc))
-                ok, msg = False, f"{item.name}: {exc}"
-        _history_finish(log, source="builtin", ref_id=job_id, ok=ok, fallback_name=msg)
-        log("info" if ok else "warn", f"📥 {msg}")
-        return f"{'✅' if ok else '❌'} {msg}"
+        # 在途守卫必须在 registry.create / 账本 start 之前：被拒的尝试根本没有开始下载，
+        # 不该留下一条永远等不到终态的账本行。检查与登记之间没有 await，单线程下原子。
+        key = _inflight_key(item.local_path)
+        if key in _inflight_paths:
+            return f"❌ {item.name}: 同一文件已有下载在途"
+        _inflight_paths.add(key)
+        try:
+            size = int(row.get("size") or item.size or 0)
+            job_id = registry.create(
+                task_id=task_id, taskname=taskname, filename=item.name,
+                dest_path=str(item.local_path), total=size,
+            )
+            _history_start(log, source="builtin", ref_id=job_id, item=item, size=size, task_id=task_id,
+                           taskname=taskname, account_id=account_id, driver_key=driver_key)
+            async with sem:
+                try:
+                    ok, msg = await _fetch_one(row, item, cookie_str, ua, job_id=job_id)
+                except Exception as exc:  # noqa: BLE001
+                    registry.update(job_id, status="failed", error=str(exc))
+                    ok, msg = False, f"{item.name}: {exc}"
+            _history_finish(log, source="builtin", ref_id=job_id, ok=ok, fallback_name=msg)
+            log("info" if ok else "warn", f"📥 {msg}")
+            return f"{'✅' if ok else '❌'} {msg}"
+        finally:
+            _inflight_paths.discard(key)
 
     return list(await asyncio.gather(*(one(i) for i in items)))
 

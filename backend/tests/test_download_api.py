@@ -221,6 +221,34 @@ def test_retry_rejected_when_record_itself_not_terminal(tmp_path, monkeypatch):
         hist.delete_record(rid)
 
 
+def test_retry_rejected_when_path_inflight_in_process(tmp_path, monkeypatch):
+    """DB 无开放行、但进程内守卫已登记同路径（第一次重下还卡在取直链窗口）→ 同样 409。
+
+    has_open_for_path 查库，账本行要等 one() 取到直链才写入；这个窗口里的第二次点击
+    只能由 download_service.is_downloading 兜住，且必须走同一个 409 契约让 UI 拿到原因。
+    """
+    from backend.services import download_history as hist
+
+    dest = str(tmp_path / "window.mkv")
+    rid = _seed_retry_row(hist, "api-inflight", 933, dest, terminal=True)
+    monkeypatch.setattr(hist, "has_open_for_path", lambda p: False)  # 钉死这是进程内守卫的功劳
+    monkeypatch.setattr(dl, "is_downloading", lambda p: p == dest)
+    started: list[str] = []
+
+    async def spy_retry(rec, cfg, *, log):
+        started.append(rec["ref_id"])
+
+    monkeypatch.setattr(dl, "retry_record", spy_retry)
+    try:
+        with TestClient(app) as c:
+            resp = c.post(f"/api/downloads/history/{rid}/retry")
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "该文件已有进行中的下载，请等待完成后再重下"
+        assert started == []
+    finally:
+        hist.delete_record(rid)
+
+
 def test_retry_allowed_for_terminal_row_without_open_sibling(tmp_path, monkeypatch):
     """终态记录 + 同路径无在途行 → 重下照旧放行（守护不能把好路堵死）。"""
     from backend.services import download_history as hist

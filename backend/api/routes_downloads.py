@@ -66,14 +66,17 @@ async def history_retry(record_id: int) -> dict:
     from ..api.deps import get_setting
     from ..core.logstream import hub
     from ..services import download_history
-    from ..services.download_service import DownloadSettings, retry_record
+    from ..services.download_service import DownloadSettings, is_downloading, retry_record
 
     rec = download_history.get_record(record_id)
     if rec is None:
         raise HTTPException(404, "记录不存在")
-    # 同 dest_path 已有未收口的账本行（含本条自身仍是非终态）→ 拒绝：连点两次「重下」
-    # 会让两个内置写者并发写同一个 <name>.part，交错字节、双重改名，把文件写坏。
-    if download_history.has_open_for_path(rec["dest_path"]):
+    # 同路径在途拦截，两层缺一不可：
+    # 1) 账本已有未收口的行（含本条自身仍是非终态）→ 409；
+    # 2) DB 行要等后台任务取到直链才写入，这个"取直链窗口"里的连点第二次由进程内
+    #    在途守卫兜住，同样报 409，让 UI 拿到原因而不是静默跳过后端任务。
+    # 两个写者并发写同一个 <name>.part 会交错字节、双重改名，把文件写坏。
+    if download_history.has_open_for_path(rec["dest_path"]) or is_downloading(rec["dest_path"]):
         raise HTTPException(409, "该文件已有进行中的下载，请等待完成后再重下")
     cfg = DownloadSettings.from_dict(get_setting("download"))
     log = hub.make_logger("retry", task_id=rec.get("task_id"))
