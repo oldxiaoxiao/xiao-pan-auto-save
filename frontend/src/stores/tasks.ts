@@ -64,7 +64,9 @@ export const useTasksStore = defineStore("tasks", () => {
     markDirty(id, false);
   }
 
-  /** 显式置顶/置底：后端回新 sort_order，就地更新即可让 sorted 重排；不动脏标记。 */
+  /** 显式置顶/置底：后端回新 sort_order，就地更新让 sorted 重排。
+   *  这里换的是整行对象引用，而 TaskForm 对 props.task 是 deep watch，会拿服务端值重建草稿——
+   *  所以「正在编辑且未保存」那一行必须由 TasksView.onPosition 先拦住（连请求一起跳过），别在这儿 patch。 */
   async function setPosition(id: number, where: "top" | "bottom") {
     const current = tasks.value.find((t) => t.id === id);
     if (!current) return;

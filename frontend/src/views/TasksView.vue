@@ -108,6 +108,14 @@ async function importClipboard() {
 
 // —— 显式置顶 / 置底（不受搜索、筛选禁用拖拽的影响）——
 async function onPosition(task: Task, where: "top" | "bottom") {
+  // 正在编辑且该行有未保存输入：整个动作跳过（既不请求后端也不改 store），否则 setPosition 里的
+  // replaceTask 会换掉行对象，TaskForm 对 props.task 是 deep watch → loadFrom 用服务端值重建草稿，
+  // 用户刚打的字丢失。跟 dragwrap 上「编辑中的行不给拖拽」同一思路，只是这里必须连请求一起跳过：
+  // 只跳过本地 patch 的话，随后保存会把旧 sort_order PUT 回去，置顶反而静默失效。
+  if (editingId.value === task.id && dirty.value.has(task.id)) {
+    ElMessage.warning("该行正在编辑且有未保存的修改，请先保存再调整排序");
+    return;
+  }
   try {
     await tasks.setPosition(task.id, where);
     ElMessage.success(where === "top" ? "已置顶" : "已置底");
