@@ -29,7 +29,7 @@ export const useTasksStore = defineStore("tasks", () => {
     error.value = "";
     try {
       const list = await api.listTasks();
-      tasks.value = list.map((t, i) => ({ ...t, sort_order: t.sort_order ?? i }));
+      tasks.value = list;
       dirty.value = new Set();
     } catch (e) {
       error.value = (e as Error).message;
@@ -64,6 +64,14 @@ export const useTasksStore = defineStore("tasks", () => {
     markDirty(id, false);
   }
 
+  /** 显式置顶/置底：后端回新 sort_order，就地更新即可让 sorted 重排；不动脏标记。 */
+  async function setPosition(id: number, where: "top" | "bottom") {
+    const current = tasks.value.find((t) => t.id === id);
+    if (!current) return;
+    const res = await api.setTaskPosition(id, where);
+    replaceTask({ ...current, sort_order: res.sort_order });
+  }
+
   /** 按给定 id 顺序批量更新 sort_order（仅提交变化项）。 */
   async function reorder(orderedIds: number[]) {
     const byId = new Map(tasks.value.map((t) => [t.id, t]));
@@ -95,6 +103,7 @@ export const useTasksStore = defineStore("tasks", () => {
     createTask,
     updateTask,
     deleteTask,
+    setPosition,
     reorder,
   };
 });

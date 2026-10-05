@@ -7,7 +7,7 @@ import json
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
-from sqlmodel import select
+from sqlmodel import Session, func, select
 from starlette.responses import StreamingResponse
 
 from ..core.logstream import hub
@@ -26,6 +26,18 @@ def _to_out(task: Task) -> TaskOut:
     return TaskOut(**data)
 
 
+def _above_sort_order(session: Session) -> int:
+    """排到最前：当前最小 sort_order 再前一格；空表为 0（不与任何行同值）。"""
+    current = session.exec(select(func.min(Task.sort_order))).one()
+    return 0 if current is None else int(current) - 1
+
+
+def _below_sort_order(session: Session) -> int:
+    """排到最后：当前最大 sort_order 再后一格。"""
+    current = session.exec(select(func.max(Task.sort_order))).one()
+    return 0 if current is None else int(current) + 1
+
+
 @router.get("", response_model=list[TaskOut])
 async def list_tasks() -> list[TaskOut]:
     with session_scope() as session:
@@ -36,7 +48,11 @@ async def list_tasks() -> list[TaskOut]:
 @router.post("", response_model=TaskOut)
 async def create_task(body: TaskIn) -> TaskOut:
     with session_scope() as session:
-        task = Task(**body.model_dump(exclude={"runweek"}), runweek=json.dumps(body.runweek))
+        data = body.model_dump(exclude={"runweek"})
+        # 新建置顶：请求里的 sort_order 不作数（表单恒发 0，会与当前首行相撞），
+        # 一律排在现列表最前，位置不再依赖拖拽历史。
+        data["sort_order"] = _above_sort_order(session)
+        task = Task(**data, runweek=json.dumps(body.runweek))
         session.add(task)
         session.commit()
         session.refresh(task)
@@ -64,6 +80,26 @@ async def update_task(task_id: int, body: TaskIn) -> TaskOut:
 
     apply_task_schedule(task)
     return out
+
+
+@router.post("/{task_id}/position")
+async def move_task_position(task_id: int, where: str = "top") -> dict:
+    """显式置顶/置底：只改 sort_order。
+
+    不调 apply_task_schedule——它只在 disabled/schedule/enddate 变化时才需要重排作业，
+    而这里三样都没动；重复注册反而会把 interval 作业的下次触发时间重置。
+    """
+    if where not in ("top", "bottom"):
+        raise HTTPException(400, "where 只能是 top 或 bottom")
+    with session_scope() as session:
+        task = session.get(Task, task_id)
+        if not task:
+            raise HTTPException(404, "任务不存在")
+        task.sort_order = _above_sort_order(session) if where == "top" else _below_sort_order(session)
+        session.add(task)
+        session.commit()
+        session.refresh(task)
+        return {"ok": True, "sort_order": task.sort_order}
 
 
 @router.delete("/{task_id}")

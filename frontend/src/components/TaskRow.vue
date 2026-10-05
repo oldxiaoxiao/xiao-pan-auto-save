@@ -4,7 +4,15 @@ import type { Task } from "../api/types";
 import { relativeTime, weekText } from "../utils";
 
 const props = defineProps<{ task: Task; index: number; dirty: boolean; expanded: boolean }>();
-const emit = defineEmits<{ (e: "toggle"): void; (e: "run", id: number): void }>();
+const emit = defineEmits<{
+  (e: "toggle"): void;
+  (e: "run", id: number): void;
+  (e: "position", where: "top" | "bottom"): void;
+}>();
+
+function onPosition(where: "top" | "bottom") {
+  emit("position", where);
+}
 
 const chips = computed(() => {
   const t = props.task;
@@ -48,6 +56,15 @@ const lastRun = computed(() => relativeTime(props.task.last_run_at));
     </div>
     <div class="ops" @click.stop>
       <el-button size="small" text @click="emit('run', task.id)"> ▶ 运行 </el-button>
+      <el-dropdown trigger="click" @command="onPosition">
+        <el-button size="small" text title="排序"> ⋮ </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="top">置顶</el-dropdown-item>
+            <el-dropdown-item command="bottom">置底</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
       <span class="caret">{{ expanded ? "▲" : "▼" }}</span>
     </div>
   </div>
@@ -113,5 +130,8 @@ const lastRun = computed(() => relativeTime(props.task.last_run_at));
 .caret {
   color: var(--text-muted);
   font-size: 12px;
+}
+.more-btn {
+  color: var(--text-muted);
 }
 </style>

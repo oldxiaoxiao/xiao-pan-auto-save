@@ -106,6 +106,16 @@ async function importClipboard() {
   }
 }
 
+// —— 显式置顶 / 置底（不受搜索、筛选禁用拖拽的影响）——
+async function onPosition(task: Task, where: "top" | "bottom") {
+  try {
+    await tasks.setPosition(task.id, where);
+    ElMessage.success(where === "top" ? "已置顶" : "已置底");
+  } catch (e) {
+    ElMessage.error((e as Error).message);
+  }
+}
+
 // —— 拖拽排序 ——
 const dragId = ref<number | null>(null);
 function onDragStart(id: number) {
@@ -189,6 +199,7 @@ onMounted(() => {
           :expanded="editingId === t.id"
           @toggle="toggleExpand(t.id)"
           @run="openRun(t)"
+          @position="onPosition(t, $event)"
         />
         <TaskForm
           v-if="editingId === t.id"

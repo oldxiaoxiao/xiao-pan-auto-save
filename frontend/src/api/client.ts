@@ -101,6 +101,8 @@ export const api = {
   updateTask: (id: number, body: TaskPayload) =>
     request<Task>(`/api/tasks/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteTask: (id: number) => request<{ ok: boolean }>(`/api/tasks/${id}`, { method: "DELETE" }),
+  setTaskPosition: (id: number, where: "top" | "bottom") =>
+    request<{ ok: boolean; sort_order: number }>(`/api/tasks/${id}/position?where=${where}`, { method: "POST" }),
   runAllTasks: (onEntry: (e: LogEntry) => void, signal?: AbortSignal) =>
     readSseStream("/api/tasks/run", undefined, onEntry, signal),
   runTask: (id: number, onEntry: (e: LogEntry) => void, signal?: AbortSignal) =>
