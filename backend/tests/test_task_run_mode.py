@@ -928,3 +928,71 @@ async def test_empty_task_ids_list_is_treated_as_global_sweep(monkeypatch):
     finally:
         _drop(dead)
         _drop_account(acc_id)
+
+
+# ---------- 转存运行时间落库失败：不许拖垮整批（0ed6400 同类问题的 last_run_at 版） ----------
+
+
+def _scope_that_fails_first_last_run_write():
+    """只让第一次写 last_run_at 的落库抛错——模拟 SQLite 没有 WAL/busy_timeout 时的写锁失败。
+    其余读写（load_tasks、_pick_account、第二个任务的落库）照旧，把爆炸半径限制在这一步。"""
+
+    def make_scope():
+        state = {"fired": False}
+
+        @contextmanager
+        def scope():
+            with session_scope() as session:
+                real_add = session.add
+
+                def add(obj):
+                    if (
+                        not state["fired"]
+                        and isinstance(obj, Task)
+                        and getattr(obj, "last_run_at", None) is not None
+                    ):
+                        state["fired"] = True
+                        raise RuntimeError("database is locked")
+                    return real_add(obj)
+
+                session.add = add
+                yield session
+
+        return scope()
+
+    return make_scope
+
+
+@pytest.mark.asyncio
+async def test_last_run_write_failure_does_not_kill_the_run_batch(monkeypatch):
+    """last_run_at 落库失败只许 warn：转存已成功的结果、本批余下任务、聚合通知都不许被带崩。"""
+    acc_id = _seed_account()
+    first_id = _make_task("follow", account_id=acc_id, auto_download=False)
+    second_id = _make_task("manual", account_id=acc_id, auto_download=False)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+    ran: list[str] = []
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        ran.append(spec.taskname)
+        return _updated_result()
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    monkeypatch.setattr(ts, "session_scope", _scope_that_fails_first_last_run_write())
+    pushed = _spy_push(monkeypatch)
+    logs = _spy_logs(monkeypatch)
+    try:
+        await ts.run_tasks(task_ids=[first_id, second_id], trigger="manual")
+        # (a) 第一个任务落库炸了，第二个任务照样进引擎
+        assert ran == ["形态follow", "形态manual"]
+        # (b) 已产出的通知文案没被一起带崩：两个任务的成功转存都要推出去
+        assert len(pushed) == 1
+        assert "《形态follow》" in pushed[0][1] and "《形态manual》" in pushed[0][1]
+        # (c) 失败本身要在第一个任务的日志里以 warn 说明
+        mine = [(level, msg) for task_id, level, msg in logs if task_id == first_id]
+        assert any(
+            level == "warn" and "运行时间落库失败（不影响本次结果）" in msg and "database is locked" in msg
+            for level, msg in mine
+        ), mine
+    finally:
+        _drop(first_id, second_id)
+        _drop_account(acc_id)

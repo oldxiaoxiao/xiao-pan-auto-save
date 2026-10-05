@@ -202,13 +202,19 @@ async def _run_tasks_inner(
         # 转存段（engine save + DB 落库）加全局锁串行化：跨并发 run_tasks 不重叠，避免同账号并发转存与 SQLite 写冲突
         async with _run_lock:
             result = await run_update_task(driver, _task_spec(task), magic_regex=magic_regex, log=tlog)
-            with session_scope() as session:
-                row = session.get(Task, task.id)
-                if row:
-                    row.last_run_at = datetime.now()
-                    if result.status == "banned":
-                        row.shareurl_ban = result.message
-                    session.add(row)
+            # 运行时间落库是转存的附带记账：SQLite 无 WAL/busy_timeout（database.py），并发写会抛锁冲突。
+            # 口径对齐 _settle_once（0ed6400）：失败只记 warn，绝不抛回循环拖垮整批、丢掉 notify_lines；
+            # 但转存结果 result 已在上面拿到，本段失败不掩盖已成功的转存。锁的串行段不能动（项目硬约束）。
+            try:
+                with session_scope() as session:
+                    row = session.get(Task, task.id)
+                    if row:
+                        row.last_run_at = datetime.now()
+                        if result.status == "banned":
+                            row.shareurl_ban = result.message
+                        session.add(row)
+            except Exception as exc:  # noqa: BLE001 落库失败不影响本次转存结果与本批剩余任务
+                tlog("warn", f"《{task.taskname}》运行时间落库失败（不影响本次结果）：{exc}")
 
         icon = STATUS_ICONS.get(result.status)
         # 一次性判定要覆盖所有状态（含 no_changes / 转存失败），故计数先给默认值，
