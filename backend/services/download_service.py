@@ -47,7 +47,11 @@ class DownloadSettings:
         emby = raw.get("emby") or {}
         return cls(
             mode=str(raw.get("mode") or "builtin"),
-            dir=str(raw.get("dir") or DEFAULT_DOWNLOAD_DIR),
+            # 下载根目录出口即归一化为绝对**字面**路径：相对 dir（如 data/downloads）会原样
+            # 进账本 dest_path，file_state 校验与重下全凭服务端 CWD 碰运气（2026-10-05 活体发现）。
+            # 必须用 abspath 而非 Path.resolve()：resolve 展开软链会改写容器共享挂载路径
+            # （/tmp → /private/tmp），真机 aria2 直接 errorCode 18（见 b1d156b）。
+            dir=os.path.abspath(str(raw.get("dir") or DEFAULT_DOWNLOAD_DIR)),
             concurrency=max(1, int(raw.get("concurrency") or 2)),
             history_retention=str(raw.get("history_retention") or "days_90"),
             aria2_host_port=str(aria2.get("host_port") or ""),

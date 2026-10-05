@@ -487,6 +487,77 @@ async def test_aria2_submit_sends_absolute_dir(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_relative_dir_normalized_absolutely_in_ledger(tmp_path, monkeypatch):
+    """回归（活体发现）：配置 dir 为相对路径时，from_dict 必须归一化为绝对路径，
+    账本 dest_path 才不依赖服务端 CWD（file_state/重下都按字面路径解析）。
+    活体那行 dest_path=data/downloads/…/S01E194.mkv 换个 CWD 就校验不到文件。"""
+    import os
+
+    from sqlmodel import select
+
+    from backend.database import session_scope
+    from backend.models import DownloadRecord
+
+    async def fake_fetch(row, item, cookie_str, ua, *, job_id=None):
+        return True, f"{item.name} ok"
+
+    monkeypatch.setattr(dl, "_fetch_one", fake_fetch)
+    monkeypatch.setattr(dl, "_emby_refresh", lambda c, log: _noop())
+    monkeypatch.chdir(tmp_path)  # 相对 dir 按进程 CWD 解析——正是缺陷的成因
+    c = DownloadSettings.from_dict({"dir": "data/downloads-cwdtest"})
+    assert os.path.isabs(c.dir)  # from_dict 出口即绝对
+    await dl.download_task_files(DlDriver(), [saved("1")], c, task_id=951)
+    with session_scope() as s:
+        rows = list(s.exec(select(DownloadRecord).where(DownloadRecord.task_id == 951)).all())
+    try:
+        assert len(rows) == 1
+        assert os.path.isabs(rows[0].dest_path), rows[0].dest_path
+        assert rows[0].dest_path.replace("\\", "/").endswith("data/downloads-cwdtest/动漫/剧/01.mp4")
+    finally:
+        with session_scope() as s:
+            for r in rows:
+                s.delete(r)
+
+
+@pytest.mark.asyncio
+async def test_symlinked_download_root_keeps_literal_path_in_ledger(tmp_path, monkeypatch):
+    """回归（b1d156b 同款约束）：归一化必须用 abspath 而非 resolve——
+    软链挂载根（如 macOS /tmp→/private/tmp）的字面路径要原样进账本，
+    否则 aria2 容器按字面挂载点找不到目录（真机 errorCode 18）。"""
+    import os
+    from pathlib import Path as _P
+
+    from sqlmodel import select
+
+    from backend.database import session_scope
+    from backend.models import DownloadRecord
+
+    real = tmp_path / "real_mount_c"
+    real.mkdir()
+    link = tmp_path / "mnt_c"
+    os.symlink(real, link)
+
+    async def fake_fetch(row, item, cookie_str, ua, *, job_id=None):
+        return True, f"{item.name} ok"
+
+    monkeypatch.setattr(dl, "_fetch_one", fake_fetch)
+    monkeypatch.setattr(dl, "_emby_refresh", lambda c, log: _noop())
+    c = DownloadSettings.from_dict({"dir": str(link / "down")})
+    assert c.dir == str(link / "down")  # 已是绝对：字面量原样保留，未被 realpath 改写
+    await dl.download_task_files(DlDriver(), [saved("1")], c, task_id=952)
+    with session_scope() as s:
+        rows = list(s.exec(select(DownloadRecord).where(DownloadRecord.task_id == 952)).all())
+    try:
+        assert len(rows) == 1
+        assert rows[0].dest_path.startswith(str(_P(link, "down", "动漫", "剧"))), rows[0].dest_path
+        assert str(real) not in rows[0].dest_path  # 绝不展开成软链目标
+    finally:
+        with session_scope() as s:
+            for r in rows:
+                s.delete(r)
+
+
+@pytest.mark.asyncio
 async def test_aria2_submit_dir_keeps_symlink_prefix(tmp_path, monkeypatch):
     """回归（aria2 真机活体发现）：投递的 dir 必须保留用户配置路径的字面量，含符号链接层。
 
