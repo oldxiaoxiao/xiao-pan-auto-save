@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from datetime import datetime
 
-from sqlmodel import select
+from sqlmodel import Session, func, select
 
 from ..config import PROXY
 from ..core.engine import TaskSpec, run_update_task
@@ -36,6 +36,25 @@ def load_tasks(task_ids: list[int] | None = None) -> list[Task]:
         if task_ids:
             stmt = stmt.where(Task.id.in_(task_ids))
         return list(session.exec(stmt).all())
+
+
+# —— 列表排序：sort_order 的取值规则集中在这儿，Web 与对外接口共用同一份 ——
+
+
+def above_sort_order(session: Session) -> int:
+    """排到最前：当前最小 sort_order 再前一格；空表为 0（不与任何行同值）。
+
+    两条建任务路径都要走它：POST /api/tasks（网页表单）和 /api/add_task（油猴脚本）。
+    后者漏掉时行会落回模型默认 0，被 (sort_order, id) 的 id 兜底排到列表中间，「最新在前」就破了。
+    """
+    current = session.exec(select(func.min(Task.sort_order))).one()
+    return 0 if current is None else int(current) - 1
+
+
+def below_sort_order(session: Session) -> int:
+    """排到最后：当前最大 sort_order 再后一格。"""
+    current = session.exec(select(func.max(Task.sort_order))).one()
+    return 0 if current is None else int(current) + 1
 
 
 def _task_spec(task: Task) -> TaskSpec:

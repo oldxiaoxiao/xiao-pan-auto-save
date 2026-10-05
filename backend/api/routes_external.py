@@ -14,6 +14,7 @@ from sqlmodel import select
 
 from ..database import session_scope
 from ..models import ExternalApiToken, Task
+from ..services.task_service import above_sort_order
 
 router = APIRouter(tags=["external"])
 
@@ -104,6 +105,8 @@ async def add_task(request: Request) -> dict:
             update_subdir_resave=bool(data.get("update_subdir_resave_mode")),
             enddate=data.get("enddate", ""),
             runweek=str(data.get("runweek", "[]")),
+            # 与网页新建同一条规则：排到列表最前（不给的话会落回模型默认 0，被 id 兜底排到中间）
+            sort_order=above_sort_order(session),
         )
         session.add(task)
         session.commit()
