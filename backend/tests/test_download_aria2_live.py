@@ -111,7 +111,9 @@ def wait_result(gid: str, want: str = "complete") -> dict:
 # ---------------------------------------------------------------- stub 服务（真实直链源 + Emby 假身）
 
 class _HubHandler(SimpleHTTPRequestHandler):
-    """GET 按真实字节响应（aria2 抓它 = 真下载）；POST 一律 204 只记账（Emby 假身）。"""
+    """GET 按真实字节响应（aria2 抓它 = 真下载）；POST 一律 204 只记账（Emby 假身）。
+
+    路径里含 e2e-stall 的 GET 只挂住不响应，用来把作业停在 active 上。"""
 
     records: list[dict] = []
     root: str = str(SCRATCH)
@@ -131,6 +133,10 @@ class _HubHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         self._record()
+        if "e2e-stall" in self.path:
+            # 收下连接但不响应：让 aria2 停在 active，供 removed 用例把它 aria2.remove 掉
+            time.sleep(15)
+            return
         super().do_GET()
 
     def do_POST(self):
@@ -541,3 +547,44 @@ async def test_06_reconcile_marks_failed_from_real_aria2_error(hub, e2e, rpc_spy
     else:  # 理由为空也必须能从行里看出是哪个 aria2 错误码
         assert str(struct.get("errorCode")) in after["error"]
     ev("对账写回的失败理由", after["error"])
+
+
+async def test_07_reconcile_marks_failed_when_gid_removed(hub, e2e, rpc_spy):
+    """第 7 项：在途作业被 aria2.remove 掉（真机 status=removed、errorMessage 为空）也要当场收口成 failed。
+
+    真机这类作业不给文字理由、只给 errorCode（实测 errorCode=31 / errorMessage=""），
+    所以 error 里必须带上那个码，否则这行只剩"aria2 未成功"，事后无从诊断。
+    """
+    c = live_cfg("t7")
+    e2e["dirs"].append(c.dir)
+    src = {"name": "e2e-stall.bin", "size": 4096, "md5": ""}  # stub 只挂住不响应：作业停在 active
+    driver = LiveDlDriver(files={"FID-T7": src}, base=hub.docker_base)
+    item = dl.DownloadItem(fid="FID-T7", name="第7集.mkv", size=src["size"],
+                           local_path=Path(c.dir) / "在途" / "第7集.mkv")
+    lines = await dl.download_items(driver, [item], c, log=lambda *a: None, task_id=9607,
+                                    taskname="E2E移除收口", account_id=7, driver_key="fake")
+    assert lines[0].startswith("✅")
+    gid = snapshot(9607)[0]["ref_id"]
+    e2e["gids"].append(gid)
+    e2e["refs"].append((gid, "aria2"))
+
+    wait_until(lambda: (rpc("aria2.tellStatus", gid, ["status"]).get("result") or {}).get("status") == "active" or None,
+               why=f"gid {gid} 进入 active", timeout=30)
+    assert rpc("aria2.remove", gid).get("result") == gid
+
+    def removed_once():
+        st = rpc("aria2.tellStatus", gid, TELL_KEYS).get("result") or {}
+        return st if st.get("status") == "removed" else None
+
+    removed = wait_until(removed_once, why=f"gid {gid} 变成 removed")
+    ev("真机 remove 之后 tellStatus", removed)
+
+    assert ref_row(gid)["status"] == "queued"
+    await hist.reconcile(c)
+    after = ref_row(gid)
+    ev("移除收口后账本行", after)
+    assert [p for m, p, _ in rpc_spy if m == "aria2.tellStatus"] == [(gid, TELL_KEYS)]
+    assert after["status"] == "failed" and after["finished_at"] is not None
+    assert "对账超时" not in after["error"]
+    code = str(removed.get("errorCode") or "")
+    assert code and code in after["error"]  # 文字理由为空时至少把 errorCode 写进账本，这行才可诊断
