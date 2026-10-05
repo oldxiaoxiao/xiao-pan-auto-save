@@ -68,7 +68,7 @@ class DownloadItem:
 
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
-# 同路径在途下载守卫：内置下载器正在落盘的 dest_path（解析后）集合。
+# 同路径在途下载守卫：内置下载器正在落盘 / aria2 正在投递的 dest_path（解析后）集合。
 # 查库的 has_open_for_path 拦不住"取直链窗口"里的第二次点击——账本行要等取到直链才写入，
 # 这层在进程内于登记 registry/写账本之前直接按路径拦截，检查+登记之间无 await，
 # asyncio 单线程语义天然原子，无需加锁。仅覆盖单 uvicorn worker（本项目默认单进程），跨进程并发不在范围内。
@@ -80,7 +80,7 @@ def _inflight_key(path: str | Path) -> str:
 
 
 def is_downloading(path: str) -> bool:
-    """该目标路径是否已有内置下载在途（重下路由用，不暴露集合本身）。"""
+    """该目标路径是否已有下载在途（内置落盘中或 aria2 投递窗口内；重下路由用，不暴露集合本身）。"""
     return _inflight_key(path) in _inflight_paths
 
 
@@ -400,40 +400,53 @@ async def _aria2_submit(
             if not row:
                 lines.append(f"❌ 取直链失败: {item.name}")
                 continue
-            # aria2 不会自建缺失目录，投递前先建好目标目录（与内置下载器一致）。
-            # dir 必须用绝对路径：aria2 常在容器内运行，相对路径会按容器 CWD 解析，
-            # 导致文件落进容器而非宿主机挂载目录（内置下载器跑在宿主机不受影响）。
-            # 用 abspath 而非 resolve：resolve 会展开符号链接——macOS 宿主的 /tmp 实为
-            # /private/tmp 的软链，容器里只挂载字面 /tmp/... 路径，改写后真机直接
-            # errorCode 18 失败（2026-10-05 活体验证发现）；abspath 只补绝对、保留字面挂载路径。
-            dest_dir = Path(os.path.abspath(item.local_path.parent))
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            params: list = [
-                [row["download_url"]],
-                {
-                    "header": [f"Cookie: {cookie_str}", f"User-Agent: {ua}"],
-                    "out": item.local_path.name,
-                    "dir": str(dest_dir),
-                    "pause": str(cfg.aria2_pause).lower(),
-                },
-            ]
-            if cfg.aria2_secret:
-                params.insert(0, f"token:{cfg.aria2_secret}")
-            payload = {"jsonrpc": "2.0", "id": "xiao-pan", "method": "aria2.addUri", "params": params}
+            # 在途守卫与内置下载器同款：连点两次「重下」若都落在"取直链→addUri"窗口里，
+            # daemon 会收下两份整片（aria2 撞名不去重、自动改名 .1.mkv，2026-10-05 活体实证）。
+            # 检查与登记之间无 await，单线程下原子；被拦的尝试不投递、不落账本。
+            key = _inflight_key(item.local_path)
+            if key in _inflight_paths:
+                lines.append(f"❌ {item.name}: 同一文件已有下载在途")
+                continue
+            _inflight_paths.add(key)
             try:
-                result = (await client.post(url, json=payload)).json()
-            except Exception as exc:  # noqa: BLE001
-                lines.append(f"❌ aria2 连接失败: {exc}")
-                break
-            gid = result.get("result")
-            if gid:
-                log("info", f"📥 aria2 已投递 {item.name}")
-                _history_start(log, source="aria2", ref_id=str(gid), item=item,
-                               size=int(row.get("size") or item.size or 0), task_id=task_id,
-                               taskname=taskname, account_id=account_id, driver_key=driver_key)
-                lines.append(f"✅ aria2 已投递 {item.name}")
-            else:
-                lines.append(f"❌ aria2 {item.name}: {result.get('error')}")
+                # aria2 不会自建缺失目录，投递前先建好目标目录（与内置下载器一致）。
+                # dir 必须用绝对路径：aria2 常在容器内运行，相对路径会按容器 CWD 解析，
+                # 导致文件落进容器而非宿主机挂载目录（内置下载器跑在宿主机不受影响）。
+                # 用 abspath 而非 resolve：resolve 会展开符号链接——macOS 宿主的 /tmp 实为
+                # /private/tmp 的软链，容器里只挂载字面 /tmp/... 路径，改写后真机直接
+                # errorCode 18 失败（2026-10-05 活体验证发现）；abspath 只补绝对、保留字面挂载路径。
+                dest_dir = Path(os.path.abspath(item.local_path.parent))
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                params: list = [
+                    [row["download_url"]],
+                    {
+                        "header": [f"Cookie: {cookie_str}", f"User-Agent: {ua}"],
+                        "out": item.local_path.name,
+                        "dir": str(dest_dir),
+                        "pause": str(cfg.aria2_pause).lower(),
+                    },
+                ]
+                if cfg.aria2_secret:
+                    params.insert(0, f"token:{cfg.aria2_secret}")
+                payload = {"jsonrpc": "2.0", "id": "xiao-pan", "method": "aria2.addUri", "params": params}
+                try:
+                    result = (await client.post(url, json=payload)).json()
+                except Exception as exc:  # noqa: BLE001
+                    lines.append(f"❌ aria2 连接失败: {exc}")
+                    break
+                gid = result.get("result")
+                if gid:
+                    log("info", f"📥 aria2 已投递 {item.name}")
+                    _history_start(log, source="aria2", ref_id=str(gid), item=item,
+                                   size=int(row.get("size") or item.size or 0), task_id=task_id,
+                                   taskname=taskname, account_id=account_id, driver_key=driver_key)
+                    lines.append(f"✅ aria2 已投递 {item.name}")
+                else:
+                    lines.append(f"❌ aria2 {item.name}: {result.get('error')}")
+            finally:
+                # 投递 RPC 返回、queued 账本行落下即释放：之后的重复点击由 has_open_for_path
+                # （DB 层的 queued 行）接管，这一层只负责账本行出现之前的窗口。
+                _inflight_paths.discard(key)
     return lines
 
 

@@ -142,3 +142,71 @@ async def test_guard_releases_after_download_completes(tmp_path, monkeypatch):
         assert len(_rows(task_id)) == 2  # 两次都真正开始过，各留一行
     finally:
         _cleanup([task_id])
+
+
+# ---- aria2 模式同款在途守卫（2026-10-05 活体发现：连点两次「重下」下载出两份整片）----
+
+
+def _aria2_race_client(posts: list):
+    """假 RPC 客户端：记录每次 addUri 投递。被守卫拦下的尝试必须一次都没投出去。"""
+
+    class C:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json):
+            await asyncio.sleep(0)  # 让另一个投递窗口穿插进来
+            posts.append(json)
+
+            class R:
+                def json(self):
+                    return {"result": "gid-aria2-race"}
+
+            return R()
+
+    return C
+
+
+async def test_aria2_concurrent_same_dest_duplicate_is_rejected(tmp_path, monkeypatch):
+    """aria2 模式下连点两次重下：第二次必须被进程内守卫拦下，不投递、不落账本。
+
+    活体复盘：_inflight_paths 只在 _builtin_download.one() 里登记，aria2 提交的
+    "取直链→addUri" 窗口全程无守卫，两次重试都放行，daemon 真下了两份 3.5GB 整片
+    （aria2 撞名不但不去重还自动改名 .1.mkv）。守卫补齐后这里必须只投一条 addUri。
+    """
+    posts: list = []
+    monkeypatch.setattr(dl.httpx, "AsyncClient", _aria2_race_client(posts))
+
+    async def reachable(_c):
+        return True
+
+    monkeypatch.setattr(dl, "aria2_reachable", reachable)
+    dest = tmp_path / "剧" / "S01E194.mkv"
+    task_id = 943
+    c = dl.DownloadSettings(
+        mode="aria2", dir=str(tmp_path), aria2_host_port="http://127.0.0.1:6800", aria2_secret="sec"
+    )
+    items = [dl.DownloadItem(fid="aria2-race-1", name="S01E194.mkv", size=10, local_path=dest)]
+    try:
+        lines_a, lines_b = await asyncio.gather(
+            dl.download_items(DlDriver(), items, c, log=lambda *a: None, task_id=task_id, driver_key="fake"),
+            dl.download_items(DlDriver(), items, c, log=lambda *a: None, task_id=task_id, driver_key="fake"),
+        )
+        all_lines = lines_a + lines_b
+        assert sum(1 for x in all_lines if x.startswith("✅")) == 1, all_lines
+        assert any(x.startswith("❌") and "同一文件已有下载在途" in x for x in all_lines), all_lines
+        # 被拒的尝试绝不投给 daemon：只有一条 addUri
+        assert len(posts) == 1, posts
+        # 被拒的尝试也不落账本：本 task 只有真正投递的那一条 queued
+        rows = _rows(task_id)
+        assert len(rows) == 1 and rows[0].status == "queued" and rows[0].source == "aria2"
+        # 投递返回、账本落行后必须释放登记：后续点击由 queued 行（DB 层）接管
+        assert dl._inflight_key(dest) not in dl._inflight_paths
+    finally:
+        _cleanup([task_id])
