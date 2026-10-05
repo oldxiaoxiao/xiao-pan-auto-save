@@ -13,7 +13,7 @@ from ..config import PROXY
 from ..core.engine import TaskSpec, run_update_task
 from ..core.logstream import hub
 from ..core.router import route_driver
-from ..core.scheduler import has_valid_schedule, task_due_today
+from ..core.scheduler import enddate_passed, has_valid_schedule, task_due_today
 from ..database import session_scope
 from ..models import Account, Task, run_mode_of
 
@@ -29,6 +29,46 @@ STATUS_ICONS = {
 # 且同一夸克账号不宜被并发打。转存段（engine save + DB 写入）必须串行，下载段（本地/aria2）可并行，
 # 故仅把转存段包进此锁。见 _run_tasks_inner。
 _run_lock = asyncio.Lock()
+
+ONCE_RETRY_LIMIT = 3  # 真失败最多重试三次，用尽后停摆等手动「▶ 运行」
+ONCE_RETRY_DELAY_MINUTES = 5  # 三档都是 5 分钟：1 分钟低于表单自标的「建议 ≥5 分钟」风控线
+
+
+def once_next_driver(task) -> str:
+    """一次性任务下一步由谁驱动：retry / daily / halted / none。
+
+    调度注册、全局扫周期、结局写库三处都只问这个函数 —— 判定散在两处是上个特性踩过的漂移源。
+    判序是刻意的：预算检查必须排在 next_retry_at 之前，否则手工改库留下的矛盾态
+    （用尽 + 还挂着到点时间）会被判成 retry，等于给本该停摆的行复活一条命。
+    """
+    if run_mode_of(task) != "once":
+        return "none"
+    if task.disabled:
+        return "halted"  # 已完成或用户暂停，都不再自动驱动
+    if enddate_passed(task):
+        return "halted"
+    if int(getattr(task, "retry_attempts", 0) or 0) >= ONCE_RETRY_LIMIT:
+        return "halted"  # 预算用尽：停摆，等手动点运行重新给预算
+    if getattr(task, "next_retry_at", None) is not None:
+        return "retry"
+    return "daily"
+
+
+def scheduled_should_run(task) -> tuple[bool, str]:
+    """定时触发（全局 crontab 或任务级作业）该不该驱动这一行，以及不驱动的原因。"""
+    mode = run_mode_of(task)
+    if mode == "follow":
+        return True, ""
+    if mode == "manual":
+        return False, "仅手动"
+    driver = once_next_driver(task)
+    if driver == "daily":
+        return True, ""
+    if driver == "retry":
+        return False, "等到点重试作业驱动，每日扫不让位就会双驱动"
+    if int(getattr(task, "retry_attempts", 0) or 0) >= ONCE_RETRY_LIMIT and not task.disabled:
+        return False, "重试已用尽"
+    return False, "已完成或已停用"
 
 
 def load_tasks(task_ids: list[int] | None = None) -> list[Task]:

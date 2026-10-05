@@ -23,6 +23,7 @@ def _to_out(task: Task) -> TaskOut:
     data = task.model_dump()
     data["runweek"] = task.runweek_list()
     data["last_run_at"] = task.last_run_at.isoformat() if task.last_run_at else None
+    data["next_retry_at"] = task.next_retry_at.isoformat() if task.next_retry_at else None
     # 老库升级出来的空串在这层归一化：前端与油猴列表永远看不到 ''
     data["run_mode"] = run_mode_of(task)
     return TaskOut(**data)

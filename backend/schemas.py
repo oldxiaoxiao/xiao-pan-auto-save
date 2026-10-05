@@ -34,6 +34,8 @@ class TaskOut(TaskIn):
     id: int
     shareurl_ban: str = ""
     last_run_at: str | None = None
+    retry_attempts: int = 0
+    next_retry_at: str | None = None
 
 
 class AccountIn(BaseModel):

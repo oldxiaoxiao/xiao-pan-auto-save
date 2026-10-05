@@ -86,6 +86,17 @@ def has_valid_schedule(schedule: str) -> bool:
     return bool(schedule) and TaskScheduler._parse_trigger(schedule) is not None
 
 
+def enddate_passed(task, today: date | None = None) -> bool:
+    """截止日期是否已过；空或非法日期一律 False（不挡路），与 task_due_today 既有口径一致。"""
+    enddate = getattr(task, "enddate", "") or ""
+    if not enddate:
+        return False
+    try:
+        return (today or date.today()) > datetime.strptime(enddate, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+
+
 def task_due_today(task, today: date | None = None) -> bool:
     """runweek（周一=1..周日=7，空=每天）与 enddate（YYYY-MM-DD）过滤。"""
     today = today or date.today()
@@ -94,11 +105,6 @@ def task_due_today(task, today: date | None = None) -> bool:
     runweek = task.runweek_list() if hasattr(task, "runweek_list") else []
     if runweek and today.isoweekday() not in runweek:
         return False
-    enddate = getattr(task, "enddate", "") or ""
-    if enddate:
-        try:
-            if today > datetime.strptime(enddate, "%Y-%m-%d").date():
-                return False
-        except ValueError:
-            pass
+    if enddate_passed(task, today):
+        return False
     return True

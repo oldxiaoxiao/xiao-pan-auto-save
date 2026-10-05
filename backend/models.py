@@ -71,6 +71,8 @@ class Task(SQLModel, table=True):
     episode_end: int = 0  # 结束集（含），0=不限
     quality: str = ""  # 逗号分隔 token，如 "1080p,4k"，空=不限
     schedule: str = ""  # ""=继承全局；interval:N=每N分钟；cron:<expr>
+    retry_attempts: int = 0  # 一次性任务本轮已消耗的重试次数（成功或手动再开时归零）
+    next_retry_at: NaiveDatetime | None = None  # 到点重试时间；内存 JobStore 重启会丢，故必须落库
     run_mode: str = "follow"  # follow=定时追更 | manual=仅手动 | once=一次性（跑完自动停用）
     last_run_at: NaiveDatetime | None = None
     created_at: NaiveDatetime = Field(default_factory=_now)
