@@ -137,6 +137,9 @@ def apply_task_schedule(task) -> None:
         else:
             scheduler.unschedule_retry(task.id)
         return
+    # follow 落点：行可能刚从 once 改成 follow，遗留的到点重试作业必须一并撤销，
+    # 否则它到点仍会触发 _run_retry_task，把刚变成 follow 的行提前跑一次并清掉 next_retry_at。
+    scheduler.unschedule_retry(task.id)
     scheduler.reschedule_task(task.id, getattr(row, "schedule", "") or "", partial(_run_one_task, task.id))
 
 

@@ -301,3 +301,49 @@ async def test_daily_sweep_defers_to_retry_job(monkeypatch):
     finally:
         _delete(waiting, pending)
         _drop_account(acc_id)
+
+
+def test_switching_once_to_follow_withdraws_the_retry_job():
+    """once 行挂着到点重试作业后被用户改成 follow：遗留作业必须一并撤销。
+
+    否则它到点仍会触发 _run_retry_task，把刚变成 follow 的行提前跑一次，
+    并顺手把 next_retry_at 清掉。
+    """
+    when = datetime.now() + timedelta(minutes=5)
+    tid = _persist(taskname="改回追更", retry_attempts=1, next_retry_at=when, schedule="interval:30")
+    try:
+        main.apply_task_schedule(_reload(tid))
+        assert scheduler.scheduler.get_job(f"xiao_pan_retry_{tid}") is not None
+        with session_scope() as s:
+            s.get(Task, tid).run_mode = "follow"
+        main.apply_task_schedule(_reload(tid))
+        assert scheduler.scheduler.get_job(f"xiao_pan_retry_{tid}") is None
+        assert scheduler.scheduler.get_job(f"xiao_pan_task_{tid}") is not None  # follow 走自己的周期作业
+    finally:
+        _delete(tid)
+
+
+@pytest.mark.asyncio
+async def test_daily_sweep_drives_once_row_holding_a_valid_schedule(monkeypatch):
+    """once + 有效独立 schedule + 无到点时间：必须由每日扫驱动。
+
+    apply_task_schedule 从不给 once 行注册任务级周期作业，has_valid_schedule 跳过分支
+    若不收紧到 follow，这行会被"已配置独立调度"拦下——没有任何驱动方，违反 spec 4.3。
+    """
+    acc_id = _seed_account()
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+    ran: list[str] = []
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        ran.append(spec.taskname)
+        return TaskRunResult(status="no_changes")
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    stale = _persist(taskname="带调度的一次性", schedule="interval:30")  # driver=daily，无到点时间
+    try:
+        summary = await ts.run_tasks(trigger="scheduled")
+        assert ran == ["带调度的一次性"]  # 旧 schedule 字符串不该饿死它
+        assert summary["skipped"] == 0 and summary["driven"] == 1
+    finally:
+        _delete(stale)
+        _drop_account(acc_id)

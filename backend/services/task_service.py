@@ -209,14 +209,18 @@ async def _run_tasks_inner(
                 summary["skipped"] += 1
                 tlog("info", f"《{task.taskname}》本次不由定时器驱动：{why}")
                 continue
-        # 全局 sweep（task_ids 为空：None 或 []，与 load_tasks 的真值判断同口径）只驱动「无有效独立调度」的任务：
-        # 已自带有效 schedule 的任务由其专属 job 触发，避免同时被主 crontab 双驱动（如"仅周日"cron 却在每日全局点被执行）。
-        # schedule 为空或非法的任务仍留在 sweep 中，继承全局回退。
+        # 全局 sweep（task_ids 为空：None 或 []，与 load_tasks 的真值判断同口径）只驱动「无有效独立调度」的 **follow** 行：
+        # follow 行自带有效 schedule 时由其专属 job 触发，避免同时被主 crontab 双驱动（如"仅周日"cron 却在每日全局点被执行）。
+        # 本分支必须用 run_mode_of 限定 follow：apply_task_schedule 从不给 once / manual 行注册任务级周期作业，
+        # 若也拦它们，"once + 有效 schedule + 无到点时间"这类残留调度字符串的行会被判成"daily 该扫"却又被此处跳过，
+        # 落得没有任何驱动方（spec 4.3：once 无到点时间且预算未用尽 → 参与每日扫）。
+        # schedule 为空或非法的 follow 行仍留在 sweep 中，继承全局回退。
         # 判空必须和上面停用那处一致用 `not task_ids`：[] 在 load_tasks 眼里就是「全部任务」，
         # 这里若按 `is None` 便会全量载入 + 不跳停用之外的一项 + 把自带调度的行双驱动，正是本分支要防的组合。
         if (
             trigger == "scheduled"
             and not task_ids
+            and run_mode_of(task) == "follow"
             and has_valid_schedule(getattr(task, "schedule", "") or "")
         ):
             summary["skipped"] += 1
