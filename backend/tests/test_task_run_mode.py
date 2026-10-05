@@ -1,4 +1,4 @@
-"""执行形态（run_mode）测试：字段往返、非法值 400、对外接口默认值、调度层按形态驱动。"""
+"""执行形态（run_mode）测试：字段往返、非法值 400、对外接口默认值、调度层按形态驱动、一次性收口。"""
 
 from __future__ import annotations
 
@@ -9,11 +9,12 @@ from fastapi.testclient import TestClient
 from sqlmodel import delete, select
 
 from backend import main
-from backend.core.engine import TaskRunResult
+from backend.core.engine import SavedFile, TaskRunResult
 from backend.database import session_scope
 from backend.main import app
 from backend.models import RUN_MODES, Account, ExternalApiToken, Task
 from backend.services import task_service as ts
+from backend.services.task_service import DownloadCounts
 from backend.tests.test_task_service import OkDriver
 
 
@@ -270,5 +271,284 @@ def test_legacy_blank_row_projects_as_follow_in_api(client):
     try:
         assert _reload_task(tid).run_mode == ""  # 库里确实是空串，下面回显的才是归一化值
         assert client.get("/api/tasks").json()[0]["run_mode"] == "follow"
+    finally:
+        _drop(tid)
+
+
+# ---------- 一次性收口：新增 + 下载全成功才算跑完 ----------
+
+
+def _collect(sink: list[tuple[str, str]]):
+    """把 tlog 调用收进列表，便于断言日志级别与文案。"""
+
+    def tlog(level, message):
+        sink.append((level, message))
+
+    return tlog
+
+
+def _once_task(**kw) -> Task:
+    defaults = dict(taskname="一次性", shareurl="https://pan.quark.cn/s/x", savepath="/x", run_mode="once")
+    defaults.update(kw)
+    return Task(**defaults)
+
+
+def _updated_result() -> TaskRunResult:
+    return TaskRunResult(
+        status="updated",
+        files=[SavedFile(share_name="1.mp4", final_name="1.mp4", new_fid="f1", dest_path="/x/1.mp4")],
+    )
+
+
+@pytest.mark.parametrize(
+    "auto_download,counts,status,want_done,want_reason_part",
+    [
+        (False, DownloadCounts(), "updated", True, "已获取新增资源"),
+        (True, DownloadCounts(executed=True, attempted=2, ok=2), "updated", True, "已获取新增资源"),
+        (True, DownloadCounts(executed=True, attempted=1, ok=1), "updated", True, "已获取新增资源"),
+        (True, DownloadCounts(executed=True, attempted=2, ok=1, failed=1), "updated", False, "1 项下载失败"),
+        (True, DownloadCounts(executed=False), "updated", False, "下载未实际执行"),
+        (True, DownloadCounts(executed=True, attempted=0), "updated", False, "下载未实际执行"),
+        (False, DownloadCounts(), "no_changes", False, "本次没有新增资源"),
+        (True, DownloadCounts(executed=True, attempted=1, ok=1), "no_changes", False, "本次没有新增资源"),
+        (False, DownloadCounts(), "failed", False, "转存未成功"),
+    ],
+)
+def test_once_verdict(auto_download, counts, status, want_done, want_reason_part):
+    task = _once_task(auto_download=auto_download)
+    result = TaskRunResult(status=status) if status != "updated" else _updated_result()
+    done, reason = ts._once_verdict(task, result, counts)
+    assert done is want_done
+    assert want_reason_part in reason
+
+
+def test_once_verdict_skips_disabled_task_for_idempotency():
+    """已停用（含此前自动完成）的一次性任务再手动跑一次，不重复收口、不重复通知。"""
+    task = _once_task(auto_download=False, disabled=True)
+    done, reason = ts._once_verdict(task, _updated_result(), DownloadCounts())
+    assert not done and "停用" in reason
+
+
+def test_once_verdict_ignores_non_once_tasks():
+    task = _once_task(run_mode="follow", auto_download=False)
+    done, reason = ts._once_verdict(task, _updated_result(), DownloadCounts())
+    assert not done and reason == "非一次性任务"
+
+
+def test_once_verdict_normalizes_legacy_blank_run_mode():
+    """老库升级出来的 run_mode='' 归一化为 follow：不能被一次性逻辑误收口。"""
+    task = _once_task(run_mode="", auto_download=False)
+    done, reason = ts._once_verdict(task, _updated_result(), DownloadCounts())
+    assert done is False and reason == "非一次性任务"
+
+
+@pytest.mark.asyncio
+async def test_run_once_auto_disables_after_success(monkeypatch):
+    acc_id = _seed_account()
+    tid = _make_task("once", account_id=acc_id, auto_download=False)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        return _updated_result()
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    try:
+        await ts.run_tasks(task_ids=[tid], trigger="manual")
+        with session_scope() as s:
+            assert s.get(Task, tid).disabled is True
+    finally:
+        _drop(tid)
+
+
+@pytest.mark.asyncio
+async def test_run_once_auto_disables_when_all_downloads_skipped_as_existing(monkeypatch):
+    """aria2/本地下载全部「✅ 跳过（已存在）」= 文件已在盘上 = 成功，一次性任务照样收口。"""
+    acc_id = _seed_account()
+    tid = _make_task("once", account_id=acc_id, auto_download=True)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        return _updated_result()
+
+    from backend.services import download_service
+
+    async def fake_download(*a, **k):
+        return ["✅ 跳过（已存在）1.mp4", "✅ 跳过（已存在）2.mp4"]
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    monkeypatch.setattr(download_service, "download_task_files", fake_download)
+    try:
+        await ts.run_tasks(task_ids=[tid], trigger="manual")
+        with session_scope() as s:
+            assert s.get(Task, tid).disabled is True
+    finally:
+        _drop(tid)
+
+
+@pytest.mark.asyncio
+async def test_run_once_stays_enabled_when_download_failed(monkeypatch):
+    acc_id = _seed_account()
+    tid = _make_task("once", account_id=acc_id, auto_download=True)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        return _updated_result()
+
+    from backend.services import download_service
+
+    async def fake_download(*a, **k):
+        return ["✅ 1.mp4（1.0MB）", "❌ 2.mp4: HTTP 500"]
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    monkeypatch.setattr(download_service, "download_task_files", fake_download)
+    try:
+        await ts.run_tasks(task_ids=[tid], trigger="manual")
+        with session_scope() as s:
+            assert s.get(Task, tid).disabled is False
+    finally:
+        _drop(tid)
+
+
+@pytest.mark.asyncio
+async def test_run_once_stays_enabled_when_driver_cannot_download(monkeypatch):
+    """开了下载但驱动不支持 → 下载未实际执行 → 不能算完成（防"看着完成了其实没下"）。"""
+    acc_id = _seed_account()
+    tid = _make_task("once", account_id=acc_id, auto_download=True)
+    monkeypatch.setattr(ts, "route_driver", lambda url: OkDriver)  # 只有 rename 能力
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        return _updated_result()
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    try:
+        await ts.run_tasks(task_ids=[tid], trigger="manual")
+        with session_scope() as s:
+            assert s.get(Task, tid).disabled is False
+    finally:
+        _drop(tid)
+
+
+@pytest.mark.asyncio
+async def test_run_once_stays_enabled_when_no_changes(monkeypatch):
+    """分享还没放资源：保持启用，且不给非一次性任务刷"未完成"告警。"""
+    acc_id = _seed_account()
+    once_id = _make_task("once", account_id=acc_id, auto_download=False)
+    follow_id = _make_task("follow", account_id=acc_id, auto_download=False)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        return TaskRunResult(status="no_changes")
+
+    logs: list[tuple[str, str]] = []
+    real_make_logger = ts.hub.make_logger
+
+    def spy_make_logger(run_id="", task_id=None):
+        inner = real_make_logger(run_id, task_id)
+
+        def spy(level, msg, **kw):
+            logs.append((level, msg))
+            inner(level, msg, **kw)
+
+        return spy
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    monkeypatch.setattr(ts.hub, "make_logger", spy_make_logger)
+    try:
+        await ts.run_tasks(task_ids=[once_id, follow_id], trigger="manual")
+        with session_scope() as s:
+            assert s.get(Task, once_id).disabled is False
+            assert s.get(Task, follow_id).disabled is False
+        # 「未完成」告警只对一次性任务说：判定为"非一次性任务"的运行不得刷这条
+        assert not [msg for level, msg in logs if level == "warn" and "未完成" in msg and "形态follow" in msg]
+    finally:
+        _drop(once_id, follow_id)
+
+
+def test_settle_once_survives_task_deleted_mid_run():
+    """收口写库时任务已被删除：session.get 返回 None，必须安静跳过而不是抛错或写出半行。"""
+    task = _once_task(auto_download=False)
+    task.id = 999999  # 不存在的 id
+    calls: list[tuple[str, str]] = []
+
+    def tlog(level, msg):
+        calls.append((level, msg))
+
+    ts._settle_once(task, _updated_result(), DownloadCounts(), tlog)
+
+    with session_scope() as s:
+        assert s.get(Task, 999999) is None
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_once_is_idempotent_on_second_manual_run(monkeypatch):
+    """已完成（自动停用）的一次性任务再手动跑一次：不重复写、不重复通知收口文案。"""
+    acc_id = _seed_account()
+    tid = _make_task("once", account_id=acc_id, auto_download=False)
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        return _updated_result()
+
+    logs: list[tuple[str, str]] = []
+    real_make_logger = ts.hub.make_logger
+
+    def spy_make_logger(run_id="", task_id=None):
+        inner = real_make_logger(run_id, task_id)
+
+        def spy(level, msg, **kw):
+            logs.append((level, msg))
+            inner(level, msg, **kw)
+
+        return spy
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    monkeypatch.setattr(ts.hub, "make_logger", spy_make_logger)
+    try:
+        await ts.run_tasks(task_ids=[tid], trigger="manual")
+        first = [msg for _, msg in logs if "一次性任务已完成" in msg]
+        assert len(first) == 1
+        logs.clear()
+
+        await ts.run_tasks(task_ids=[tid], trigger="manual")
+        assert [msg for _, msg in logs if "一次性任务已完成" in msg] == []
+        assert [msg for _, msg in logs if "未完成" in msg] == []
+        with session_scope() as s:
+            assert s.get(Task, tid).disabled is True
+    finally:
+        _drop(tid)
+
+
+def test_download_for_task_returns_counts_and_keeps_notify_line(monkeypatch):
+    """结构化计数：通知文案逐字不变，计数供一次性判定复用。"""
+    from backend.services import download_service
+
+    acc_id = _seed_account()
+    tid = _make_task("follow", account_id=acc_id, auto_download=True)
+    task = _reload_task(tid)
+    driver = DownloadOkDriver(cookie="x", proxy=None, index=0)
+    result = TaskRunResult(
+        status="updated",
+        files=[SavedFile(share_name="1.mp4", final_name="1.mp4", new_fid="f1", dest_path="/x/1.mp4")],
+    )
+
+    async def fake_download(*a, **k):
+        return ["✅ 1.mp4（1.0MB）", "❌ 2.mp4: HTTP 500"]
+
+    lines: list[str] = []
+    logs: list[tuple[str, str]] = []
+    monkeypatch.setattr(download_service, "download_task_files", fake_download)
+    try:
+        counts = asyncio.run(ts._download_for_task(driver, task, result, {}, lines, _collect(logs)))
+        assert (counts.executed, counts.attempted, counts.ok, counts.failed) == (True, 2, 1, 1)
+        assert lines == ["📥《形态follow》本地下载 1/2：\n✅ 1.mp4（1.0MB）\n❌ 2.mp4: HTTP 500"]
+
+        # 驱动不支持下载：executed=False，且不产生通知行
+        unsupported = OkDriver(cookie="x", proxy=None, index=0)
+        lines2: list[str] = []
+        counts2 = asyncio.run(ts._download_for_task(unsupported, task, result, {}, lines2, _collect(logs)))
+        assert (counts2.executed, counts2.attempted, counts2.ok, counts2.failed) == (False, 0, 0, 0)
+        assert lines2 == []
+        assert any(level == "warn" and "不支持下载" in msg for level, msg in logs)
     finally:
         _drop(tid)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlmodel import Session, func, select
@@ -197,9 +198,13 @@ async def _run_tasks_inner(
             summary["updated"] += 1
             notify_lines.append(f"✅《{task.taskname}》添加追更：\n{result.render()}")
             tlog("info", f"《{task.taskname}》新增 {len(result.files)} 项")
+            counts = DownloadCounts()
             if getattr(task, "auto_download", False):
                 # 下载在锁外：本地/aria2 可与其它任务的转存并行，不占用转存串行段
-                await _download_for_task(driver, task, result, settings, notify_lines, tlog, account_id=account.id)
+                counts = await _download_for_task(
+                    driver, task, result, settings, notify_lines, tlog, account_id=account.id
+                )
+            _settle_once(task, result, counts, tlog)
         elif result.status == "no_changes":
             tlog("info", f"《{task.taskname}》没有新的转存")
         else:
@@ -211,12 +216,23 @@ async def _run_tasks_inner(
         await _push("小盘自动转存运行结果", "\n".join(notify_lines), push_config, settings, log)
 
 
-async def _download_for_task(driver, task, result, settings, notify_lines, tlog, *, account_id=None) -> None:
+@dataclass
+class DownloadCounts:
+    """一次任务运行的下载结果计数：executed 表示是否真的走到了下载器。"""
+
+    attempted: int = 0
+    ok: int = 0
+    failed: int = 0
+    executed: bool = False
+
+
+async def _download_for_task(driver, task, result, settings, notify_lines, tlog, *, account_id=None) -> DownloadCounts:
     from .download_service import DownloadSettings, download_task_files
 
+    counts = DownloadCounts()
     if not driver.has("download"):
         tlog("warn", f"《{task.taskname}》{driver.name} 驱动不支持下载，跳过")
-        return
+        return counts
     cfg = DownloadSettings.from_dict(settings.get("download"))
     try:
         lines = await download_task_files(
@@ -233,9 +249,50 @@ async def _download_for_task(driver, task, result, settings, notify_lines, tlog,
     except Exception as exc:  # noqa: BLE001 下载失败不影响转存结果
         tlog("error", f"《{task.taskname}》下载异常：{exc}")
         lines = [f"❌ 下载异常: {exc}"]
-    ok = sum(1 for line in lines if line.startswith("✅"))
+    counts.executed = True
+    counts.attempted = len(lines)
+    # 前缀约定沿用通知聚合的口径：✅ 开头即成功（含「✅ 跳过（已存在）」，文件本就在盘上）
+    counts.ok = sum(1 for line in lines if line.startswith("✅"))
+    counts.failed = counts.attempted - counts.ok
     if lines:
-        notify_lines.append(f"📥《{task.taskname}》本地下载 {ok}/{len(lines)}：\n" + "\n".join(lines))
+        notify_lines.append(
+            f"📥《{task.taskname}》本地下载 {counts.ok}/{counts.attempted}：\n" + "\n".join(lines)
+        )
+    return counts
+
+
+def _once_verdict(task, result, counts: DownloadCounts) -> tuple[bool, str]:
+    """一次性任务是否算"跑完"：拿到新增资源，且（没开下载 或 下载实际执行且零失败）。"""
+    if run_mode_of(task) != "once":
+        return False, "非一次性任务"
+    if task.disabled:
+        return False, "已停用（含此前自动完成），不重复收口"
+    if result.status != "updated":
+        if result.status == "no_changes":
+            return False, "本次没有新增资源"
+        return False, f"转存未成功（{result.status}）"
+    if getattr(task, "auto_download", False):
+        if not counts.executed or counts.attempted == 0:
+            return False, "下载未实际执行（驱动不支持或没有待下载文件）"
+        if counts.failed:
+            return False, f"{counts.failed} 项下载失败"
+    return True, "已获取新增资源"
+
+
+def _settle_once(task, result, counts: DownloadCounts, tlog) -> None:
+    """判定通过才停用；已停用则不再动作（幂等）。"""
+    done, reason = _once_verdict(task, result, counts)
+    if not done:
+        if run_mode_of(task) == "once" and not task.disabled:
+            tlog("warn", f"《{task.taskname}》一次性任务未完成：{reason}，保持待执行")
+        return
+    with session_scope() as session:
+        row = session.get(Task, task.id)
+        if row is None or row.disabled:
+            return  # 任务运行中被删除／已被别处停用：不动作，避免写出半行
+        row.disabled = True
+        session.add(row)
+    tlog("info", f"《{task.taskname}》一次性任务已完成并自动停用（{reason}）")
 
 
 async def _push(title: str, content: str, push_config: dict, settings: dict, log) -> None:
