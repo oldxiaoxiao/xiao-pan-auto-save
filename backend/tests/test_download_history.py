@@ -190,6 +190,27 @@ def test_file_state_ok_missing_and_directory(tmp_path):
     assert hist.file_state(str(d)) == "unknown"  # 目录不是常规文件
 
 
+def test_file_state_size_mismatch_is_partial_and_inflight_never_claims_ok(tmp_path):
+    """活体发现：queued 行的本地文件只是 aria2 预分配占位（1097 字节 vs 3.5GB），
+    旧的 file_state 只看"常规文件在不在"，UI 显示「在」纯属撒谎。
+
+    新语义：非终态行（queued/downloading）一律 unknown（UI 未校验），连 stat 都省；
+    终态行大小相符 ok、不符 partial（UI 不完整）；expected_size=0 保留"非空即 ok"。"""
+    placeholder = tmp_path / "half.mkv"
+    placeholder.write_bytes(b"0" * 1097)
+    total = 3_509_370_877  # 活体那集的真实字节数
+    # 非终态：文件哪怕在、哪怕同大小，也不许报 ok
+    assert hist.file_state(str(placeholder), total, terminal=False) == "unknown"
+    assert hist.file_state(str(placeholder), 1097, terminal=False) == "unknown"
+    # 终态：占位大小 ≠ 预期 → partial；相符 → ok
+    assert hist.file_state(str(placeholder), total, terminal=True) == "partial"
+    assert hist.file_state(str(placeholder), 1097, terminal=True) == "ok"
+    # expected_size=0（老行没记大小）：常规文件即 ok，行为与旧版一致
+    assert hist.file_state(str(placeholder)) == "ok"
+    assert hist.file_state(str(tmp_path / "gone.mkv"), total, terminal=True) == "missing"
+    assert hist.file_state(str(tmp_path / "gone.mkv"), total, terminal=False) == "unknown"
+
+
 def test_file_state_unknown_on_permission_error(monkeypatch):
     import types
 

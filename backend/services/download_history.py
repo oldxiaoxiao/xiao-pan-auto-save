@@ -83,15 +83,16 @@ def finish(
         session.add(row)
 
 
-def file_state(path: str) -> str:
-    """文件到位校验：ok=常规文件在；missing=确实不存在；unknown=读不到（权限/挂载异常），不当成丢失。"""
-    try:
-        st = os.stat(path)
-    except FileNotFoundError:
-        return "missing"
-    except OSError:
-        return "unknown"
-    return "ok" if stat.S_ISREG(st.st_mode) else "unknown"
+def file_state(path: str, expected_size: int = 0, terminal: bool = True) -> str:
+    """文件到位校验（历史查询用，语义与 _file_check 完全同源，只有一处 stat）。
+
+    - 非终态行（terminal=False，即 queued/downloading）：一律 unknown（UI「未校验」）。
+      在途文件可能是 aria2 的预分配占位，"在不在"根本不说明问题——活体发现过 1097 字节
+      占位配 3.5GB 预期被报成 ok（2026-10-05）。非终态不报 ok 之外还省掉一次 stat。
+    - 终态行：常规文件且（expected_size=0 或大小相符）→ ok；常规文件但大小不符 → partial
+      （UI「不完整」）；不存在 → missing；权限/挂载异常或非常规文件 → unknown。
+    """
+    return _file_check(path, expected_size, terminal)[0]
 
 
 def _conditions(*, status: str, task_id: int | None, keyword: str) -> list:
@@ -201,14 +202,19 @@ def has_open_for_path(dest_path: str) -> bool:
     return any(r["dest_path"] == dest_path and r["created_at"] > cutoff for r in open_records())
 
 
-def _file_check(path: str, size_total: int) -> tuple[str, bool, int]:
-    """兜底校验：一次 os.stat 同时给出「到位状态」与「大小是否匹配」，避免每行 stat 两次。
+def _file_check(path: str, size_total: int, terminal: bool = True) -> tuple[str, bool, int]:
+    """全项目唯一「stat 并解读一个路径」的地方：一次 os.stat 同时给出到位状态、大小相符与真实字节。
 
     返回 (state, matches, size)：
-    - state 与 file_state 同语义（ok/missing/unknown；unknown 不当成丢失）；
+    - state：ok/missing/unknown/partial（partial=常规文件在但大小与预期不符，仅终态行会出现）；
     - matches 仅在 state == "ok" 时有意义：size_total 为 0 时非空即到位，否则须精确相符；
-    - size 为实际字节数（stat 失败时 0），供 size_total 缺失时回填真实大小。
+    - size 为实际字节数（stat 失败或非终态时 0），供 size_total 缺失时回填真实大小。
+    - terminal=False（queued/downloading 行）：在途文件可能是 aria2 预分配占位，任何"到位"
+      结论都是撒谎，直接 unknown 并跳过 stat（活体 2026-10-05：1097 字节占位被报成 ok）。
+    reconcile 用前两项判收口，file_state 取 state 给 UI，两者共用这一份语义。
     """
+    if not terminal:
+        return "unknown", False, 0
     try:
         st = os.stat(path)
     except FileNotFoundError:
@@ -217,6 +223,10 @@ def _file_check(path: str, size_total: int) -> tuple[str, bool, int]:
         return "unknown", False, 0
     if not stat.S_ISREG(st.st_mode):
         return "unknown", False, 0
+    # size_total=0（老行没记大小）：没有可比的大小，谈不上"不完整"，状态一律 ok，
+    # 空文件由 matches=False 挡住，reconcile 不会据此收口。
+    if size_total and st.st_size != size_total:
+        return "partial", False, st.st_size
     matches = st.st_size == size_total if size_total else st.st_size > 0
     return "ok", matches, st.st_size
 

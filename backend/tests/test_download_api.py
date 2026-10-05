@@ -125,6 +125,38 @@ def test_history_endpoint_shape(tmp_path):
     assert by_name["在.mp4"]["id"] == rid
 
 
+def test_history_file_state_honest_for_inflight_and_partial(tmp_path):
+    """文件列不许对在途行撒谎：活体那次 queued 行配 1097 字节预分配占位被标成 ok（UI「在」），
+    而下载还差 2.75GB。新契约由路由把行自身的 status/size_total 传进校验：
+    非终态 → unknown（未校验）；终态但大小不符 → partial（不完整）。"""
+    from backend.services import download_history as hist
+
+    placeholder = tmp_path / "ep.mkv"
+    placeholder.write_bytes(b"0" * 1097)
+    total = 3_509_370_877
+    hist.start(
+        source="aria2", ref_id="api-q-half", task_id=43, taskname="T", filename="ep.mkv",
+        dest_path=str(placeholder), size_total=total, fid="F", driver_key="fake", account_id=None,
+    )
+    hist.start(
+        source="aria2", ref_id="api-done-half", task_id=43, taskname="T", filename="ep.mkv",
+        dest_path=str(placeholder), size_total=total, fid="F", driver_key="fake", account_id=None,
+    )
+    hist.finish("api-done-half", source="aria2", status="done", size_done=total)
+    ids: list[int] = []
+    try:
+        with TestClient(app) as c:
+            data = c.get("/api/downloads/history", params={"task_id": 43, "page_size": 10}).json()
+        ids = [i["id"] for i in data["items"]]
+        by_ref = {i["ref_id"]: i for i in data["items"]}
+        assert by_ref["api-q-half"]["status"] == "queued"  # 路由的 reconcile 不许抢收口
+        assert by_ref["api-q-half"]["file_state"] == "unknown"
+        assert by_ref["api-done-half"]["file_state"] == "partial"
+    finally:
+        for rid in ids:
+            hist.delete_record(rid)
+
+
 def test_history_route_not_shadowed_by_job_id_routes():
     """历史路由必须先声明，否则 /downloads/history/... 会被 /{job_id} 吃掉。"""
     with TestClient(app) as c:

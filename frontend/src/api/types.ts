@@ -251,7 +251,8 @@ export interface DownloadJob {
   updated_at: number;
 }
 
-export type FileState = "ok" | "missing" | "unknown";
+/** 到位校验：ok=在；missing=已丢失；partial=常规文件在但大小与账本不符；unknown=未校验（含在途行）。 */
+export type FileState = "ok" | "missing" | "partial" | "unknown";
 
 /** GET /api/downloads/history 的账本行（download_record 表）。 */
 export interface DownloadRecord {

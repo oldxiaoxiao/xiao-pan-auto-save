@@ -37,7 +37,15 @@ async def history_list(page: int = 1, page_size: int = 50, status: str = "", tas
     data = await asyncio.to_thread(
         download_history.list_records, page=page, page_size=page_size, status=status, task_id=task_id, keyword=keyword
     )
-    states = await asyncio.to_thread(lambda: [download_history.file_state(i["dest_path"]) for i in data["items"]])
+    # 文件列的诚实性：把行自身的 status/size_total 传进校验——非终态行（queued/downloading）
+    # 一律「未校验」（在途文件可能只是 aria2 预分配占位）；终态行大小不符报「不完整」。
+    # 一次 stat 的开销留在页面级别（page_size 上限 200，非终态行直接跳过 stat），且不上事件循环。
+    def _state_of(item: dict) -> str:
+        return download_history.file_state(
+            item["dest_path"], int(item["size_total"] or 0), terminal=item["status"] in download_history.TERMINAL
+        )
+
+    states = await asyncio.to_thread(lambda: [_state_of(i) for i in data["items"]])
     for item, state in zip(data["items"], states, strict=True):
         item["file_state"] = state
     return data

@@ -66,7 +66,10 @@ let retryTimer: number | undefined;
 const hasOpen = computed(() => rows.value.some((r) => r.status === "queued" || r.status === "downloading"));
 
 function stateText(s?: string): string {
-  return s === "ok" ? "在" : s === "missing" ? "已丢失" : "未校验";
+  if (s === "ok") return "在";
+  if (s === "missing") return "已丢失";
+  if (s === "partial") return "不完整"; // 终态行：文件大小与账本不符（如残留占位/截断）
+  return "未校验"; // unknown/缺省：在途行不做到位判断，不撒谎说「在」
 }
 
 async function loadHistory() {
