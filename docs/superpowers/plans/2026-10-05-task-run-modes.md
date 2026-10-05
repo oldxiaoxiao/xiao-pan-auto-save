@@ -234,8 +234,14 @@ git commit -m "feat(tasks): 加执行形态 run_mode（follow/manual/once），�
 **Interfaces:**
 - Consumes: `Task.run_mode`（Task 1）
 - Produces:
-  - 规则：`run_mode != "follow"` 的任务 **既没有任务级作业，也不参与全局 sweep**；`trigger == "manual"` 的手动运行不受形态限制
-  - `main.apply_task_schedule(task)` 的新行为：`disabled` 或 `run_mode != "follow"` → `unschedule_task`
+  - `backend/models.py` → `run_mode_of(task) -> str`：**把空串/未知值归一化为 `"follow"`**（见 Step 0，老库升级的必修点）
+  - 规则：`run_mode_of(task) != "follow"` 的任务 **既没有任务级作业，也不参与全局 sweep**；`trigger == "manual"` 的手动运行不受形态限制
+  - `main.apply_task_schedule(task)` 的新行为：`disabled` 或 `run_mode_of(task) != "follow"` → `unschedule_task`
+  - `routes_tasks._to_out` 回显归一化后的值，前端永远看不到 `''`
+
+- [ ] **Step 0: 先读这条实测事实（决定 Step 1/3 的写法）**
+
+`database._auto_add_columns()`（`backend/database.py:26-46`）对非空字符串列使用 `NOT NULL DEFAULT ''`。用一个不含 `run_mode` 的旧 `task` 表跑 `init_db()`，存量行的 `run_mode` 读出来就是 `''`（我已实测确认）。因此**绝不能**直接写 `task.run_mode != "follow"` —— 那会把用户所有存量追更任务在升级后判成"不自动跑"，静默停更。Step 3 会引入 `run_mode_of()` 归一化，Step 1 的测试必须先钉住这个行为。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -397,31 +403,80 @@ async def test_manual_trigger_still_runs_non_follow_modes(monkeypatch):
         _drop(tid)
 ```
 
+老库归一化的两条（Step 0 那条实测事实的钉子）：
+
+```python
+def test_run_mode_of_normalizes_empty_and_unknown():
+    from backend.models import run_mode_of
+
+    assert run_mode_of(Task(taskname="老", shareurl="u", savepath="/a", run_mode="")) == "follow"
+    assert run_mode_of(Task(taskname="怪", shareurl="u", savepath="/a", run_mode="nonsense")) == "follow"
+    assert run_mode_of(Task(taskname="手动", shareurl="u", savepath="/a", run_mode="manual")) == "manual"
+
+
+def test_legacy_blank_row_still_gets_a_timer():
+    """模拟升级后的存量行（run_mode=''）：定时器必须照旧注册，不能静默停更。"""
+    from backend.main import scheduler
+
+    tid = _make_task("follow", schedule="interval:30")
+    with session_scope() as s:  # 直写成空串，复刻 _auto_add_columns 补列后的真实数据形状
+        raw = s.exec(select(Task).where(Task.id == tid)).first()
+        raw.run_mode = ""
+        s.add(raw)
+    try:
+        main.apply_task_schedule(_reload_task(tid))
+        assert scheduler.scheduler.get_job(f"xiao_pan_task_{tid}") is not None
+    finally:
+        _drop(tid)
+```
+
+顶部 import 需含 `from sqlmodel import delete, select`（`select` 若未导入则补上）。
+
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `.venv/bin/python -m pytest backend/tests/test_task_run_mode.py -q`
 Expected: FAIL —— `test_manual_and_once_do_not_register_task_job` 断言 `... is None` 失败（现在照旧注册），扫周期用例 `ran == []` 失败（现在被驱动）。
 
-- [ ] **Step 3: 注册/撤销按形态**
+- [ ] **Step 3: 归一化助手 + 注册/撤销按形态**
 
-`backend/main.py` 的 `apply_task_schedule` 改为（保留原有"行不存在/停用"分支）：
+`backend/models.py`，紧跟 `RUN_MODES` 之后：
 
 ```python
-    mode = getattr(row, "run_mode", "follow") or "follow"
-    if row.disabled or mode != "follow":
-        # 非 follow（仅手动/一次性）不该有任何定时器：撤销而非注册
+def run_mode_of(task) -> str:
+    """读取执行形态：老库升级出来的空串与任何未知值一律按 follow（定时追更）。
+
+    新列由 _auto_add_columns() 以 NOT NULL DEFAULT '' 补齐，存量行拿到的是空串而不是 "follow"；
+    不归一化就会把用户的存量追更任务误判成"不自动跑"，静默停更。
+    """
+    mode = getattr(task, "run_mode", "") or ""
+    return mode if mode in RUN_MODES else "follow"
+```
+
+`backend/api/routes_tasks.py` 的 `_to_out` 在 `return TaskOut(**data)` 之前加一行（前端与油猴列表因此永远看不到 `''`）：
+
+```python
+    data["run_mode"] = run_mode_of(task)
+```
+
+`backend/main.py` 的 `apply_task_schedule` 改为（保留原有"行不存在"分支）：
+
+```python
+    if row.disabled or run_mode_of(row) != "follow":
+        # 停用、仅手动、一次性 都不该有任务级定时器：撤销而不是注册
         scheduler.unschedule_task(task.id)
         return
     scheduler.reschedule_task(task.id, getattr(row, "schedule", "") or "", partial(_run_one_task, task.id))
 ```
 
-`_run_one_task` 的开头守卫同步加一环：
+`_run_one_task` 的开头守卫同步：
 
 ```python
-    if row is None or row.disabled or getattr(row, "run_mode", "follow") != "follow":
-        scheduler.unschedule_task(task_id)  # 已删/停用/改成非自动形态 → 撤销自身定时器
+    if row is None or row.disabled or run_mode_of(row) != "follow":
+        scheduler.unschedule_task(task_id)  # 已删 / 停用 / 改成非自动形态 → 撤销自身定时器
         return
 ```
+
+`backend/main.py` 顶部（函数内的局部 import 段，沿用该文件既有风格）补 `run_mode_of`：从 `..models` 导入处加上它。
 
 - [ ] **Step 4: 全局 sweep 跳过**
 
@@ -429,11 +484,13 @@ Expected: FAIL —— `test_manual_and_once_do_not_register_task_job` 断言 `..
 
 ```python
         # 仅手动 / 一次性：任何自动触发（全局 crontab 与任务级作业）都不驱动，只能手动点。
-        if trigger == "scheduled" and getattr(task, "run_mode", "follow") != "follow":
+        if trigger == "scheduled" and run_mode_of(task) != "follow":
             summary["skipped"] += 1
-            tlog("info", f"《{task.taskname}》执行方式为 {task.run_mode}，不由定时器驱动")
+            tlog("info", f"《{task.taskname}》执行方式为 {run_mode_of(task)}，不由定时器驱动")
             continue
 ```
+
+`backend/services/task_service.py` 顶部从 `..models` 的导入里补 `run_mode_of`（该文件已 `from ..models import Account, Task`）。
 
 - [ ] **Step 5: 跑测试确认通过**
 
@@ -640,11 +697,10 @@ async def _download_for_task(driver, task, result, settings, notify_lines, tlog,
 ```python
 def _once_verdict(task, result, counts: DownloadCounts) -> tuple[bool, str]:
     """一次性任务是否算"跑完"：拿到新增资源，且（没开下载 或 下载实际执行且零失败）。"""
-    if getattr(task, "run_mode", "follow") != "once":
+    if run_mode_of(task) != "once":
         return False, "非一次性任务"
     if task.disabled:
-        return False, "已在停用状态（含此前自动完成）"
-    if result.status != "updated":
+        return False, "已停用（含此前自动完成），不重复收口"
     if result.status != "updated":
         if result.status == "no_changes":
             return False, "本次没有新增资源"
@@ -658,10 +714,10 @@ def _once_verdict(task, result, counts: DownloadCounts) -> tuple[bool, str]:
 
 
 def _settle_once(task, result, counts: DownloadCounts, tlog) -> None:
-    """判定通过才停用；停用后不再重复动作（幂等）。"""
+    """判定通过才停用；已停用则不再动作（幂等）。"""
     done, reason = _once_verdict(task, result, counts)
     if not done:
-        if getattr(task, "run_mode", "follow") == "once" and not task.disabled:
+        if run_mode_of(task) == "once" and not task.disabled:
             tlog("warn", f"《{task.taskname}》一次性任务未完成：{reason}，保持待执行")
         return
     with session_scope() as session:
