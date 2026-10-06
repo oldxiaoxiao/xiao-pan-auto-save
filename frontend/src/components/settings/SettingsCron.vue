@@ -21,6 +21,12 @@ const nextRunText = computed(() =>
 );
 
 async function save() {
+  if (!store.settings) {
+    // 还没 GET 到就是空串窗口：这时候按保存，会把库里那条真 crontab 抹成 ""（后端只在调度时回落全局默认，
+    // 存下来的仍是空）。与「新建默认」面板同一口径：没读到就挡下，让人稍后重试。
+    ElMessage.warning("设置还没读取到，请稍后重试");
+    return;
+  }
   try {
     await store.save("crontab", crontab.value.trim());
     ElMessage.success("定时规则已保存");
