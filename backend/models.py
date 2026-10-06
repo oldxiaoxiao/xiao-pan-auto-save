@@ -60,7 +60,7 @@ class Task(SQLModel, table=True):
     update_subdir_resave: bool = False
     enddate: str = ""  # YYYY-MM-DD，超期不运行
     runweek: str = "[]"  # JSON 数组 [1..7]，周一=1
-    auto_download: bool = False  # 转存成功后下载到本地
+    auto_download: bool = False  # 转存成功后下载到本地；模型默认刻意保持 False（存量库 _auto_add_columns 补列语义依赖它），"默认开"只在 API 三条创建/更新入口生效，不是矛盾
     download_subdir: bool = False  # 递归下载转存的子目录
     download_savepath: str = ""  # 空=镜像网盘目录；非空=平铺到 下载根/该路径
     disabled: bool = False

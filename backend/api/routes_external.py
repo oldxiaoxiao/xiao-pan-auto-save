@@ -69,6 +69,7 @@ _ALLOWED_FIELDS = {
     "update_subdir",
     "enddate",
     "disabled",
+    "auto_download",
 }
 
 
@@ -109,6 +110,8 @@ async def add_task(request: Request) -> dict:
             enddate=data.get("enddate", ""),
             runweek=str(data.get("runweek", "[]")),
             run_mode=run_mode,
+            # 默认下载到本地：省略该字段=开，与网页新建（TaskIn）一致；显式传 false 才关（Python 真假语义）
+            auto_download=bool(data.get("auto_download", True)),
             # 与网页新建同一条规则：排到列表最前（不给的话会落回模型默认 0，被 id 兜底排到中间）
             sort_order=above_sort_order(session),
         )

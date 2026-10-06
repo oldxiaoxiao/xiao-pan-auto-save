@@ -17,7 +17,7 @@ class TaskIn(BaseModel):
     update_subdir_resave: bool = False
     enddate: str = ""
     runweek: list[int] = []
-    auto_download: bool = True  # 默认下载到本地：与前端新建一致（破坏面：省略该字段的外部调用从此会下载）
+    auto_download: bool = True  # 默认下载到本地：POST/PUT /api/tasks 与 /api/add_task（含 /api/v1/task/add）三条路径一致为开；显式传 false 才关
     download_subdir: bool = False
     download_savepath: str = ""
     disabled: bool = False
