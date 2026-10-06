@@ -88,6 +88,25 @@ def test_get_settings_merges_bypass_partial_task_defaults():
             set_setting("task_defaults", dict(DEFAULT_SETTINGS["task_defaults"]))
 
 
+def test_get_one_key_task_defaults_matches_full_settings_six_keys():
+    """GET /api/settings/task_defaults 与 GET /api/settings 必须给同一份六键——钉住 read_one 里那次 merge。
+
+    真口径漏点：库里若存着半份（旁路写入），读全量补齐、读单键回残缺，就是第二套答案。
+    """
+    from backend.api.deps import set_setting
+
+    with TestClient(app) as c:
+        try:
+            set_setting("task_defaults", {"savepath_root": "/残缺"})  # 模拟旁路写进来的半份
+            single = c.get("/api/settings/task_defaults").json()["value"]
+            full = c.get("/api/settings").json()["task_defaults"]
+            assert single == full, f"单键与全量口径分叉：{single} != {full}"
+            assert set(single) == set(DEFAULT_SETTINGS["task_defaults"]), f"单键读侧没补齐六键：{single}"
+            assert single["savepath_root"] == "/残缺" and single["subdir_filter"] is True
+        finally:
+            set_setting("task_defaults", dict(DEFAULT_SETTINGS["task_defaults"]))
+
+
 # —— /api/add_task 外部路径的 auto_download 接线（spec §4.2/§5.1 破坏面必须是真的） ——
 
 

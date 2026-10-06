@@ -59,7 +59,12 @@ async def expand_magic(name: str) -> dict:
 async def read_one(key: str) -> dict:
     if key not in EDITABLE_KEYS:
         raise HTTPException(404, f"不允许读取/写入设置项: {key}")
-    return {"key": key, "value": get_setting(key)}
+    value = get_setting(key)
+    if key == "task_defaults":
+        # 读单键必须与读全量同一口径：库里若有旁路写进来的半份 task_defaults，
+        # 不 merge 就会让 GET /api/settings 给六键、GET /api/settings/task_defaults 给残缺——第二套答案。
+        value = merge_task_defaults(value)
+    return {"key": key, "value": value}
 
 
 @router.put("/{key}")
