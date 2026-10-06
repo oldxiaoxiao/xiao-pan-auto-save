@@ -694,30 +694,43 @@ watch(() => draft.taskname, (name) => {
   - `pendingPrefill` 的类型若是 `Partial<TaskPayload>`，`startfid` 要显式给 `""`（不是 `undefined`，因为 `Object.assign` 会保留 `blank()` 的 `""`，这里其实是"确保为空"）。
   - 然后 `editingId.value = "new"`、`newDirty.value = false`。
 - [ ] **Step 3**：同路径冲突提示——`TaskForm.vue` 里算 `duplicatePath = props.prefill?.savepath && tasks.list.some(t => t.savepath === draft.savepath && t.id !== props.task?.id)` 时在表单顶部出提示条，文案照 spec 4.3。
-`frontend/src/components/settings/SettingsTaskDefaults.vue` 的骨架（照 `settings/SettingsCron.vue` 的卡片结构与保存调用方式）：
+`frontend/src/components/settings/SettingsTaskDefaults.vue` 的骨架（照 `settings/SettingsCron.vue` 的卡片结构与保存调用方式）。
+
+> 更正（实现时由实施者指出、控制器核实后采纳）：本段原来写的是 `get: () => settings.value.task_defaults`，
+> 这在 `settings: Ref<Settings | null>` 上**过不了 typecheck**——要么加非空断言（`!`，本项目 eslint 禁），
+> 要么前端凭空造一份默认值顶上（违反"默认值只有后端一处"）。所以草稿用 `ref<TaskDefaults | null>` +
+> 只在服务端值落地后由 watch 填入，未就绪时渲染"读取中"、保存挡下发空。原来那段示例本身是缺陷，以现码为准：
 
 ```vue
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { ElMessage } from "element-plus";
 import { useSettingsStore } from "../../stores/settings";
+import { QUALITY_OPTIONS, RUN_MODE_OPTIONS } from "../../constants";
 import type { TaskDefaults } from "../../api/types";
 
 const store = useSettingsStore();
 const { settings } = storeToRefs(store);
-const draft = computed<TaskDefaults>({
-  get: () => settings.value.task_defaults,
-  set: (v) => void v, // 保存走 save()，不做双向
-});
+
+// null = 「GET 还没成功」，不前端猜一份 task_defaults 顶上；真值落地后由 watch 填入本地草稿。
+const draft = ref<TaskDefaults | null>(null);
+let serverSnapshot = "";
+watch(
+  () => settings.value?.task_defaults,
+  (v) => {
+    if (!v) return;
+    const snap = JSON.stringify(v);
+    if (snap === serverSnapshot) return; // 服务端值没再变，就不盖掉用户正在编辑的草稿
+    serverSnapshot = snap;
+    draft.value = { ...v };
+  },
+  { immediate: true },
+);
 
 async function save() {
-  try {
-    await store.save("task_defaults", { ...draft.value });
-    ElMessage.success("已保存新建默认");
-  } catch (e) {
-    ElMessage.error((e as Error).message);
-  }
+  if (!draft.value) return ElMessage.warning("设置还没读取到，请稍后重试");
+  await store.save("task_defaults", { ...draft.value }); // 六个键一次交齐，不靠后端回落省字段
 }
 </script>
 ```
