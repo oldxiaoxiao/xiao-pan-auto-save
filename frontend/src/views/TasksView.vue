@@ -15,10 +15,11 @@ const accountsStore = useAccountsStore();
 const settingsStore = useSettingsStore();
 const { sorted, savePaths, dirty } = storeToRefs(tasks);
 const { accounts } = storeToRefs(accountsStore);
+// 「那份真默认值到手了没」由 store 自己回答（settings 是 Settings | null，ready 是它的派生状态），
+// 视图里不再自己拿 settings.task_defaults 去猜。
+const { ready: defaultsReady } = storeToRefs(settingsStore);
 
-// 新建任务的初值全部来自后端 task_defaults（前端不写第二份默认值）：设置没载入完，
-// 「＋ 新建任务」按钮 disabled 并显示"正在读取默认值…"，于是 TaskForm 只在有一份真默认值时实例化。
-const defaultsReady = computed(() => !!settingsStore.settings.task_defaults);
+// 只有「＋ 新建任务」依赖 task_defaults：新建没有来源数据，初值只能来自后端那一份（前端不写第二份）。
 // 拉取失败是另一种"没载入完"，而且它永远载入不完：loading 已经收起、task_defaults 永远缺席。
 // 此时再说"正在读取默认值…"就是承诺一件不会发生的事，所以用 store.error 换成可操作的失败态。
 const defaultsFailed = computed(() => !defaultsReady.value && !!settingsStore.error);
@@ -57,8 +58,9 @@ function toggleExpand(id: number) {
 }
 
 function startNew() {
-  // 门控口径统一为"有没有那份真默认值"：TaskForm 的 blank(defaults) 在 setup 里就会取值，
-  // 没拿到 task_defaults 时（不管是等待中还是已经读取失败）都不许实例化表单。
+  // 新建的门槛：必须有那份真默认值（TaskForm 的 blank(defaults) 要用它当表单初值），
+  // 没拿到时（等待中或已读取失败）都不许实例化新建表单。
+  // 编辑已有任务不走这道门——那一行自带全部字段，见下面 TaskForm 的注释。
   if (!defaultsReady.value) return;
   pendingPrefill.value = undefined;
   editingId.value = "new";
@@ -190,7 +192,8 @@ async function onDragEnd() {
 onMounted(() => {
   tasks.fetchTasks();
   accountsStore.fetchAccounts();
-  // 本视图自己拉一次设置：新建表单的初值全靠 task_defaults，不拉就永远停在"正在读取默认值…"。
+  // 本视图自己拉一次设置：只有「＋ 新建任务」的初值靠 task_defaults，不拉就一直停在"正在读取默认值…"。
+  // 编辑已有任务不等它（那一行的值就是初值），所以这里拉取失败也不会把列表里的行锁死。
   settingsStore.load();
 });
 </script>
@@ -247,8 +250,10 @@ onMounted(() => {
           @run="openRun(t)"
           @position="onPosition(t, $event)"
         />
+        <!-- 编辑已有任务不依赖 task_defaults：表单每个字段都由那一行自己提供，设置没读到也照样要能编辑，
+             否则点行只是"箭头动了一下"的死点击。新建（下面 editingId === 'new'）才需要那份真默认值。 -->
         <TaskForm
-          v-if="editingId === t.id && defaultsReady"
+          v-if="editingId === t.id"
           :task="t"
           :accounts="accounts"
           @save="onSave"

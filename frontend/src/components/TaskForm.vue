@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref, watch, computed } from "vue";
+import { reactive, ref, watch, computed, toRaw } from "vue";
 import { ElMessage } from "element-plus";
 import FileSelector from "./FileSelector.vue";
 import SearchSuggest from "./SearchSuggest.vue";
@@ -16,11 +16,14 @@ const DEFAULT_SUBDIR_REGEX = ".*"; // 与后端 spec 约定同值：首屏开关
 const SUBDIR_FILTER_HINT = "填了起始集、结束集或画质时，分享里的文件夹会进去逐个文件比对；不填则整个文件夹原样搬走";
 
 const settingsStore = useSettingsStore();
-const defaults = computed<TaskDefaults>(() => settingsStore.settings.task_defaults);
+// settings 是 Settings | null（GET /api/settings 没成功就是没数据），所以这里读出来可能是 undefined：
+// 只有「新建」需要它，编辑态的初值来自那一行自己（见 loadFrom）。
+const defaults = computed<TaskDefaults | undefined>(() => settingsStore.settings?.task_defaults);
 
 // 新建时的初值**全部来自后端的 task_defaults**，前端不写第二份默认值。
-// 为此：TaskForm 的 settings 未载入时不允许打开新建表单（见 TasksView 的按钮门控），
-// 于是 `blank()` 永远拿到一份真值，不需要 DEFAULTS_FALLBACK 这种手抄兜底。
+// 为此：settings 没到位时不允许打开新建表单（门槛在 TasksView 的「＋ 新建任务」按钮上，
+// 编辑已有任务不受它影响），于是 `blank()` 只会在拿到一份真默认值时被调用，
+// 不需要 DEFAULTS_FALLBACK 这种手抄兜底。
 function blank(d: TaskDefaults): TaskPayload & { startfid_name: string } {
   return {
     taskname: "",
@@ -61,7 +64,10 @@ const emit = defineEmits<{
   (e: "dirty", v: boolean): void;
 }>();
 
-const draft = reactive(blank(defaults.value));
+// draft 的初值全部由下面的 loadFrom 填（那条 watch 带 immediate，setup 阶段就会同步跑一次，渲染前必然是满的）。
+// 刻意不在 setup 里 `blank(defaults.value)`：那会让"编辑已有任务"也依赖 settings 到位，
+// 设置没读到时点一行只会看到箭头动了一下、表单什么都不渲染的死点击。
+const draft = reactive({} as TaskPayload & { startfid_name: string });
 let original = "";
 
 // draft.quality 以逗号分隔存储；UI 用数组双向映射
@@ -93,9 +99,12 @@ const prefillPinnedPath = ref(false);
 watch(
   () => draft.taskname,
   (name) => {
-    // 三条前置 return：编辑态永不改 / 用户手改过不抢 / prefill 带来的原路径不盖（第三条是刻意例外，见上）。
+    // 四条前置 return：编辑态永不改 / 用户手改过不抢 / prefill 带来的原路径不盖（第三条是刻意例外，见上）
+    // / 那份真默认值没到手就不猜保存根目录（新建的门槛在 TasksView，正常情况下不会走到最后一条）。
     if (props.task || pathTouched.value || prefillPinnedPath.value) return;
-    draft.savepath = name.trim() ? `${defaults.value.savepath_root}/${name.trim()}` : defaults.value.savepath_root;
+    const root = defaults.value?.savepath_root;
+    if (root === undefined) return;
+    draft.savepath = name.trim() ? `${root}/${name.trim()}` : root;
   },
 );
 
@@ -152,30 +161,42 @@ const CAPTURE_OPTIONS: { value: "all" | "tv" | "custom"; label: string }[] = [
   { value: "custom", label: "自定义正则" },
 ];
 
-/** 只抓剧集那一档要显示的说明与展开后的真实正则（正则文本只从 /api/settings/magic/expand 取，前端一份都不抄）。 */
-const captureHint = computed(() => {
-  if (captureMode.value === "tv") {
-    const head = "只挑剧集文件，跳过特典、字幕、说明之类别的内容";
-    if (tvExpandError.value) return `${head} —— 展开后的正则读取失败：${tvExpandError.value}`;
-    if (tvExpand.value === null) return `${head} —— 正在读取展开后的正则…`;
-    if (!tvExpand.value.ok) return `${head} —— 当前设置的 magic_regex 里没有 $TV 这一项，后端没有可展开的正则`;
-    return `${head} —— 展开后的正则：${tvExpand.value.pattern}`;
-  }
-  if (captureMode.value === "custom")
-    return `当前正则：${draft.pattern} ——「自定义正则」不是第二个输入框，选中它只展开高级设置并把光标落到 pattern 那条，首屏与高级区共用同一个值`;
+/** 只抓剧集那一档的说明（正则原文只从 /api/settings/magic/expand 取，前端一份都不抄）。文案一律用户视角：只说这一档会转什么、拿没拿到。 */
+const captureHead = computed(() => {
+  if (captureMode.value === "tv") return "只挑剧集文件，跳过特典、字幕、说明之类别的内容";
+  if (captureMode.value === "custom") return `当前正则：${draft.pattern}`;
   return "全部文件：分享目录里有什么就转什么，只受下面的集数与画质过滤约束";
 });
 
-const pathHint = computed(() =>
-  props.task
-    ? "编辑已有任务时，路径不会跟着剧名自动改动。"
-    : `新建时路径跟着剧名走（${defaults.value.savepath_root}/{剧名}）；手动改过一次、或用「选择」定过一次之后就不再跟。`,
+/** 上面那句话的补充：展开式的读取进度与失败原因原文；正则本身另用等宽 code 块显示，不混进句子。 */
+const captureNote = computed(() => {
+  // 「自定义正则」这一档只讲用户接下来能做什么，不解释首屏和高级区是不是同一个状态源。
+  if (captureMode.value === "custom") return "选中「自定义正则」会展开下方高级设置，直接改那条匹配正则即可。";
+  if (captureMode.value !== "tv") return "";
+  // 拿不到正则时不许显示成空白：读取失败就把端点回传的原因原样贴出来。
+  if (tvExpandError.value) return `展开后的正则读取失败：${tvExpandError.value}`;
+  if (tvExpand.value === null) return "正在读取展开后的正则…";
+  if (!tvExpand.value.ok) return "当前「魔法匹配」里还没有 $TV 这一项，没有可展开的正则。";
+  return "命中下面这条正则的文件才会被转存：";
+});
+
+/** $TV 展开后的真实正则原文（等宽显示用）：只在「只抓剧集」这一档出现，切走就不念旧值。 */
+const expandedPattern = computed(() =>
+  captureMode.value === "tv" && tvExpand.value?.ok ? tvExpand.value.pattern : "",
 );
+
+const pathHint = computed(() => {
+  if (props.task) return "编辑已有任务时，路径不会跟着剧名自动改动。";
+  const root = defaults.value?.savepath_root;
+  const tail = "手动改过一次、或用「选择」定过一次之后就不再跟。";
+  // 新建表单的门槛在 TasksView，正常情况下这里一定拿得到保存根目录；真没到手就说人话，不渲染出 undefined。
+  return root === undefined ? `新建时路径跟着剧名走；${tail}` : `新建时路径跟着剧名走（${root}/{剧名}）；${tail}`;
+});
 
 const startHint = computed(() =>
   startFidLabel.value
     ? `当前从《${startFidLabel.value}》这部文件之后开始，集数过滤在它之后的范围内仍然生效`
-    : "不选文件就是从最开头开始；集数填 0 = 不限（起点默认仍是第一集，不会偷偷改成 1）。",
+    : "不选文件就从最开头开始；集数填 0 表示不限。",
 );
 
 /** 「停用」在编辑态才有意义；这句是既有改形态提示，只在停用 + 非定时追更时说得出。 */
@@ -226,7 +247,16 @@ watch(customCron, (c) => {
 function loadFrom(task: Task | null) {
   pathTouched.value = false; // 每次载入重来：新建表单要能跟随剧名
   prefillPinnedPath.value = false;
-  Object.assign(draft, blank(defaults.value), task ? { ...task, startfid_name: "" } : {});
+  if (task) {
+    // 编辑态以服务端那一行为基底：Task 带齐 TaskPayload 的每个键，唯一要补的是 UI 专用的 startfid_name。
+    // 安全的原因：pattern / quality / run_mode / auto_download / update_subdir / savepath 这些恰好是
+    // task_defaults 会盖住的键，编辑本来就该以那一行自己的值为准（服务端权威），前端没有任何可猜的空间；
+    // 所以 settings 没读到（task_defaults 缺席）也照样能渲染编辑表单，不再是个死点击。
+    Object.assign(draft, toRaw(task), { startfid_name: "" });
+  } else if (defaults.value) {
+    // 新建态的初值只能来自那份真默认值；门槛在 TasksView 的「＋ 新建任务」上，这里只做兜底不实例化。
+    Object.assign(draft, blank(defaults.value));
+  }
   // prefill 在 blank() 之后覆盖；带了 update_subdir 键时以 prefill 为准，不再按 subdir_filter 默认改写
   // （Task 4 的「复制为新任务」靠这条把原任务的递归正则原样带出来）。
   if (!task && props.prefill) {
@@ -420,7 +450,8 @@ const hasId = computed(() => props.task?.id ?? null);
       <div class="f f--wide">
         <label class="field-label">保存路径</label>
         <div class="row">
-          <el-input v-model="draft.savepath" :placeholder="defaults.savepath_root" @input="pathTouched = true" />
+          <!-- 占位符只是提示文字：task_defaults 没到手时留空，不前端猜一个保存根目录给用户看。 -->
+          <el-input v-model="draft.savepath" :placeholder="defaults?.savepath_root" @input="pathTouched = true" />
           <el-button :icon="'📁'" @click="openSelector('savepath')"> 选择 </el-button>
         </div>
         <!-- pathTouched 只在这两处置真：这条输入框的 @input、以及选择器回传 payload.path；程序代填不置真。 -->
@@ -433,7 +464,10 @@ const hasId = computed(() => props.task?.id ?? null);
           <el-radio-button v-for="o in CAPTURE_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</el-radio-button>
         </el-radio-group>
         <!-- 三选一只是 draft.pattern 的视图，不是第二个状态源；这里也永不出现第二个正则输入框。 -->
-        <small class="hint">{{ captureHint }}</small>
+        <small class="hint">
+          {{ captureHead }}<template v-if="captureNote"> —— {{ captureNote }}</template>
+          <code v-if="expandedPattern">{{ expandedPattern }}</code>
+        </small>
       </div>
 
       <div class="f">
@@ -722,6 +756,13 @@ small.hint {
   border-radius: 4px;
   padding: 0 4px;
   font-family: monospace;
+}
+/* 抓取范围那档拿到的 $TV 展开式：整行等宽原文显示，读得完；高级区那条 <code>.*</code> 仍按行内排。 */
+small.hint > code {
+  display: block;
+  margin-top: 4px;
+  padding: 2px 6px;
+  word-break: break-all;
 }
 .weeks {
   display: flex;
