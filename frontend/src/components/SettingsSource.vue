@@ -29,7 +29,8 @@ function syncFrom(v: SearchSource) {
 }
 
 watch(
-  () => store.settings.source,
+  // settings 是 Settings | null：syncFrom 收 undefined 也照样填空表单，值一到就同步。
+  () => store.settings?.source,
   (v) => syncFrom(v ?? {}),
   { immediate: true, deep: true },
 );

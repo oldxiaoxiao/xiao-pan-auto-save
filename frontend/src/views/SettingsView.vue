@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import { storeToRefs } from "pinia";
 import { useSettingsStore } from "../stores/settings";
+import type { Settings } from "../api/types";
 import SettingsCron from "../components/settings/SettingsCron.vue";
 import SettingsNotify from "../components/SettingsNotify.vue";
 import SettingsMagic from "../components/SettingsMagic.vue";
@@ -12,8 +13,13 @@ import SettingsApi from "../components/SettingsApi.vue";
 import SettingsDrivers from "../components/SettingsDrivers.vue";
 
 const store = useSettingsStore();
-const { settings, loading, error } = storeToRefs(store);
+const { loading, error } = storeToRefs(store);
 const active = ref("cron");
+
+// 这里刻意保留一份**显式**的空值边界：本视图和它下挂的各个面板都建立在"GET /api/settings 已经成功"
+// 的假设上（每个面板自己 watch 服务端值，值一到就同步），所以 null 只覆盖"还没拉到"那一小段窗口：
+// 读出来是 undefined，开关显示为关、输入框留空，不冒充服务端说过的值，也不必每个面板各写一遍判空。
+const view = computed<Partial<Settings>>(() => store.settings ?? {});
 
 const groups = [
   { key: "cron", label: "定时规则", comp: SettingsCron },
@@ -43,13 +49,13 @@ onMounted(() => store.load());
       <div class="globals">
         <label>运行通知</label>
         <el-switch
-          :model-value="settings.notify_enabled"
+          :model-value="view.notify_enabled === true"
           size="small"
           @change="(v: string | number | boolean) => toggle('notify_enabled', !!v)"
         />
         <label>自动签到</label>
         <el-switch
-          :model-value="settings.sign_enabled"
+          :model-value="view.sign_enabled === true"
           size="small"
           @change="(v: string | number | boolean) => toggle('sign_enabled', !!v)"
         />

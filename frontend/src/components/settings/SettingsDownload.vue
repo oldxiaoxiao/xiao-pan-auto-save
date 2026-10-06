@@ -19,7 +19,8 @@ const draft = reactive<DownloadSettings>({
 let loaded = "";
 
 watch(
-  () => settings.value.download,
+  // settings 是 Settings | null：下面 `if (!v)` 就是为"还没拉到"这一窗准备的，值一到自动填。
+  () => settings.value?.download,
   (v) => {
     if (!v || loaded === JSON.stringify(v)) return;
     Object.assign(draft, { ...v, aria2: { ...v.aria2 }, emby: { ...v.emby } });

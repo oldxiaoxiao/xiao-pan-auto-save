@@ -11,7 +11,8 @@ const cfg = ref<PushConfig>({});
 const saving = ref(false);
 
 watch(
-  () => store.settings.push_config,
+  // settings 是 Settings | null：这里判空只是"还没拉到"的窗口，回调里 `?? {}` 已经容得下 undefined。
+  () => store.settings?.push_config,
   (v) => {
     cfg.value = JSON.parse(JSON.stringify(v ?? {}));
   },

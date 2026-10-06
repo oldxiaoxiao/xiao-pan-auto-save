@@ -9,7 +9,8 @@ const err = ref("");
 const saving = ref(false);
 
 watch(
-  () => store.settings.magic_regex,
+  // settings 是 Settings | null：回调里 `?? {}` 本来就容得下 undefined，这里只是把空值显式写进类型。
+  () => store.settings?.magic_regex,
   (v) => {
     text.value = JSON.stringify(v ?? {}, null, 2);
   },

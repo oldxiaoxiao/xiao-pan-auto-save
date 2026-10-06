@@ -1,12 +1,20 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { useSettingsStore } from "../../stores/settings";
 import { CRON_PRESETS } from "../../constants";
 import { formatTime } from "../../utils";
 
 const store = useSettingsStore();
-const crontab = ref(store.settings.crontab);
+// settings 是 Settings | null：这里读到的空串只代表"还没拉到"，不前端猜一份 crontab 默认值；
+// 值一落地由下面这条 watch 补进输入框（面板其他几块也是这个口径：服务端值 + 本地草稿）。
+const crontab = ref(store.settings?.crontab ?? "");
+watch(
+  () => store.settings?.crontab,
+  (v) => {
+    if (v !== undefined) crontab.value = v;
+  },
+);
 
 const nextRunText = computed(() =>
   store.scheduler.next_run ? formatTime(store.scheduler.next_run) : "（调度器未就绪）",
