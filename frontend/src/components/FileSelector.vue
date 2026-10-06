@@ -183,10 +183,22 @@ function pickStartFid(item: FsItem) {
   emit("confirm", { fid: item.fid, name: item.name });
 }
 
+/** 行内「起点」：把目录本身设为起始点（engine 遍历到这个 fid 就截断，整目录连同更新的都会转）。 */
+function pickDirAsStart(item: FsItem) {
+  pickStartFid(item);
+  close();
+}
+
 function onRowClick(item: FsItem) {
   if (props.mode === "startfid") {
-    pickStartFid(item);
-    close();
+    // 目录要先钻进去：分享按季/按季分目录是常态，而原来点任何一行都直接选中关窗，
+    // 结果起点只能落在分享最外层——里面那句「点击 📁 目录进入下一层」当场就是谎。
+    // 整目录当起点这个真需求没被抹掉，挪给行内「起点」那一条。
+    if (item.is_dir) enterPreviewDir(item);
+    else {
+      pickStartFid(item);
+      close();
+    }
   } else if (props.mode === "savepath") {
     enter(item);
   } else if (props.mode === "preview") {
@@ -249,6 +261,9 @@ watch(
         <el-table-column label="原文件名">
           <template #default="{ row }">
             <span class="fn">{{ row.is_dir ? "📁" : "📄" }} {{ row.name }}</span>
+            <a v-if="mode === 'startfid' && row.is_dir" class="dir-pick text-muted" @click.stop="pickDirAsStart(row)">
+              起点
+            </a>
           </template>
         </el-table-column>
         <el-table-column label="处理后">
@@ -329,7 +344,9 @@ watch(
     <template #footer>
       <el-button @click="close"> 关闭 </el-button>
       <el-button v-if="mode === 'savepath'" type="primary" @click="confirmSavepath"> 选择此目录 </el-button>
-      <p v-if="mode === 'startfid'" class="hint text-muted">点击上方文件设为「起始文件」</p>
+      <p v-if="mode === 'startfid'" class="hint text-muted">
+        点击 📄 设为「起始文件」；点 📁 会进入该目录，要把整个目录当起点就点行内的「起点」
+      </p>
     </template>
   </el-dialog>
 </template>
@@ -358,6 +375,15 @@ watch(
   cursor: pointer;
 }
 .dir-link.is-dir:hover {
+  color: var(--primary);
+}
+/* 起点选择态里目录行尾的那条「起点」：整目录当起点走它，点行本身是钻进目录。 */
+.dir-pick {
+  margin-left: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.dir-pick:hover {
   color: var(--primary);
 }
 .name-re {
