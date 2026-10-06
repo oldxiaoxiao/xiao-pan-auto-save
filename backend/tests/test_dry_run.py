@@ -328,3 +328,31 @@ def test_dry_run_endpoint_reports_network_honestly(monkeypatch):
         assert data["message"] == "网盘连接超时", f"网络原因被改写：{data['message']}"
     finally:
         _drop_rows(account_id=acc_id)
+
+
+# ---------- 改名撞名计数（engine.py:231-232 的 else 分支，删掉这两行曾经也全绿） ----------
+
+
+def test_renamed_name_colliding_with_existing_counts_and_is_not_planned(monkeypatch):
+    """原名不撞、改名后又撞目标已有文件：必须计 planned_existing 且不进计划（跳过就不该算新增）。
+
+    拒绝 vacuous 通过的两面证据：撞名的 01 被计 1 且不在计划集；没撞名的 02/03 改名后
+    真进了计划（final_name 是改名形态）——分支两侧都被钉住，删计数行或改坏 is_exists 都会红。
+    """
+
+    async def renamed_there(self, path):
+        if path.endswith("/剧"):
+            # 目标里已有 01 改名后的名字：pattern ^0(\d)\. → 9\1. 会把 01.4K.SDR.mp4 改成 91.4K.SDR.mp4
+            return [FsItem(fid="t91", name="91.4K.SDR.mp4")]
+        return []
+
+    monkeypatch.setattr(PlanDriver, "list_dir", renamed_there)
+    planned = _plan(pattern=r"^0(\d)\.", replace=r"9\1.")
+    assert planned.planned_existing == 1, f"改名撞名没走计数分支：{planned.planned_existing}"
+    names = {f.share_name for f in planned.files}
+    assert "01.4K.SDR.mp4" not in names, f"撞名被跳过的项不该再算新增：{names}"
+    assert {"02.4K.SDR.mp4", "03.4K.SDR.mp4"} <= names, f"改名未撞的项没进计划：{names}"
+    # 计划集恰好是这两项、final_name 是改名形态：钉死「计数的跳过、计划的才转」两侧语义
+    assert {(f.share_name, f.final_name) for f in planned.files} == {
+        ("02.4K.SDR.mp4", "92.4K.SDR.mp4"), ("03.4K.SDR.mp4", "93.4K.SDR.mp4")
+    }
