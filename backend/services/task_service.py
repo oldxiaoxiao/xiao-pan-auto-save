@@ -407,6 +407,16 @@ def _settle_once(task, result, counts: DownloadCounts, tlog) -> None:
                         f"《{row.taskname}》三次重试仍未成功（{reason}），已停止自动重试；"
                         "点该行「▶ 运行」可重新开始"
                     )
+                elif enddate_passed(row):
+                    # 过期行只记账不排格：once_next_driver 见过期就判 halted，排了也没人跑，
+                    # 留下一格 `next_retry_at` 就是本特性刻意堵死的那种矛盾态。判定出处仍是这
+                    # 一个单谓词，不复制 once_next_driver 的整条链。
+                    row.next_retry_at = None
+                    action = "warn"
+                    msg = (
+                        f"《{row.taskname}》本次未成功（{reason}），已过截止日期，不再排重试"
+                        f"（{row.retry_attempts}/{ONCE_RETRY_LIMIT}）；点该行「▶ 运行」仍可手动跑一次"
+                    )
                 else:
                     row.next_retry_at = now + timedelta(minutes=ONCE_RETRY_DELAY_MINUTES)
                     action = "warn"

@@ -8,7 +8,9 @@ from datetime import datetime, timedelta
 import pytest
 
 from backend import main
+from backend.api import routes_tasks
 from backend.core.engine import SavedFile, TaskRunResult
+from backend.core.logstream import hub
 from backend.core.scheduler import enddate_passed
 from backend.database import session_scope
 from backend.main import app, scheduler
@@ -20,7 +22,7 @@ from backend.services.task_service import (
     once_next_driver,
     scheduled_should_run,
 )
-from backend.tests.test_task_run_mode import DownloadOkDriver, _drop_account, _seed_account
+from backend.tests.test_task_run_mode import DownloadOkDriver, _drop_account, _seed_account, _spy_logs
 
 
 def _t(**kw) -> Task:
@@ -362,8 +364,12 @@ def test_expired_once_row_says_past_deadline_not_completed():
     assert not ok and why == "已完成或已停用"
 
 
-def _run_once(monkeypatch, status: str, *, download_lines=None, auto_download=False, attempts=0):
-    """跑一次带指定结局的运行，返回 (id, 落库后的行)。"""
+def _run_once(monkeypatch, status: str, *, download_lines=None, auto_download=False, attempts=0, enddate=""):
+    """跑一次带指定结局的运行，返回 (id, 落库后的行)。
+
+    收尾必须走 `_delete`：真失败会经 `_resync_schedule` 注册 5 分钟后的 `xiao_pan_retry_{id}`
+    到点作业，只删行不撤作业等于把它留给别人（`_delete` docstring 立的标准）。
+    """
     acc_id = _seed_account()
     monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
 
@@ -381,9 +387,12 @@ def _run_once(monkeypatch, status: str, *, download_lines=None, auto_download=Fa
 
         monkeypatch.setattr(download_service, "download_task_files", fake_download)
 
-    tid = _persist(account_id=acc_id, auto_download=auto_download, retry_attempts=attempts)
-    asyncio.run(ts.run_tasks(task_ids=[tid], trigger="manual"))
-    return tid, _reload(tid)
+    tid = _persist(account_id=acc_id, auto_download=auto_download, retry_attempts=attempts, enddate=enddate)
+    try:
+        asyncio.run(ts.run_tasks(task_ids=[tid], trigger="manual"))
+        return tid, _reload(tid)
+    finally:
+        _delete(tid)
 
 
 def test_no_release_does_not_consume_budget(monkeypatch):
@@ -417,28 +426,91 @@ def test_success_settles_and_clears_everything(monkeypatch):
 
 
 def test_manual_run_resets_the_budget(client, monkeypatch):
-    """点行内「▶ 运行」= 重新给三次预算，并撤掉已排上的那一格，这是"手动再次开启"的唯一入口。"""
+    """点行内「▶ 运行」= 重新给三次预算，并撤掉已排上的那一格，这是"手动再次开启"的唯一入口。
+
+    桩必须打在 `routes_tasks.run_tasks` 上：路由顶部是绑定式导入
+    （`from ..services.task_service import ... run_tasks`），改 `ts.run_tasks` 拦不住它，
+    真实引擎会跑完整条链并走「拿到手」分支把行停用 —— 用例照样绿，却一次都没测到归零。
+    """
     acc_id = _seed_account()
-    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
     tid = _persist(retry_attempts=1, next_retry_at=datetime.now() + timedelta(minutes=5), account_id=acc_id)
     main.apply_task_schedule(_reload(tid))  # 先让到点作业真实存在
     assert scheduler.scheduler.get_job(f"xiao_pan_retry_{tid}") is not None
 
-    async def fake_run(task_ids=None, trigger="manual"):
-        return {"run_id": "x", "total": 1, "updated": 0, "skipped": 0, "failed": 0,
-                "disabled_skipped": 0, "driven": 1, "notify_lines": 0}
+    calls: list[tuple[list[int] | None, str]] = []
 
-    monkeypatch.setattr(ts, "run_tasks", fake_run)
+    async def fake_run(task_ids=None, trigger="manual"):
+        calls.append((task_ids, trigger))
+        hub.publish("done", "桩：这一轮不进引擎")  # SSE 流靠这条收尾，否则响应永远不关
+        return {"run_id": "stub", "total": 1, "updated": 0, "skipped": 0, "failed": 0,
+                "disabled_skipped": 0, "driven": 0, "notify_lines": 0}
+
+    monkeypatch.setattr(routes_tasks, "run_tasks", fake_run)
     try:
         resp = client.post(f"/api/tasks/{tid}/run")  # TestClient 会把 SSE 响应体读完，后台任务自然跑完
         assert resp.status_code == 200
+        assert calls == [([tid], "manual")]  # 桩真的拦住了路由，引擎一次都没进
         row = _reload(tid)
         assert row.retry_attempts == 0 and row.next_retry_at is None
+        # 「▶ 运行」是归零预算，不是替用户收口成已完成：停不停用只由结局判定说了算
+        assert row.disabled is False
         # 那一格必须一起撤掉，否则用户看到的是"点一下运行，五分钟后又莫名跑了一次"
         assert scheduler.scheduler.get_job(f"xiao_pan_retry_{tid}") is None
     finally:
         _delete(tid)
         _drop_account(acc_id)
+
+
+def test_reset_once_budget_only_touches_once_rows():
+    """直打 `reset_once_budget` 的单元哨兵：归零两列 + 撤掉已排的作业 + 非 once 行一根手指都不碰。
+
+    不经 HTTP，与上面那条路由用例各钉各的：删掉实现里「归零」「撤格」「只对 once 生效」
+    任何一件，这里都有一条断言变红。
+    """
+    once_tid = _persist(taskname="一次性归零", retry_attempts=2, next_retry_at=datetime.now() + timedelta(minutes=5))
+    follow_tid = _persist(taskname="追更不该动", run_mode="follow", retry_attempts=2,
+                          next_retry_at=datetime.now() + timedelta(minutes=5))
+    manual_tid = _persist(taskname="仅手动不该动", run_mode="manual", retry_attempts=2,
+                          next_retry_at=datetime.now() + timedelta(minutes=5))
+    main.apply_task_schedule(_reload(once_tid))
+    try:
+        assert scheduler.scheduler.get_job(f"xiao_pan_retry_{once_tid}") is not None
+        ts.reset_once_budget(once_tid)
+        row = _reload(once_tid)
+        assert row.retry_attempts == 0 and row.next_retry_at is None
+        assert row.disabled is False  # 归零 ≠ 悄悄把行送进「已完成」终态
+        assert scheduler.scheduler.get_job(f"xiao_pan_retry_{once_tid}") is None
+        for tid in (follow_tid, manual_tid):
+            before = _reload(tid)
+            snap = (before.retry_attempts, before.next_retry_at, before.disabled)
+            ts.reset_once_budget(tid)
+            after = _reload(tid)
+            assert (after.retry_attempts, after.next_retry_at, after.disabled) == snap
+    finally:
+        _delete(once_tid, follow_tid, manual_tid)
+
+
+def test_expired_row_counts_the_failure_but_gets_no_retry_slot(monkeypatch):
+    """已过截止日期的行真失败：只 +1 计数、不排格。
+
+    排了也没人跑（`once_next_driver` 见过期就判 halted），库里只会留下一格自相矛盾的
+    `next_retry_at` —— 正是本特性在别处刻意堵死的那个矛盾态。日志文案同理，不许说「5 分钟后重试」。
+    """
+    logs = _spy_logs(monkeypatch)
+    tid, row = _run_once(monkeypatch, "failed", enddate="2020-01-01")
+    assert row.retry_attempts == 1 and row.disabled is False
+    assert row.next_retry_at is None
+    mine = [msg for task_id, _, msg in logs if task_id == tid]
+    assert not [m for m in mine if "分钟后重试" in m], mine
+
+
+def test_third_failure_logs_the_handoff_hint(monkeypatch):
+    """停摆必须把下一步动作直接告诉用户（design 4.2），并且铁律不写 `disabled`。"""
+    logs = _spy_logs(monkeypatch)
+    tid, row = _run_once(monkeypatch, "failed", attempts=2)
+    mine = [msg for task_id, _, msg in logs if task_id == tid]
+    assert any("三次重试仍未成功" in m and "点该行「▶ 运行」可重新开始" in m for m in mine), mine
+    assert row.disabled is False
 
 
 def test_settle_once_write_failure_is_swallowed(monkeypatch):
