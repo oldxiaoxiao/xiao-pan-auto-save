@@ -53,18 +53,40 @@ const filtered = computed(() => {
 const canDrag = computed(() => !keyword.value.trim() && !pathFilter.value);
 const hasUnsaved = computed(() => dirty.value.size > 0 || newDirty.value);
 
+/**
+ * 离开某个已展开的编辑行：那一行的 TaskForm 会卸载、草稿随即用服务端值重建，
+ * store 里的脏标记若留着就是谎报（顶部「有未保存的修改」小圆点一直亮着，其实什么都没剩）。
+ * 只要编辑焦点从该行挪走就显式清掉——这也是下面那道脏守卫"标记可信"的前提。
+ */
+function leaveRowEditor() {
+  if (typeof editingId.value === "number") tasks.markDirty(editingId.value, false);
+}
+
 function toggleExpand(id: number) {
-  editingId.value = editingId.value === id ? null : id;
+  const current = editingId.value;
+  // 展开另一行 = 当前行的草稿没了。脏的时候不硬挪，先让用户保存或取消这一行。
+  if (typeof current === "number" && current !== id && dirty.value.has(current)) {
+    ElMessage.warning("该行有未保存的输入，请先保存或取消");
+    return;
+  }
+  leaveRowEditor();
+  editingId.value = current === id ? null : id;
 }
 
 /**
  * 打开/重建新建表单的三个入口（＋ 新建、剪贴板导入、复制为新任务）共用这道脏守卫。
- * 新建表单已经展开且用户有未保存输入时，任何入口都不动它：TaskForm 对 [task, prefill] 是 deep watch，
- * 一换 prefill 就整份重建草稿，刚打的字丢失。「取消」按钮就在表单上，先保存或取消再来。
+ * TaskForm 对 [task, prefill] 是 deep watch，一换初值就整份重建草稿：新建表单里刚打的字、
+ * 或某个展开行还没保存的输入，都会在这次点击里静默没了。所以只要有任何未保存草稿，
+ * 这些入口就只提示、不改状态——「取消」按钮就在表单上，先保存或取消再来。
+ * （行内「置顶/置底」各有一条同族守卫，见 onPosition。）
  */
 function newFormDirtyBlocked(): boolean {
   if (editingId.value === "new" && newDirty.value) {
     ElMessage.warning("新建表单有未保存的输入，请先保存或取消");
+    return true;
+  }
+  if (dirty.value.size > 0) {
+    ElMessage.warning("有任务行正在编辑且有未保存的输入，请先保存或取消该行");
     return true;
   }
   return false;
@@ -76,6 +98,7 @@ function startNew() {
   // 编辑已有任务不走这道门——那一行自带全部字段，见下面 TaskForm 的注释。
   if (!defaultsReady.value) return;
   if (newFormDirtyBlocked()) return;
+  leaveRowEditor();
   pendingPrefill.value = undefined;
   editingId.value = "new";
   newDirty.value = false;
@@ -88,6 +111,12 @@ function onNewClick() {
     return;
   }
   startNew();
+}
+
+/** 表单「取消」：卸载草稿的同时把该行的脏标记一起清掉，不然顶部小圆点会谎报"还有未保存的修改"。 */
+function onCancel() {
+  leaveRowEditor();
+  editingId.value = null;
 }
 
 async function onSave(payload: TaskPayload) {
@@ -147,6 +176,7 @@ async function importClipboard() {
       ElMessage.warning("剪贴板未找到夸克分享链接");
       return;
     }
+    leaveRowEditor();
     editingId.value = "new";
     newDirty.value = false;
     pendingPrefill.value = { shareurl: m[0] };
@@ -165,14 +195,10 @@ function startCopy(task: Task) {
     ElMessage.warning(defaultsFailed.value ? "默认值读取失败，请先点「＋ 新建任务」重试" : "正在读取默认值…");
     return;
   }
+  // 脏草稿守卫与 onPosition 同源，但口径已经并进 newFormDirtyBlocked：正在编辑**这一行**、
+  // 正在编辑别的行、还是新建表单打到一半，三种都挡——原来只挡第一种，另两种同样是
+  // 一换 prefill 就静默重建草稿、把用户刚打的字弄没。
   if (newFormDirtyBlocked()) return;
-  // 脏草稿守卫，与 onPosition 里那条注释同源：正在编辑该行且有未保存输入时连动作都不发起——
-  // 切走会把编辑焦点从这一行挪到新建表单，TaskForm 对 props.task 是 deep watch，
-  // 回来时 loadFrom 用服务端值重建草稿，用户刚打的字丢失。
-  if (editingId.value === task.id && dirty.value.has(task.id)) {
-    ElMessage.warning("该行正在编辑且有未保存的修改，请先保存再复制");
-    return;
-  }
   // 剥掉的两类字段：
   // - 服务端进程态（id / shareurl_ban / last_run_at / retry_attempts / next_retry_at / disabled）不属于新任务；
   // - startfid 必剥：它是**来源分享内**的 fid，新任务面对另一条分享时留着会静默截断转存范围（spec 4.3）。
@@ -185,6 +211,7 @@ function startCopy(task: Task) {
   // 这八个变量只被解构出来用于剥离，一个都不进 prefill；void 是向 lint 如实声明"故意不用"，不是遗漏。
   void [id, shareurl_ban, last_run_at, retry_attempts, next_retry_at, disabled, sort_order, startfid];
   pendingPrefill.value = { ...rest, startfid: "" };
+  leaveRowEditor();
   editingId.value = "new";
   newDirty.value = false;
 }
@@ -306,7 +333,7 @@ onMounted(() => {
           :task="t"
           :accounts="accounts"
           @save="onSave"
-          @cancel="editingId = null"
+          @cancel="onCancel"
           @remove="onRemove"
           @dirty="onDirty"
         />
@@ -319,7 +346,7 @@ onMounted(() => {
           :accounts="accounts"
           :prefill="pendingPrefill"
           @save="onSave"
-          @cancel="editingId = null"
+          @cancel="onCancel"
           @dirty="onDirty"
         />
       </div>
