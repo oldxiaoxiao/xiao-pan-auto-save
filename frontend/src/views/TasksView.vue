@@ -141,6 +141,34 @@ async function importClipboard() {
   }
 }
 
+// —— 复制为新任务：把来源行的业务字段灌进现成的 pendingPrefill 通道，走新建表单 ——
+function startCopy(task: Task) {
+  // 与「＋ 新建任务」同一道门（同一个 defaultsReady，不写第二份判空）：那份真默认值没到手时，
+  // 新建表单连初值都没有，复制入口同样要挡住。
+  if (!defaultsReady.value) return;
+  // 脏草稿守卫，与 onPosition 里那条注释同源：正在编辑该行且有未保存输入时连动作都不发起——
+  // 切走会把编辑焦点从这一行挪到新建表单，TaskForm 对 props.task 是 deep watch，
+  // 回来时 loadFrom 用服务端值重建草稿，用户刚打的字丢失。
+  if (editingId.value === task.id && dirty.value.has(task.id)) {
+    ElMessage.warning("该行正在编辑且有未保存的修改，请先保存再复制");
+    return;
+  }
+  // 剥掉的两类字段：
+  // - 服务端进程态（id / shareurl_ban / last_run_at / retry_attempts / next_retry_at / disabled）不属于新任务；
+  // - startfid 必剥：它是**来源分享内**的 fid，新任务面对另一条分享时留着会静默截断转存范围（spec 4.3）。
+  //   显式给 ""（而不是留 undefined）：prefill 是 Object.assign 覆盖 blank() 的，空串让"起点为空"这条
+  //   在数据里说得明明白白，不依赖"键缺席"这种隐式行为。
+  // - sort_order 不带 → 新建走后端现成的「新建置顶」（POST /api/tasks 一律 above_sort_order）。
+  // 剧名原样带出，不加「副本」后缀——叫什么由用户自己决定。
+  const { id, shareurl_ban, last_run_at, retry_attempts, next_retry_at, disabled, sort_order, startfid, ...rest } =
+    task;
+  // 这八个变量只被解构出来用于剥离，一个都不进 prefill；void 是向 lint 如实声明"故意不用"，不是遗漏。
+  void [id, shareurl_ban, last_run_at, retry_attempts, next_retry_at, disabled, sort_order, startfid];
+  pendingPrefill.value = { ...rest, startfid: "" };
+  editingId.value = "new";
+  newDirty.value = false;
+}
+
 // —— 显式置顶 / 置底（不受搜索、筛选禁用拖拽的影响）——
 async function onPosition(task: Task, where: "top" | "bottom") {
   // 正在编辑且该行有未保存输入：整个动作跳过（既不请求后端也不改 store），否则 setPosition 里的
@@ -249,6 +277,7 @@ onMounted(() => {
           @toggle="toggleExpand(t.id)"
           @run="openRun(t)"
           @position="onPosition(t, $event)"
+          @copy="startCopy(t)"
         />
         <!-- 编辑已有任务不依赖 task_defaults：表单每个字段都由那一行自己提供，设置没读到也照样要能编辑，
              否则点行只是"箭头动了一下"的死点击。新建（下面 editingId === 'new'）才需要那份真默认值。 -->

@@ -5,6 +5,7 @@ import FileSelector from "./FileSelector.vue";
 import SearchSuggest from "./SearchSuggest.vue";
 import { api } from "../api/client";
 import { useSettingsStore } from "../stores/settings";
+import { useTasksStore } from "../stores/tasks";
 import type { Account, DryRunResult, MagicExpand, Task, TaskDefaults, TaskPayload } from "../api/types";
 import { MAGIC_VARIABLES, QUALITY_OPTIONS, RUN_MODE_OPTIONS } from "../constants";
 import { WEEK_LABELS, formatSize } from "../utils";
@@ -16,6 +17,8 @@ const DEFAULT_SUBDIR_REGEX = ".*"; // 与后端 spec 约定同值：首屏开关
 const SUBDIR_FILTER_HINT = "填了起始集、结束集或画质时，分享里的文件夹会进去逐个文件比对；不填则整个文件夹原样搬走";
 
 const settingsStore = useSettingsStore();
+// 同路径判重只用现成的任务列表（store 已加载），不新增任何网络请求。
+const tasksStore = useTasksStore();
 // settings 是 Settings | null（GET /api/settings 没成功就是没数据），所以这里读出来可能是 undefined：
 // 只有「新建」需要它，编辑态的初值来自那一行自己（见 loadFrom）。
 const defaults = computed<TaskDefaults | undefined>(() => settingsStore.settings?.task_defaults);
@@ -197,6 +200,15 @@ const pathHint = computed(() => {
   // 新建表单的门槛在 TasksView，正常情况下这里一定拿得到保存根目录；真没到手就说人话，不渲染出 undefined。
   return root === undefined ? `新建时路径跟着剧名走；${tail}` : `新建时路径跟着剧名走（${root}/{剧名}）；${tail}`;
 });
+
+/** 同路径提示（spec 4.3 逐字文案的触发条件）：只有 prefill 带来过 savepath（「复制为新任务」）才判重——
+ *  普通新建的路径由剧名现拼，撞不撞由用户自己定；复制则是明确把"另一条任务的路径"带了进来，
+ *  同名文件会被引擎认成"已存在"而跳过，必须点名。比对对象是当前 draft.savepath（用户手改后跟着改），
+ *  数据源是内存里的 tasks store，不发请求。 */
+const duplicatePath = computed(
+  () =>
+    !!props.prefill?.savepath && tasksStore.tasks.some((t) => t.savepath === draft.savepath && t.id !== props.task?.id),
+);
 
 const startHint = computed(() =>
   startFidLabel.value
@@ -438,6 +450,11 @@ const hasId = computed(() => props.task?.id ?? null);
 
 <template>
   <div class="form">
+    <!-- 复制来的路径与某条已有任务重合时的如实提醒（spec 4.3 逐字）。文案包在无属性 span 里、外层 p 只留 v-if
+         一个属性：这是 prettier 与 vue 规则都稳定的最小排版，直排成一行会被记两条排版 warning。 -->
+    <p v-if="duplicatePath">
+      <span class="dup-path">这条任务和已有任务用了同一个保存路径，同名文件会被认成"已存在"而跳过</span>
+    </p>
     <div class="grid">
       <div class="f f--wide">
         <label class="field-label">任务名称 / 智能搜索</label>
@@ -699,6 +716,20 @@ const hasId = computed(() => props.task?.id ?? null);
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 14px;
+}
+/* 同路径提示条（复制为新任务时出现）：警示底色，逐字文案见 spec 4.3。 */
+.form > p {
+  margin: 0 0 10px;
+}
+.dup-path {
+  display: block;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid #d97706;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 13px;
 }
 .adv {
   margin-top: 6px;

@@ -8,10 +8,17 @@ const emit = defineEmits<{
   (e: "toggle"): void;
   (e: "run", id: number): void;
   (e: "position", where: "top" | "bottom"): void;
+  (e: "copy"): void;
 }>();
 
 function onPosition(where: "top" | "bottom") {
   emit("position", where);
+}
+
+/** 下拉总分发：置顶/置底照旧走 position，「复制为新任务」只把意图交给 TasksView（这里不发请求）。 */
+function onMore(cmd: "top" | "bottom" | "copy") {
+  if (cmd === "copy") emit("copy");
+  else onPosition(cmd);
 }
 
 const WEEK_CN = ["日", "一", "二", "三", "四", "五", "六"];
@@ -184,12 +191,17 @@ const isOnceDone = computed(() => props.task.run_mode === "once" && props.task.d
     </div>
     <div class="ops" @click.stop>
       <el-button size="small" text @click="emit('run', task.id)"> ▶ 运行 </el-button>
-      <el-dropdown trigger="click" @command="onPosition">
-        <el-button size="small" text title="排序"> ⋮ </el-button>
+      <el-dropdown trigger="click" @command="onMore">
+        <el-button size="small" text title="更多操作"> ⋮ </el-button>
         <template #dropdown>
           <el-dropdown-menu>
             <el-dropdown-item command="top">置顶</el-dropdown-item>
             <el-dropdown-item command="bottom">置底</el-dropdown-item>
+            <!-- 这行刻意写成「多行 + 内层无属性 span」：同样的文案直排成一行会被 vue 规则记 2 条 warning，
+                 本仓基线要求每文件 warning 不增；span 形态是 prettier 与 eslint 都稳定的最小写法。 -->
+            <el-dropdown-item command="copy">
+              <span>复制为新任务</span>
+            </el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
