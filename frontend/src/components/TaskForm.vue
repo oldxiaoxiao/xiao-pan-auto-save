@@ -108,17 +108,23 @@ watch(
   },
 );
 
-// 3) 抓取范围是 draft.pattern 的视图，不是第二个状态源；「自定义正则」只是展开高级区的动作项。
-const captureMode = computed<"all" | "tv" | "custom">({
-  get: () => (draft.pattern === "" ? "all" : draft.pattern === "$TV" ? "tv" : "custom"),
+// 3) 抓取范围是 draft.pattern 的视图，不是第二个状态源。互斥的单选钮只承载两档**真状态**
+//    （"" = 全部文件、"$TV" = 只抓剧集）；「自己写正则」是紧挨着它们的**动作项**而不是第三档，
+//    因为它不写值：把它放进 radio 组时，点下去 pattern 不变、派生视图立刻回弹到原档位，
+//    看起来就像控件坏了（上一轮交代的正是这条缺陷）。所以它从选择控件里挪出来，只做展开高级区 + 聚焦。
+const CAPTURE_CUSTOM = "custom"; // 哨兵：pattern 是别的自定义值时不匹配任何一档，radio 组如实显示为无选中
+const captureMode = computed<"all" | "tv" | typeof CAPTURE_CUSTOM>({
+  get: () => (draft.pattern === "" ? "all" : draft.pattern === "$TV" ? "tv" : CAPTURE_CUSTOM),
   set: (mode) => {
     if (mode === "all") draft.pattern = "";
     else if (mode === "tv") draft.pattern = "$TV";
-    else openAdvancedToPattern(); // 已经是自定义值：不改 pattern，只把用户带到能改它的地方
+    // 两档之外的值一律不改 pattern：自定义正则只能由高级区那条输入框改动，这里不为此再造状态位。
   },
 });
+/** 当前是既非 "" 也非 "$TV" 的自定义正则：两档都不该被"假装选中"，如实点名当前值来自高级设置那一条。 */
+const isCustomPattern = computed(() => captureMode.value === CAPTURE_CUSTOM);
 
-/** 高级区那条 pattern 输入框的句柄：「自定义正则」只负责展开高级区并把光标落上去。 */
+/** 高级区那条 pattern 输入框的句柄：「自己写正则」这个动作只负责展开高级区并把光标落上去。 */
 const patternInput = ref<{ focus?: () => void } | null>(null);
 function openAdvancedToPattern() {
   advancedOpen.value = ["adv"];
@@ -154,24 +160,23 @@ const subdirCustom = computed(() => draft.update_subdir !== "" && draft.update_s
 /** 起点合并：startfid 优先于集数（engine 遍历到该 fid 即 break，集数过滤在其之后仍生效）。 */
 const startFidLabel = computed(() => draft.startfid_name || draft.startfid);
 
-/** 抓取范围三选一的视图项；状态源仍然只有 draft.pattern 这一个。 */
-const CAPTURE_OPTIONS: { value: "all" | "tv" | "custom"; label: string }[] = [
+/** 抓取范围的两档真状态；「自己写正则」不在这份列表里——它不写值，只是进高级区的动作。 */
+const CAPTURE_OPTIONS: { value: "all" | "tv"; label: string }[] = [
   { value: "all", label: "全部文件" },
   { value: "tv", label: "只抓剧集" },
-  { value: "custom", label: "自定义正则" },
 ];
 
-/** 只抓剧集那一档的说明（正则原文只从 /api/settings/magic/expand 取，前端一份都不抄）。文案一律用户视角：只说这一档会转什么、拿没拿到。 */
+/** 两档各自的说明（正则原文只从 /api/settings/magic/expand 取，前端一份都不抄）。文案一律用户视角：只说这一档会转什么、拿没拿到。 */
 const captureHead = computed(() => {
   if (captureMode.value === "tv") return "只挑剧集文件，跳过特典、字幕、说明之类别的内容";
-  if (captureMode.value === "custom") return `当前正则：${draft.pattern}`;
+  if (isCustomPattern.value) return `按你自己写的正则挑选文件：${draft.pattern}`;
   return "全部文件：分享目录里有什么就转什么，只受下面的集数与画质过滤约束";
 });
 
-/** 上面那句话的补充：展开式的读取进度与失败原因原文；正则本身另用等宽 code 块显示，不混进句子。 */
+/** 上面那句话的补充：自定义值态说明去哪儿改；只抓剧集那档给展开式的读取进度与失败原因原文。正则本身另用等宽 code 块显示，不混进句子。 */
 const captureNote = computed(() => {
-  // 「自定义正则」这一档只讲用户接下来能做什么，不解释首屏和高级区是不是同一个状态源。
-  if (captureMode.value === "custom") return "选中「自定义正则」会展开下方高级设置，直接改那条匹配正则即可。";
+  if (isCustomPattern.value)
+    return "这个值不属于上面任何一档，所以两档都没有选中；要改动请点「自己写正则」，在高级设置里那条匹配正则中修改。";
   if (captureMode.value !== "tv") return "";
   // 拿不到正则时不许显示成空白：读取失败就把端点回传的原因原样贴出来。
   if (tvExpandError.value) return `展开后的正则读取失败：${tvExpandError.value}`;
@@ -460,10 +465,18 @@ const hasId = computed(() => props.task?.id ?? null);
 
       <div class="f f--wide">
         <label class="field-label">抓取范围</label>
-        <el-radio-group v-model="captureMode">
-          <el-radio-button v-for="o in CAPTURE_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</el-radio-button>
-        </el-radio-group>
-        <!-- 三选一只是 draft.pattern 的视图，不是第二个状态源；这里也永不出现第二个正则输入框。 -->
+        <div class="capture">
+          <el-radio-group v-model="captureMode">
+            <el-radio-button v-for="o in CAPTURE_OPTIONS" :key="o.value" :value="o.value">{{
+              o.label
+            }}</el-radio-button>
+          </el-radio-group>
+          <!-- 动作项而不是第三档：它不写 pattern，只把人带到能改它的地方，于是没有"点下去又弹回来"这回事。
+               与本页其它文字链接（如「或从某个文件开始」）同款；键盘用户走下面那条高级设置标题，路径本来就在。 -->
+          <span @click="openAdvancedToPattern">自己写正则（展开高级设置）</span>
+          <small v-if="isCustomPattern">当前是自定义正则，见高级设置</small>
+        </div>
+        <!-- 首屏与高级区永远共用 draft.pattern 这一个值，这里也永不出现第二个正则输入框。 -->
         <small class="hint">
           {{ captureHead }}<template v-if="captureNote"> —— {{ captureNote }}</template>
           <code v-if="expandedPattern">{{ expandedPattern }}</code>
@@ -756,6 +769,27 @@ small.hint {
   border-radius: 4px;
   padding: 0 4px;
   font-family: monospace;
+}
+/* 抓取范围那一行：两档互斥 + 旁边的动作项，装在一个自适应的横排里。 */
+.capture {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+/* 「自己写正则」是个动作而不是选项，长得像链接即可；样式走父级选择器，元素本身只留一个属性。 */
+.capture > span {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 13px;
+  color: var(--primary);
+  cursor: pointer;
+}
+/* 自定义值态的如实说明：两档都没被选中时点名当前值住在高级设置那一条里。 */
+.capture > small {
+  font-size: 12px;
+  color: #8b94a7;
 }
 /* 抓取范围那档拿到的 $TV 展开式：整行等宽原文显示，读得完；高级区那条 <code>.*</code> 仍按行内排。 */
 small.hint > code {
