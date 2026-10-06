@@ -87,13 +87,25 @@ function frequencyChip(schedule: string): string {
   return hasOwnSchedule(raw) ? `频率 ${raw}` : "继承全局";
 }
 
-// 徽标取值互斥、按此顺序第一个命中即用（spec 4.6）：过期排最前，它让其他三种都失去意义。
-const ONCE_RETRY_LIMIT_TEXT = 3; // 与后端 ONCE_RETRY_LIMIT 同值；前端拿不到常量，改了后端要同步这里
+// 徽标取值互斥、按此顺序第一个命中即用（spec 4.6 原清单，与后端 once_next_driver 同序）：
+// 已过截止 → 已完成 → 重试已用尽 → 重试中 N/3 → 一次性待执行。
+// 预算判据必须排在 next_retry_at 之前：矛盾态行（用尽 + 库里还挂着到点时间，只有手工改库或老库残留
+// 才会产生）若先看到点时间，就会显「重试中 3/3」并给出一个后端永远不会驱动的 ETA —— 后端刻意先查预算
+// 正是为了不给本该停摆的行复活一条命，界面跟着反着判就是谎报。
+const ONCE_RETRY_LIMIT_TEXT = 3; // 手工抄自 backend/services/task_service.py 的 ONCE_RETRY_LIMIT，不是自动派生；后端改值必须同步改这里
 
+/** 与后端 enddate_passed（`date.today() > enddate`）同一口径：enddate 当天整天有效，次日起才算过期。
+ *  只做纯日期比较，不看本地时分秒，免得界面比后端早一天/一秒判过期；空串或非法日期返回 false，
+ *  与后端 strptime 解析失败时"不挡路"一致。 */
 function enddatePassed(enddate: string): boolean {
-  if (!enddate) return false;
-  const d = new Date(`${enddate}T23:59:59`);
-  return !Number.isNaN(d.getTime()) && d.getTime() < Date.now();
+  const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(enddate || "");
+  if (!m) return false;
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false; // 后端 strptime 同样拒这种值，这里当作未过期
+  const now = new Date();
+  const today = now.getFullYear() * 10000 + (now.getMonth() + 1) * 100 + now.getDate();
+  return today > Number(m[1]) * 10000 + month * 100 + day;
 }
 
 const chips = computed(() => {
@@ -104,14 +116,14 @@ const chips = computed(() => {
   if (t.run_mode === "once") {
     if (enddatePassed(t.enddate)) list.push({ key: "o", text: "已过截止" });
     else if (t.disabled) list.push({ key: "o", text: "已完成", success: true });
+    else if (t.retry_attempts >= ONCE_RETRY_LIMIT_TEXT)
+      list.push({ key: "o", text: "重试已用尽", title: "点 ▶ 运行重新开启" });
     else if (t.next_retry_at)
       list.push({
         key: "o",
         text: `重试中 ${t.retry_attempts}/${ONCE_RETRY_LIMIT_TEXT}`,
         title: `下次重试：${formatTime(t.next_retry_at)}`,
       });
-    else if (t.retry_attempts >= ONCE_RETRY_LIMIT_TEXT)
-      list.push({ key: "o", text: "重试已用尽", title: "点 ▶ 运行重新开启" });
     else list.push({ key: "o", text: "一次性待执行", primary: true });
   }
   if (t.run_mode === "follow" && t.schedule) {
