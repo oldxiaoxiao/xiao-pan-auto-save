@@ -94,9 +94,9 @@ function frequencyChip(schedule: string): string {
 // 正是为了不给本该停摆的行复活一条命，界面跟着反着判就是谎报。
 const ONCE_RETRY_LIMIT_TEXT = 3; // 手工抄自 backend/services/task_service.py 的 ONCE_RETRY_LIMIT，不是自动派生；后端改值必须同步改这里
 
-/** 与后端 enddate_passed（`date.today() > enddate`）同一口径：enddate 当天整天有效，次日起才算过期。
- *  只做纯日期比较，不看本地时分秒，免得界面比后端早一天/一秒判过期；空串或非法日期返回 false，
- *  与后端 strptime 解析失败时"不挡路"一致。 */
+/** 与后端 enddate_passed（`date.today() > enddate`）同一口径：enddate 当天整天有效、次日起才算过期，
+ *  不再是 `{enddate}T23:59:59` 那种"当天最后一秒就判过期"的写法。只做纯日期比较（本地日历日），
+ *  空串或非法日期返回 false —— 与后端 strptime 解析失败时"不挡路"一致。 */
 function enddatePassed(enddate: string): boolean {
   const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(enddate || "");
   if (!m) return false;
