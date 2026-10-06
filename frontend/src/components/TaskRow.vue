@@ -96,13 +96,17 @@ const ONCE_RETRY_LIMIT_TEXT = 3; // 手工抄自 backend/services/task_service.p
 
 /** 与后端 enddate_passed（`date.today() > enddate`）同一口径：enddate 当天整天有效、次日起才算过期，
  *  不再是 `{enddate}T23:59:59` 那种"当天最后一秒就判过期"的写法。只做纯日期比较（本地日历日），
- *  空串或非法日期返回 false —— 与后端 strptime 解析失败时"不挡路"一致。 */
+ *  空串、越界或 `2026-02-30` 这类不存在的日期返回 false —— 与后端 strptime 解析失败时"不挡路"一致。 */
 function enddatePassed(enddate: string): boolean {
   const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(enddate || "");
   if (!m) return false;
   const month = Number(m[2]);
   const day = Number(m[3]);
   if (month < 1 || month > 12 || day < 1 || day > 31) return false; // 后端 strptime 同样拒这种值，这里当作未过期
+  // 真日历回代：`2026-02-30` 会被 Date 顺延成 3 月 2 日，回读的 年/月/日 与输入不符即不存在的日期 ——
+  // 后端 strptime 对它直接 ValueError 返回 false 并继续驱动，这里同口径"不挡路"，徽标不许报「已过截止」。
+  const d = new Date(Number(m[1]), month - 1, day);
+  if (d.getFullYear() !== Number(m[1]) || d.getMonth() !== month - 1 || d.getDate() !== day) return false;
   const now = new Date();
   const today = now.getFullYear() * 10000 + (now.getMonth() + 1) * 100 + now.getDate();
   return today > Number(m[1]) * 10000 + month * 100 + day;
