@@ -18,7 +18,7 @@
 - 转存段仍在 `_run_lock` 内串行、下载在锁外；**`dry-run` 不占 `_run_lock`、不写库**。
 - 所有 `run_mode` 读取走 `run_mode_of(task)`；新加的设置键在存量库里不存在，必须走 `DEFAULT_SETTINGS` 合并（`api/deps.py:48-53` 已如此），不许假设 `setting` 表里有行。
 - 文案中文、逐字照 spec 第 4.5 节；不许出现"界面说会做而代码不做"的说法（例如把目录内过滤说成"已修复魔法重命名"——子目录内不重命名是既有行为，本轮不改）。
-- `TaskIn.auto_download` 改 `True` 是**破坏面**，必须在阶段 1 的提交与 README 里写明，并给外部 `add_task` 补一条回归测试。
+- `TaskIn.auto_download` 改 `True` 是**破坏面**，必须在Task 1 的提交与 README 里写明，并给外部 `add_task` 补一条回归测试。
 - **绝不碰 `data/`**（真实库 + 媒体）；**绝不 `git add -A` / `git add .`**；**绝不 `git push`**。工作树里另一会话的未提交改动（`README.md` 的 DLNA 段、`docker-compose.yml`、`.dockerignore`、`deploy/`、`Dockerfile.minidlna`）**不碰不提交**；`README.md` 需要写的破坏面那段用 `git add -p` 挑自己的 hunk，若环境不支持交互分块，就把那段写进 spec 并在提交信息里注明 README 待补。
 - 测试共享临时库：按自建 id 断言，不看全表计数、不依赖执行顺序；假盘驱动从 `backend.tests.test_task_service.OkDriver` / `backend.tests.test_task_run_mode.DownloadOkDriver` 继承，**不再复制一份**。
 
@@ -41,7 +41,7 @@
 
 ---
 
-## 阶段 1：后端默认值与 `task_defaults`
+## Task 1：后端默认值与 `task_defaults`
 
 **Files:** Modify `backend/schemas.py`、`backend/api/deps.py`、`backend/api/routes_settings.py`；Test `backend/tests/test_task_form_defaults.py`（新建）
 
@@ -195,11 +195,11 @@ git commit -m "feat(tasks): TaskIn 默认下载到本地并新增 task_defaults 
 
 提交信息正文必须写一句破坏面：`省略 auto_download 的外部调用方（油猴 /api/add_task）从此会开始下载`。
 
-**阶段 1 的已知连带影响：** `backend/tests/test_external_api*` 里若有"省略 auto_download 就不下载"的断言会转红——按新默认改断言，并在测试名或注释里写清这是 4.2 的破坏面，不是回归失败。若确实没有这种断言，不要为了"顺手"去改无关测试。
+**Task 1 的已知连带影响：** `backend/tests/test_external_api*` 里若有"省略 auto_download 就不下载"的断言会转红——按新默认改断言，并在测试名或注释里写清这是 4.2 的破坏面，不是回归失败。若确实没有这种断言，不要为了"顺手"去改无关测试。
 
 ---
 
-## 阶段 2：引擎 `plan_only` 与只读 `dry-run`
+## Task 2：引擎 `plan_only` 与只读 `dry-run`
 
 **Files:** Modify `backend/core/engine.py`、`backend/api/routes_tasks.py`；Test `backend/tests/test_dry_run.py`（新建）
 
@@ -520,7 +520,7 @@ git commit -m "feat(engine): run_update_task 加 plan_only 只读试跑，新增
 
 ---
 
-## 阶段 3：TaskForm 首屏重排
+## Task 3：TaskForm 首屏重排
 
 **Files:** Modify `frontend/src/api/types.ts`、`frontend/src/api/client.ts`、`frontend/src/components/TaskForm.vue`
 
@@ -528,7 +528,7 @@ git commit -m "feat(engine): run_update_task 加 plan_only 只读试跑，新增
 - Consumes：`task_defaults`（`GET /api/settings`）、`GET /api/settings/magic/expand`、`POST /api/tasks/dry-run`
 - Produces：无新接口，只改组件；`draft.pattern`/`draft.update_subdir` 仍是唯一状态源
 
-### 阶段 3 的契约代码（逐字照抄，别自创第二套）
+### Task 3 的契约代码（逐字照抄，别自创第二套）
 
 `frontend/src/api/types.ts`：
 
@@ -624,6 +624,7 @@ function blank(d: TaskDefaults): TaskPayload & { startfid_name: string } {
 :disabled="settingsStore.loading || !settingsStore.settings.task_defaults"
 ```
 
+```ts
 // 3) 抓取范围是 draft.pattern 的视图，不是第二个状态源；「自定义正则」只是展开高级区的动作项。
 const captureMode = computed<"all" | "tv" | "custom">({
   get: () => (draft.pattern === "" ? "all" : draft.pattern === "$TV" ? "tv" : "custom"),
@@ -671,18 +672,18 @@ watch(() => draft.taskname, (name) => {
 **必须一起处理的既有耦合（漏了就是回归）**
 
 - `dirty` 判定：`snapshot()` 是按键插入顺序 stringify 的（`TaskForm.vue:119-123`），而 `original` 与 `draft` 出自同一次 `loadFrom`，顺序天然一致，**所以改 `blank()` 的键序不会造成假阳性**（我上一稿说会，是夸大了，别照那句去"修"）。真正的既有事实是：`Object.assign(draft, blank(), task)` 会把服务端的 `id / retry_attempts / next_retry_at / last_run_at / shareurl_ban` 一起灌进 draft，于是它们也进了 `snapshot()` 和 PUT 请求体——今天无害（`TaskIn` 忽略多余字段）。本轮**不改这个行为**（改了要连带处理删除态与 `emit("save")` 的载荷形状，属于另一件事），但 `snapshot()` 仍建议改成排序后 stringify：一行、纯健壮性，注释写明"排序是为了让键序变化不影响脏判定"，不要顺手去剥服务端字段。
-- `prefill` 通道（阶段 4 的复制要用）：`loadFrom` 里 `if (!task && props.prefill) Object.assign(draft, props.prefill)` 已经在 `blank()` 之后，保持顺序即可；但要确认 prefill 里的 `update_subdir` 不被 `subdir_filter` 覆盖——规则：`prefill` 含 `update_subdir` 键时以 prefill 为准。
+- `prefill` 通道（Task 4 的复制要用）：`loadFrom` 里 `if (!task && props.prefill) Object.assign(draft, props.prefill)` 已经在 `blank()` 之后，保持顺序即可；但要确认 prefill 里的 `update_subdir` 不被 `subdir_filter` 覆盖——规则：`prefill` 含 `update_subdir` 键时以 prefill 为准。
 - `episode_start` 的现有默认：`blank()` 里是 `0`（不限）。新建时给成「0=不限」的可见文案而不是悄悄填 1（改了会误伤过滤范围）。
 
 - [ ] **Step 1**：改 `types.ts`（`Settings` 加 `task_defaults: TaskDefaults`、`SettingKey` 自动覆盖）与 `client.ts`（`dryRun(body: TaskPayload)`、`magicExpand(name: string)`）。
 - [ ] **Step 2**：TaskForm 改脚本部分（`blank`/`pathTouched`/`captureMode`/`subdirFilterOn`/`snapshot` 排序/`tryRun`），`npm run typecheck` 先过。
 - [ ] **Step 3**：模板重排首屏 7 项 + 目录过滤开关 + 试跑结果区；`advancedOpen` 初始为空数组（现状保持）。
-- [ ] **Step 4**：`cd frontend && npm run typecheck && npm run build`；`.venv/bin/python -m pytest backend/tests -q`（应无影响，仍 317 + 阶段 1-2 新增）。
+- [ ] **Step 4**：`cd frontend && npm run typecheck && npm run build`；`.venv/bin/python -m pytest backend/tests -q`（应无影响，仍 317 + Task 1-2 新增）。
 - [ ] **Step 5**：提交 `git add frontend/src/api/types.ts frontend/src/api/client.ts frontend/src/components/TaskForm.vue && git commit -m "feat(ui): 新建任务首屏收敛为七项，目录内过滤与抓取范围进首屏"`。
 
 ---
 
-## 阶段 4：复制为新任务 + 设置页「新建任务默认」
+## Task 4：复制为新任务 + 设置页「新建任务默认」
 
 **Files:** Modify `frontend/src/components/TaskRow.vue`、`frontend/src/views/TasksView.vue`、`frontend/src/stores/tasks.ts`；新建 `frontend/src/components/settings/SettingsTaskDefaults.vue`；Modify `frontend/src/views/SettingsView.vue`
 
@@ -730,7 +731,7 @@ async function save() {
 
 ---
 
-## 阶段 5：文档与真机验收
+## Task 5：文档与真机验收
 
 - [ ] **Step 1**：README 写破坏面（`auto_download` 默认变 `True`、新建默认 `update_subdir=".*"` 对并列多目录分享是新行为、新建表单不再有「停用」）。**只 `git add -p README.md` 挑自己的 hunk**；环境不支持交互分块时把这段留在 spec 并在提交信息里注明 README 待补。
 - [ ] **Step 2**：`docs/superpowers/specs/2026-10-05-task-run-modes-design.md` 不涉及；但 `2026-10-06-task-form-first-screen-design.md` 的 4.1「目录内过滤不改变子目录内不重命名」这条要在实现后回写一行 `已实现，语义如文档所述`（如果属实；做不到就写清做不到）。
@@ -747,12 +748,12 @@ async function save() {
 
 | Spec | 阶段 |
 | --- | --- |
-| 4.1 首屏 7 项、目录内过滤、停用位置 | 阶段 3 |
-| 4.2 `auto_download=True`、`task_defaults`、后端不给 `update_subdir` 默认 | 阶段 1 |
-| 4.3 复制为新任务（含剥 `startfid`） | 阶段 4 |
-| 4.4 `plan_only` + `dry-run` | 阶段 2 |
-| 4.5 文案 | 阶段 3、4 |
-| 5 破坏面（README） | 阶段 5 |
-| 6 测试（相等性承重测试、零写入、计数、默认回归） | 阶段 1、2 |
-| 6 真机八条 | 阶段 5 |
+| 4.1 首屏 7 项、目录内过滤、停用位置 | Task 3 |
+| 4.2 `auto_download=True`、`task_defaults`、后端不给 `update_subdir` 默认 | Task 1 |
+| 4.3 复制为新任务（含剥 `startfid`） | Task 4 |
+| 4.4 `plan_only` + `dry-run` | Task 2 |
+| 4.5 文案 | Task 3、4 |
+| 5 破坏面（README） | Task 5 |
+| 6 测试（相等性承重测试、零写入、计数、默认回归） | Task 1、2 |
+| 6 真机八条 | Task 5 |
 | 2 非目标（无多套预设、不新建 vitest、不改引擎重命名规则） | 全程不得出现对应代码 |
