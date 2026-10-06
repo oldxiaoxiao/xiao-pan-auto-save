@@ -283,9 +283,15 @@ function loadFrom(task: Task | null) {
     // 抹掉这一行，复制来的定制路径会被剧名 watch 盖成 {root}/{剧名}，等于复制时静默搬了家。
     if (props.prefill.savepath !== undefined) prefillPinnedPath.value = true;
   }
-  draft.runweek = [...(task?.runweek ?? [])];
-  // 若已有任务的 schedule 是不在预设里的 cron,回填自定义输入框
-  const s = task?.schedule ?? "";
+  // 这两条回填的"来源"口径统一走 source：**编辑态是那一行本身，复制态是 prefill**。
+  // startCopy 把来源行的业务字段整份灌进 pendingPrefill，而 runweek 不在 spec 4.3 的剥除清单里（必须带出），
+  // 自定义 cron 表达式同理属于那条任务自己的频率。只认 props.task 的话，复制一条设过周几/非预设 cron 的任务
+  // 会得到"星期胶囊全空 + 更新频率显示自定义 cron 但输入框为空"，两处同一个根因。
+  // 数组照旧拷一份：直接把 store 里那条任务的数组挂进 draft，toggleWeek 一点就改到列表行（编辑态本来就有这层保护）。
+  const source = task ?? props.prefill;
+  draft.runweek = [...(source?.runweek ?? [])];
+  // 若来源的 schedule 是不在预设里的 cron,回填自定义输入框
+  const s = source?.schedule ?? "";
   if (s.startsWith("cron:") && !SCHEDULE_PRESETS.some((p) => p.value === s)) customCron.value = s.slice(5);
   else customCron.value = "";
   original = snapshot();
@@ -442,7 +448,11 @@ function submit() {
   if (!draft.savepath.trim()) return ElMessage.warning("请选择保存路径");
   const { startfid_name, ...payload } = draft;
   void startfid_name;
-  emit("save", { ...payload });
+  // 选中「自定义 cron」却没写表达式时，draft.schedule 是一条半成品（`cron:` 或 `cron:` 加空格），发出去等于
+  // 把空表达式当成频率交给后端。这里如实兑现输入框下面那句「否则将回退为继承全局」：空的一律回落成 ""（继承全局），
+  // 于是复制、编辑、手选自定义三条路径都不会发出 "cron:"。
+  const schedule = /^cron:\s*$/.test(payload.schedule) ? "" : payload.schedule;
+  emit("save", { ...payload, schedule });
 }
 
 const hasId = computed(() => props.task?.id ?? null);
