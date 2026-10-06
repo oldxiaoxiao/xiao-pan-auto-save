@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { Task } from "../api/types";
-import { relativeTime, weekText } from "../utils";
+import { formatTime, relativeTime, weekText } from "../utils";
 
 const props = defineProps<{ task: Task; index: number; dirty: boolean; expanded: boolean }>();
 const emit = defineEmits<{
@@ -87,13 +87,33 @@ function frequencyChip(schedule: string): string {
   return hasOwnSchedule(raw) ? `频率 ${raw}` : "继承全局";
 }
 
+// 徽标取值互斥、按此顺序第一个命中即用（spec 4.6）：过期排最前，它让其他三种都失去意义。
+const ONCE_RETRY_LIMIT_TEXT = 3; // 与后端 ONCE_RETRY_LIMIT 同值；前端拿不到常量，改了后端要同步这里
+
+function enddatePassed(enddate: string): boolean {
+  if (!enddate) return false;
+  const d = new Date(`${enddate}T23:59:59`);
+  return !Number.isNaN(d.getTime()) && d.getTime() < Date.now();
+}
+
 const chips = computed(() => {
   const t = props.task;
-  const list: { key: string; text: string; primary?: boolean; success?: boolean }[] = [];
+  const list: { key: string; text: string; primary?: boolean; success?: boolean; title?: string }[] = [];
   // 执行方式徽标排在形态细节之前；「已完成」由 once + 已停用派生（无法区分停用来源，已知瑕疵）
   if (t.run_mode === "manual") list.push({ key: "m", text: "仅手动" });
-  if (t.run_mode === "once" && !t.disabled) list.push({ key: "o", text: "一次性待执行", primary: true });
-  if (t.run_mode === "once" && t.disabled) list.push({ key: "done", text: "已完成", success: true });
+  if (t.run_mode === "once") {
+    if (enddatePassed(t.enddate)) list.push({ key: "o", text: "已过截止" });
+    else if (t.disabled) list.push({ key: "o", text: "已完成", success: true });
+    else if (t.next_retry_at)
+      list.push({
+        key: "o",
+        text: `重试中 ${t.retry_attempts}/${ONCE_RETRY_LIMIT_TEXT}`,
+        title: `下次重试：${formatTime(t.next_retry_at)}`,
+      });
+    else if (t.retry_attempts >= ONCE_RETRY_LIMIT_TEXT)
+      list.push({ key: "o", text: "重试已用尽", title: "点 ▶ 运行重新开启" });
+    else list.push({ key: "o", text: "一次性待执行", primary: true });
+  }
   if (t.run_mode === "follow" && t.schedule) {
     // 自定义但合法的频率后端会给它建专属作业（task_service 也拒绝让全局 sweep 驱动它），
     // 这时候说「继承全局」就是谎报；口语化不出来的原样显示。
@@ -141,6 +161,7 @@ const isOnceDone = computed(() => props.task.run_mode === "once" && props.task.d
           :key="c.key"
           class="chip"
           :class="{ 'is-primary': c.primary, 'is-success': c.success }"
+          :title="c.title"
           >{{ c.text }}</span
         >
       </div>

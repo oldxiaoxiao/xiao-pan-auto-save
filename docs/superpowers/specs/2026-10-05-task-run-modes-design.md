@@ -48,6 +48,8 @@ run_mode: str = "follow"  # follow=定时追更 | manual=仅手动 | once=一次
 
 ### 4.2 调度层：谁会被自动跑
 
+> 已被 `docs/superpowers/specs/2026-10-05-once-retry-budget-design.md` 修订：`once` 不再"不被任何自动触发驱动"，现行规则见那份的 4.3。以下为原文，保留不改写。
+
 判定集中在一个函数里，避免多处漂移：
 
 ```python
@@ -61,6 +63,8 @@ if trigger == "scheduled" and task.run_mode != "follow":
 - 手动入口不变：`POST /api/tasks/{id}/run` 和 `POST /api/tasks/run` 走 `trigger="manual"`，不受形态限制（`仅手动` 的存在意义就是只从这儿走）。
 
 ### 4.3 一次性任务的收口判定
+
+> 已被 `docs/superpowers/specs/2026-10-05-once-retry-budget-design.md` 修订：本表"未完成 → 保持启用"之后还要分岔——没放出不占重试预算、真失败吃一次预算并在三次用尽后停摆，现行判定见那份的 4.2；本表与下文提到的几条日志文案也已换成那份 4.7 列出的五条逐字文案。以下为原文，保留不改写。
 
 放在运行收尾处，依赖 4.5 的结构化结果。**完成条件**（用户选定"新增+下载全成功才算完"）：
 

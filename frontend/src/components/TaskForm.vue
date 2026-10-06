@@ -13,7 +13,11 @@ const QUALITY_OPTIONS = ["4K", "2160P", "1080P", "720P", "x265", "HDR"];
 const RUN_MODE_OPTIONS: { value: RunMode; label: string; hint: string }[] = [
   { value: "follow", label: "定时追更", hint: "按更新频率/全局调度自动追更" },
   { value: "manual", label: "仅手动", hint: "永不自动跑，只在点「运行」时执行" },
-  { value: "once", label: "一次性", hint: "只手动跑；拿到新增且下载全部成功后自动停用" },
+  {
+    value: "once",
+    label: "一次性",
+    hint: "自动重试到拿到为止；资源没放出不算失败、每天再看一次；连续三次真失败则停摆，点「运行」重新开启",
+  },
 ];
 
 const props = defineProps<{

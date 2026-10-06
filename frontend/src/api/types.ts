@@ -35,6 +35,10 @@ export interface Task extends TaskPayload {
   last_run_at: string | null;
   /** 后端 _to_out 已按 run_mode_of 归一化，响应里只会是 follow / manual / once 三值之一。 */
   run_mode: RunMode;
+  /** 一次性任务本轮已消耗的真失败重试次数（成功或手动「▶ 运行」归零；非 once 行恒为 0）。 */
+  retry_attempts: number;
+  /** 到点重试的时间，后端 `isoformat()` 出的无时区串，与 last_run_at 同一口径；null=没有待重试。 */
+  next_retry_at: string | null;
 }
 
 /** GET /api/accounts 返回（无 cookie 明文，仅掩码）。 */
