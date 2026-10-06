@@ -86,6 +86,7 @@ class SavedFile:
     new_fid: str
     dest_path: str
     is_dir: bool = False
+    size: int = 0  # 字节数：试跑 total_size 的来源；真实运行也照实填，纯增字段不改行为
 
 
 @dataclass
@@ -93,6 +94,8 @@ class TaskRunResult:
     status: str = "no_changes"  # updated | no_changes | banned | network | failed
     message: str = ""
     files: list[SavedFile] = field(default_factory=list)
+    planned_existing: int = 0  # 因"目标目录里已有"而跳过的条目数（目录不算，它会继续递归）
+    filtered_out: int = 0  # 被集数/画质过滤拒掉的条目数
 
     def render(self) -> str:
         lines = []
@@ -129,6 +132,7 @@ async def run_update_task(
     spec: TaskSpec,
     magic_regex: dict[str, dict[str, str]] | None = None,
     log: LogFn | None = None,
+    plan_only: bool = False,
 ) -> TaskRunResult:
     log = log or (lambda level, msg: None)
     result = TaskRunResult()
@@ -160,7 +164,7 @@ async def run_update_task(
             )
         else:
             share_path = ""
-        await _check_dir(driver, spec, ref, magic_regex, share_path, "", share_root, log, result)
+        await _check_dir(driver, spec, ref, magic_regex, share_path, "", share_root, log, result, plan_only)
     except ShareBanned as exc:
         result.status = "banned"
         result.message = exc.message
@@ -183,6 +187,7 @@ async def _check_dir(
     share_list: list[FsItem],
     log: LogFn,
     result: TaskRunResult,
+    plan_only: bool = False,
 ) -> None:
     """比对一个目录层。share_path 为分享内路径（驱动定位），rel_path 为对应保存目录后缀。"""
     mr = MagicRename(magic_regex)
@@ -190,8 +195,17 @@ async def _check_dir(
     pattern, replace = mr.magic_regex_conv(spec.pattern, spec.replace)
 
     target_path = _norm_path(f"{spec.savepath}{rel_path}")
-    await driver.ensure_dir(target_path)
-    dir_items = await driver.list_dir(target_path)
+    if plan_only:
+        # 试跑不建目录，所以列目录大概率会抛；按"列不出来=空目录=全部算新增"降级。
+        # 真实运行那一侧仍走 ensure_dir + 裸 list_dir，一行都不改语义。
+        dir_items = []
+        try:
+            dir_items = await driver.list_dir(target_path)
+        except DriveError:
+            pass
+    else:
+        await driver.ensure_dir(target_path)
+        dir_items = await driver.list_dir(target_path)
     dir_names = [i.name for i in dir_items]
 
     need_save: list[_Plan] = []
@@ -201,6 +215,8 @@ async def _check_dir(
         passes = share_file.is_dir or matches_filters(
             share_file.name, spec.episode_start, spec.episode_end, spec.quality
         )
+        if not passes:  # 只多这一句计数：真实运行也计，dry-run 才有「被过滤 N 项」可说
+            result.filtered_out += 1
         if passes:
             search_pattern = spec.update_subdir if (share_file.is_dir and spec.update_subdir) else pattern
             if re.search(search_pattern or "", share_file.name):
@@ -212,11 +228,13 @@ async def _check_dir(
                         name_re = mr.sub(pattern, replace, share_file.name)
                         if not mr.is_exists(name_re, dir_names, spec.ignore_extension):
                             need_save.append(_Plan(share_file, name_re))
+                        else:
+                            result.planned_existing += 1  # 改名后又撞名：计「已存在跳过」，不改既有跳过行为
                 elif share_file.is_dir and spec.update_subdir and re.search(spec.update_subdir, share_file.name):
                     if spec.update_subdir_resave and driver.has("delete"):
                         log("info", f"重存子目录：{target_path}/{share_file.name}")
                         existing = next((i for i in dir_items if i.name == share_file.name and i.is_dir), None)
-                        if existing:
+                        if existing and not plan_only:  # 试跑不删：把「会重存」如实落成一条计划目录
                             await driver.delete_items([existing], purge=True)
                             dir_names.remove(existing.name)
                             dir_items.remove(existing)
@@ -238,9 +256,12 @@ async def _check_dir(
                                 sub_items,
                                 log,
                                 result,
+                                plan_only,
                             )
                         if len(result.files) > before:
                             log("info", f"子目录有新内容：{rel_path}/{share_file.name}")
+            # 目录在目标里已存在且没开递归：既有代码就是什么都不做，这里也不计 planned_existing
+            # （它不是"跳过"，是"目录本身已在目标里、内容由递归或整目录搬走决定"——计了会让 UI 说谎）
         # 起始文件订阅：列表新→旧遍历，遇到 startfid（含）即停止（不受过滤影响）
         if share_file.fid == spec.startfid and spec.startfid:
             break
@@ -255,6 +276,23 @@ async def _check_dir(
             p.name_re = view["name_re"]
 
     if not need_save:
+        return
+
+    if plan_only:
+        # 试跑收口：判定全部在上面同一套代码里做完，这里只把计划条目如实落成结果——
+        # 不转存、不重命名，new_fid 留空，dest_path 照常算；有任何计划条目即 updated。
+        for plan in need_save:
+            result.files.append(
+                SavedFile(
+                    share_name=plan.item.name,
+                    final_name=plan.name_re,
+                    new_fid="",
+                    dest_path=_norm_path(f"{target_path}/{plan.name_re}"),
+                    is_dir=plan.item.is_dir,
+                    size=plan.item.size,
+                )
+            )
+        result.status = "updated"
         return
 
     items = [p.item for p in need_save]
@@ -288,6 +326,7 @@ async def _check_dir(
                     new_fid=saved.fid,
                     dest_path=_norm_path(f"{target_path}/{final_name}"),
                     is_dir=plan.item.is_dir,
+                    size=plan.item.size,
                 )
             )
     else:
@@ -300,6 +339,7 @@ async def _check_dir(
                     new_fid=saved.fid,
                     dest_path=_norm_path(f"{target_path}/{saved.name}"),
                     is_dir=saved.is_dir,
+                    size=saved.size,
                 )
             )
     result.status = "updated"

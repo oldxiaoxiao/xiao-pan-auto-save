@@ -163,3 +163,43 @@ async def run_one(task_id: int) -> StreamingResponse:
 
     reset_once_budget(task_id)
     return _sse_stream([task_id], "manual")
+
+
+@router.post("/dry-run")
+async def dry_run(body: TaskIn) -> dict:
+    """试跑：只读地告诉你这一跑会转什么，判定与真实运行共用 engine._check_dir，不写库、不占运行锁。"""
+    from ..core.engine import run_update_task
+    from ..core.router import route_driver
+    from ..services.task_service import _pick_account
+
+    cls = route_driver(body.shareurl)
+    if cls is None or not cls.supported:
+        return {"ok": False, "status": "failed", "message": "该链接没有已支持的网盘驱动", "items": []}
+    account = _pick_account(body.account_id, cls.key)
+    if account is None:
+        return {"ok": False, "status": "failed", "message": f"未配置可用的{cls.name}账号", "items": []}
+
+    from ..api.deps import all_settings
+    from ..config import PROXY
+    from ..services.task_service import _task_spec
+
+    spec = _task_spec(body)  # TaskIn 与 Task 字段同名，直接复用
+    driver = cls(cookie=account.cookie, proxy=PROXY, index=account.sort_order)
+    try:
+        result = await run_update_task(driver, spec, magic_regex=all_settings().get("magic_regex") or {}, plan_only=True)
+    finally:
+        await driver.close()
+
+    return {
+        "ok": result.status not in ("failed", "banned", "network"),
+        "status": result.status,
+        "message": result.message,
+        "new_count": sum(1 for f in result.files if not f.is_dir),
+        "total_size": sum(f.size for f in result.files),
+        "skipped_existing": result.planned_existing,
+        "filtered_out": result.filtered_out,
+        "items": [
+            {"share_name": f.share_name, "final_name": f.final_name, "dest_path": f.dest_path, "is_dir": f.is_dir}
+            for f in result.files[:20]
+        ],
+    }
