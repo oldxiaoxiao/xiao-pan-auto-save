@@ -244,7 +244,12 @@ def _drop_rows(*, account_id: int | None = None, task_ids: tuple[int, ...] = ())
 
 
 def test_dry_run_endpoint_happy_path_writes_nothing(monkeypatch):
-    """穿过守卫真进引擎的一次 POST：响应必须有真值，且任务表逐字段快照前后完全一致（设计 §6）。"""
+    """穿过守卫真进引擎的一次 POST：响应必须有真值，且任务表逐字段快照前后完全一致（设计 §6）。
+
+    写计数桩是这里的关键证据：端点里若有人删掉 plan_only=True，响应逐键不变、
+    任务表也不动，只有 PlanDriver.calls 会露馅——所以 POST 前清零、POST 后必空。
+    计数走的是既有 patch（core_router.route_driver→PlanDriver，路由内惰性 import 拦得准）。
+    """
     from fastapi.testclient import TestClient
     from sqlmodel import select
 
@@ -272,9 +277,11 @@ def test_dry_run_endpoint_happy_path_writes_nothing(monkeypatch):
                 }
 
         before = _snapshot()
+        PlanDriver.calls = {}  # 清零写计数桩，保证下面 == {} 只归这次 POST 负责
         with TestClient(app) as c:
             data = c.post("/api/tasks/dry-run", json={
                 "taskname": "剧", "shareurl": "https://fake.example/s/1", "savepath": "/剧"}).json()
+        assert PlanDriver.calls == {}, f"端点丢了 plan_only=True，试跑写盘了：{PlanDriver.calls}"
         # 防「测试自己骗自己」：这些真值只有穿过守卫、进了引擎才会存在
         assert data["ok"] is True and data["status"] == "updated", f"没走进引擎或状态不对：{data}"
         assert data["new_count"] == 5 and data["total_size"] > 0 and data["items"], f"响应没有真值：{data}"
