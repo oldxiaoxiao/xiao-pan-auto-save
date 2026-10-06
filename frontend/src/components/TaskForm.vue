@@ -212,7 +212,7 @@ const duplicatePath = computed(
 
 const startHint = computed(() =>
   startFidLabel.value
-    ? `当前从《${startFidLabel.value}》这部文件之后开始，集数过滤在它之后的范围内仍然生效`
+    ? `起点是《${startFidLabel.value}》：这一条和比它更新的都会转，更早的跳过（集数、画质过滤照旧生效）`
     : "不选文件就从最开头开始；集数填 0 表示不限。",
 );
 
