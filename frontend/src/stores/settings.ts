@@ -5,7 +5,9 @@ import type { Settings, SettingKey, SchedulerInfo } from "../api/types";
 
 /** 全局设置 store：拉取 + 分键保存 + 调度器状态。 */
 export const useSettingsStore = defineStore("settings", () => {
-  const settings = ref<Settings>({
+  // GET /api/settings 之前的占位。task_defaults 故意缺席——新建默认只住后端那一份，前端不写第二份兜底；
+  // 没拿到它之前，消费方（TasksView 的「＋ 新建任务」）必须禁用。这里的断言只是让"占位缺一个键"过类型检查。
+  const placeholder: Omit<Settings, "task_defaults"> = {
     crontab: "0 9 * * *",
     push_config: { CONSOLE: true },
     magic_regex: {},
@@ -20,7 +22,8 @@ export const useSettingsStore = defineStore("settings", () => {
       aria2: { host_port: "", secret: "", pause: false },
       emby: { url: "", token: "" },
     },
-  });
+  };
+  const settings = ref<Settings>(placeholder as Settings);
   const scheduler = ref<SchedulerInfo>({ next_run: null, trigger: null });
   const loading = ref(false);
   const error = ref("");

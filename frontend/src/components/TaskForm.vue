@@ -3,22 +3,51 @@ import { reactive, ref, watch, computed } from "vue";
 import { ElMessage } from "element-plus";
 import FileSelector from "./FileSelector.vue";
 import SearchSuggest from "./SearchSuggest.vue";
-import type { Account, RunMode, Task, TaskPayload } from "../api/types";
-import { MAGIC_VARIABLES } from "../constants";
-import { WEEK_LABELS } from "../utils";
+import { api } from "../api/client";
+import { useSettingsStore } from "../stores/settings";
+import type { Account, DryRunResult, MagicExpand, Task, TaskDefaults, TaskPayload } from "../api/types";
+import { MAGIC_VARIABLES, QUALITY_OPTIONS, RUN_MODE_OPTIONS } from "../constants";
+import { WEEK_LABELS, formatSize } from "../utils";
 
-const QUALITY_OPTIONS = ["4K", "2160P", "1080P", "720P", "x265", "HDR"];
+/** 首屏那个「子目录也按集数/画质过滤」开关所代表的那一档递归正则。 */
+const DEFAULT_SUBDIR_REGEX = ".*"; // 与后端 spec 约定同值：首屏开关"开"就是它，不是别的递归正则
 
-/** 执行方式：决定「要不要自动跑」，与「停用」（临时暂停一切）分工不同。 */
-const RUN_MODE_OPTIONS: { value: RunMode; label: string; hint: string }[] = [
-  { value: "follow", label: "定时追更", hint: "按更新频率/全局调度自动追更" },
-  { value: "manual", label: "仅手动", hint: "永不自动跑，只在点「运行」时执行" },
-  {
-    value: "once",
-    label: "一次性",
-    hint: "自动重试到拿到为止；资源没放出不算失败、每天再看一次；连续三次真失败则停摆，点「运行」重新开启",
-  },
-];
+/** 目录内过滤开关的副文案（spec 4.5 逐字）。 */
+const SUBDIR_FILTER_HINT = "填了起始集、结束集或画质时，分享里的文件夹会进去逐个文件比对；不填则整个文件夹原样搬走";
+
+const settingsStore = useSettingsStore();
+const defaults = computed<TaskDefaults>(() => settingsStore.settings.task_defaults);
+
+// 新建时的初值**全部来自后端的 task_defaults**，前端不写第二份默认值。
+// 为此：TaskForm 的 settings 未载入时不允许打开新建表单（见 TasksView 的按钮门控），
+// 于是 `blank()` 永远拿到一份真值，不需要 DEFAULTS_FALLBACK 这种手抄兜底。
+function blank(d: TaskDefaults): TaskPayload & { startfid_name: string } {
+  return {
+    taskname: "",
+    shareurl: "",
+    savepath: d.savepath_root, // 剧名填上后由下面的 watch 拼成 {root}/{剧名}
+    pattern: d.pattern,
+    replace: "",
+    ignore_extension: false,
+    startfid: "",
+    startfid_name: "",
+    update_subdir: d.subdir_filter ? DEFAULT_SUBDIR_REGEX : "",
+    update_subdir_resave: false,
+    enddate: "",
+    runweek: [],
+    auto_download: d.auto_download,
+    run_mode: d.run_mode,
+    download_subdir: false,
+    download_savepath: "",
+    disabled: false,
+    account_id: null,
+    sort_order: 0,
+    episode_start: 0,
+    episode_end: 0,
+    quality: d.quality,
+    schedule: "",
+  };
+}
 
 const props = defineProps<{
   task: Task | null;
@@ -32,35 +61,7 @@ const emit = defineEmits<{
   (e: "dirty", v: boolean): void;
 }>();
 
-function blank(): TaskPayload & { startfid_name: string } {
-  return {
-    taskname: "",
-    shareurl: "",
-    savepath: "/",
-    pattern: "",
-    replace: "",
-    ignore_extension: false,
-    startfid: "",
-    startfid_name: "",
-    update_subdir: "",
-    update_subdir_resave: false,
-    enddate: "",
-    runweek: [],
-    auto_download: true,
-    run_mode: "follow" as RunMode,
-    download_subdir: false,
-    download_savepath: "",
-    disabled: false,
-    account_id: null,
-    sort_order: 0,
-    episode_start: 0,
-    episode_end: 0,
-    quality: "",
-    schedule: "",
-  };
-}
-
-const draft = reactive(blank());
+const draft = reactive(blank(defaults.value));
 let original = "";
 
 // draft.quality 以逗号分隔存储；UI 用数组双向映射
@@ -72,6 +73,109 @@ const advancedOpen = ref<string[]>([]); // 高级区默认收起
 
 // 只有「定时追更」才需要配置频率/星期/截止日期；其余形态收起来，但 draft.schedule 等值按设计保留不清空。
 const isFollow = computed(() => draft.run_mode === "follow");
+
+// 2) 路径跟随：只有"新建 + 未手改过路径"才跟随剧名
+const pathTouched = ref(false);
+/** prefill 显式带了 savepath（Task 4 的「复制为新任务」带原路径）时按 prefill 为准，剧名不把它盖掉。 */
+const prefillPinnedPath = ref(false);
+watch(
+  () => draft.taskname,
+  (name) => {
+    if (props.task || pathTouched.value || prefillPinnedPath.value) return;
+    draft.savepath = name.trim() ? `${defaults.value.savepath_root}/${name.trim()}` : defaults.value.savepath_root;
+  },
+);
+
+// 3) 抓取范围是 draft.pattern 的视图，不是第二个状态源；「自定义正则」只是展开高级区的动作项。
+const captureMode = computed<"all" | "tv" | "custom">({
+  get: () => (draft.pattern === "" ? "all" : draft.pattern === "$TV" ? "tv" : "custom"),
+  set: (mode) => {
+    if (mode === "all") draft.pattern = "";
+    else if (mode === "tv") draft.pattern = "$TV";
+    else openAdvancedToPattern(); // 已经是自定义值：不改 pattern，只把用户带到能改它的地方
+  },
+});
+
+/** 高级区那条 pattern 输入框的句柄：「自定义正则」只负责展开高级区并把光标落上去。 */
+const patternInput = ref<{ focus?: () => void } | null>(null);
+function openAdvancedToPattern() {
+  advancedOpen.value = ["adv"];
+  requestAnimationFrame(() => patternInput.value?.focus?.());
+}
+
+// $TV 的真实正则只从 /api/settings/magic/expand 取，前端不抄第二份（展开逻辑只住在后端一处）。
+const tvExpand = ref<MagicExpand | null>(null);
+const tvExpandError = ref("");
+async function loadTvExpand() {
+  tvExpandError.value = "";
+  try {
+    tvExpand.value = await api.magicExpand("$TV");
+  } catch (e) {
+    tvExpand.value = null;
+    tvExpandError.value = (e as Error).message;
+  }
+}
+watch(captureMode, (m) => (m === "tv" ? void loadTvExpand() : undefined), { immediate: true });
+
+// 4) 目录内过滤开关：只认 "" 和 ".*" 两个值，自定义递归正则不许被开关抹掉。
+const subdirFilterOn = computed({
+  get: () => draft.update_subdir !== "",
+  set: (on) => {
+    if (on) draft.update_subdir = draft.update_subdir === "" ? DEFAULT_SUBDIR_REGEX : draft.update_subdir;
+    else if (draft.update_subdir === DEFAULT_SUBDIR_REGEX) draft.update_subdir = "";
+    // 关但值是别的递归正则：保持不动，让高级区那一条继续管，别静默改写用户手写的正则
+  },
+});
+/** 递归正则是用户手写的自定义值：开关显示为开，但既不覆盖也不清空，改由高级区那一条管。 */
+const subdirCustom = computed(() => draft.update_subdir !== "" && draft.update_subdir !== DEFAULT_SUBDIR_REGEX);
+
+/** 起点合并：startfid 优先于集数（engine 遍历到该 fid 即 break，集数过滤在其之后仍生效）。 */
+const startFidLabel = computed(() => draft.startfid_name || draft.startfid);
+
+/** 抓取范围三选一的视图项；状态源仍然只有 draft.pattern 这一个。 */
+const CAPTURE_OPTIONS: { value: "all" | "tv" | "custom"; label: string }[] = [
+  { value: "all", label: "全部文件" },
+  { value: "tv", label: "只抓剧集" },
+  { value: "custom", label: "自定义正则" },
+];
+
+/** 只抓剧集那一档要显示的说明与展开后的真实正则（正则文本只从 /api/settings/magic/expand 取，前端一份都不抄）。 */
+const captureHint = computed(() => {
+  if (captureMode.value === "tv") {
+    const head = "只挑剧集文件，跳过特典、字幕、说明之类别的内容";
+    if (tvExpandError.value) return `${head} —— 展开后的正则读取失败：${tvExpandError.value}`;
+    if (tvExpand.value === null) return `${head} —— 正在读取展开后的正则…`;
+    if (!tvExpand.value.ok) return `${head} —— 当前设置的 magic_regex 里没有 $TV 这一项，后端没有可展开的正则`;
+    return `${head} —— 展开后的正则：${tvExpand.value.pattern}`;
+  }
+  if (captureMode.value === "custom")
+    return `当前正则：${draft.pattern} ——「自定义正则」不是第二个输入框，选中它只展开高级设置并把光标落到 pattern 那条，首屏与高级区共用同一个值`;
+  return "全部文件：分享目录里有什么就转什么，只受下面的集数与画质过滤约束";
+});
+
+const pathHint = computed(() =>
+  props.task
+    ? "编辑已有任务时，路径不会跟着剧名自动改动。"
+    : `新建时路径跟着剧名走（${defaults.value.savepath_root}/{剧名}）；手动改过一次、或用「选择」定过一次之后就不再跟。`,
+);
+
+const startHint = computed(() =>
+  startFidLabel.value
+    ? `当前从《${startFidLabel.value}》这部文件之后开始，集数过滤在它之后的范围内仍然生效`
+    : "不选文件就是从最开头开始；集数填 0 = 不限（起点默认仍是第一集，不会偷偷改成 1）。",
+);
+
+/** 「停用」在编辑态才有意义；这句是既有改形态提示，只在停用 + 非定时追更时说得出。 */
+const disabledNote = computed(() =>
+  !isFollow.value && draft.disabled ? "该行当前为停用状态；改回「定时追更」后需手动取消停用才会恢复自动运行。" : "",
+);
+
+/** 目录内过滤开关的副文案；自定义递归正则时改成点名高级区，绝不写得像"开关会接管它"。 */
+const subdirHint = computed(() =>
+  subdirCustom.value
+    ? `当前子目录递归正则是自定义值 ${draft.update_subdir}，开关不会覆盖它，要改请回高级设置那条 update_subdir。`
+    : "子目录内的文件不参与魔法重命名",
+);
 
 // —— 更新频率 ——
 const SCHEDULE_PRESETS = [
@@ -106,8 +210,15 @@ watch(customCron, (c) => {
 });
 
 function loadFrom(task: Task | null) {
-  Object.assign(draft, blank(), task ? { ...task, startfid_name: "" } : {});
-  if (!task && props.prefill) Object.assign(draft, props.prefill);
+  pathTouched.value = false; // 每次载入重来：新建表单要能跟随剧名
+  prefillPinnedPath.value = false;
+  Object.assign(draft, blank(defaults.value), task ? { ...task, startfid_name: "" } : {});
+  // prefill 在 blank() 之后覆盖；带了 update_subdir 键时以 prefill 为准，不再按 subdir_filter 默认改写
+  // （Task 4 的「复制为新任务」靠这条把原任务的递归正则原样带出来）。
+  if (!task && props.prefill) {
+    Object.assign(draft, props.prefill);
+    if (props.prefill.savepath !== undefined) prefillPinnedPath.value = true;
+  }
   draft.runweek = [...(task?.runweek ?? [])];
   // 若已有任务的 schedule 是不在预设里的 cron,回填自定义输入框
   const s = task?.schedule ?? "";
@@ -119,7 +230,11 @@ function loadFrom(task: Task | null) {
 function snapshot(): string {
   const { startfid_name, ...rest } = draft;
   void startfid_name;
-  return JSON.stringify(rest);
+  // 排序是为了让键序变化不影响脏判定（不顺手剥服务端字段：那是另一件事）。
+  const sorted = Object.keys(rest)
+    .sort()
+    .map((k) => [k, (rest as Record<string, unknown>)[k]]);
+  return JSON.stringify(Object.fromEntries(sorted));
 }
 
 watch(
@@ -169,6 +284,7 @@ function openSelector(mode: "savepath" | "startfid" | "preview") {
 function onSelectorConfirm(payload: Record<string, string>) {
   if (payload.path) {
     draft.savepath = payload.path;
+    pathTouched.value = true; // 用选择器选定路径算"用户手改"
   }
   if (payload.fid) {
     draft.startfid = payload.fid;
@@ -180,6 +296,67 @@ function onSelectorConfirm(payload: Record<string, string>) {
 function clearStart() {
   draft.startfid = "";
   draft.startfid_name = "";
+}
+
+// —— 试跑（只读）——
+const dryRunning = ref(false);
+const dryResult = ref<DryRunResult | null>(null);
+const dryError = ref("");
+/** 顶部那一行：忙态 > 请求异常 > 后端 message 原文（banned 就说 banned，不美化成「没有新文件」）。 */
+const dryMessage = computed(() => {
+  if (dryRunning.value) return "正在只读访问网盘…（递归目录可能要十几秒）";
+  if (dryError.value) return dryError.value;
+  return dryResult.value?.message ?? "";
+});
+const dryMsgClass = computed(() => {
+  const bad = !!dryError.value || (dryResult.value !== null && dryResult.value?.ok === false);
+  return bad ? "dryrun__msg err" : "dryrun__msg";
+});
+/**
+ * 汇总 + 前 20 条，拼成一段多行文本（pre-line 渲染）。
+ * 守卫分支（无支持的驱动 / 无可用账号）只回 ok/status/message/items：计数键缺席时那几行整行不出现，
+ * 绝不显示成 0。
+ */
+const dryBody = computed(() => {
+  const r = dryResult.value;
+  if (!r) return "";
+  const lines: string[] = [];
+  if (r.new_count !== undefined) {
+    const size = r.total_size ? ` · 约 ${formatSize(r.total_size)}` : "";
+    lines.push(`会新增 ${r.new_count} 项${size} · 落到 ${draft.savepath}`);
+  }
+  const skips: string[] = [];
+  if (r.skipped_existing !== undefined) skips.push(`已存在跳过 ${r.skipped_existing} 项`);
+  if (r.filtered_out !== undefined) skips.push(`被集数/画质过滤 ${r.filtered_out} 项`);
+  if (skips.length) lines.push(skips.join(" · "));
+  // 口径：skipped_existing 只统计"非目录条目因为目标目录已有同名文件被跳过"；目录不在这条计数里。
+  if (r.skipped_existing !== undefined)
+    lines.push("「已存在跳过」只统计文件；目录要么整目录搬走，要么已在目标里本轮不搬，都不在这条计数里");
+  for (const it of r.items ?? []) {
+    const renamed = it.share_name !== it.final_name ? ` ← ${it.share_name}` : "";
+    lines.push(`${it.final_name}${renamed}${it.is_dir ? "（目录）" : ""} · ${it.dest_path}`);
+  }
+  if ((r.items?.length ?? 0) >= 20) lines.push("只列前 20 条。");
+  return lines.join("\n");
+});
+
+async function tryRun() {
+  if (!draft.shareurl.trim() || !draft.savepath.trim()) {
+    ElMessage.warning("请先填写分享链接与保存路径");
+    return;
+  }
+  dryRunning.value = true;
+  dryError.value = "";
+  try {
+    const { startfid_name, ...payload } = draft;
+    void startfid_name;
+    dryResult.value = await api.dryRun({ ...payload });
+  } catch (e) {
+    dryResult.value = null;
+    dryError.value = (e as Error).message;
+  } finally {
+    dryRunning.value = false;
+  }
 }
 
 function submit() {
@@ -201,58 +378,80 @@ const hasId = computed(() => props.task?.id ?? null);
         <label class="field-label">任务名称 / 智能搜索</label>
         <SearchSuggest v-model:taskname="draft.taskname" v-model:shareurl="draft.shareurl" />
       </div>
+
       <div class="f f--wide">
         <label class="field-label">分享链接</label>
         <div class="row">
           <el-input v-model="draft.shareurl" placeholder="https://pan.quark.cn/s/..." />
-          <el-button :icon="'🔍'" :disabled="!draft.shareurl.trim()" @click="openSelector('preview')">
-            浏览
-          </el-button>
-        </div>
-      </div>
-      <div class="f f--wide">
-        <label class="field-label">保存路径</label>
-        <div class="row">
-          <el-input v-model="draft.savepath" placeholder="/动漫" />
-          <el-button :icon="'📁'" @click="openSelector('savepath')"> 选择 </el-button>
+          <el-button :icon="'🔍'" :disabled="!draft.shareurl.trim()" @click="openSelector('preview')"> 浏览 </el-button>
         </div>
       </div>
 
+      <div class="f f--wide">
+        <label class="field-label">保存路径</label>
+        <div class="row">
+          <el-input v-model="draft.savepath" :placeholder="defaults.savepath_root" @input="pathTouched = true" />
+          <el-button :icon="'📁'" @click="openSelector('savepath')"> 选择 </el-button>
+        </div>
+        <!-- pathTouched 只在这两处置真：这条输入框的 @input、以及选择器回传 payload.path；程序代填不置真。 -->
+        <small class="hint">{{ pathHint }}</small>
+      </div>
+
+      <div class="f f--wide">
+        <label class="field-label">抓取范围</label>
+        <el-radio-group v-model="captureMode">
+          <el-radio-button v-for="o in CAPTURE_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</el-radio-button>
+        </el-radio-group>
+        <!-- 三选一只是 draft.pattern 的视图，不是第二个状态源；这里也永不出现第二个正则输入框。 -->
+        <small class="hint">{{ captureHint }}</small>
+      </div>
+
       <div class="f">
-        <label class="field-label">起始集（含，0=不限）</label>
+        <label class="field-label">从第几集开始（含）</label>
         <el-input-number v-model="draft.episode_start" :min="0" :max="9999" controls-position="right" />
       </div>
       <div class="f">
-        <label class="field-label">结束集（含，0=不限）</label>
+        <label class="field-label">到第几集结束（含）</label>
         <el-input-number v-model="draft.episode_end" :min="0" :max="9999" controls-position="right" />
       </div>
       <div class="f f--wide">
+        <div class="row">
+          <span class="link" @click="openSelector('startfid')">或从某个文件开始</span>
+          <span v-if="draft.startfid" class="link link--danger" @click="clearStart">清除起点</span>
+        </div>
+        <!-- 起点合并：startfid 与集数不再并列两个概念，选过文件就如实显示当前生效的起点。 -->
+        <small class="hint">{{ startHint }}</small>
+      </div>
+
+      <div class="f f--wide">
         <label class="field-label">画质（多选，留空=不限；4K 与 2160P 互为别名）</label>
-        <el-select v-model="qualityList" multiple clearable placeholder="不限画质" style="width: 100%">
+        <el-select v-model="qualityList" multiple clearable placeholder="不限画质">
           <el-option v-for="q in QUALITY_OPTIONS" :key="q" :label="q" :value="q" />
         </el-select>
-        <div class="hint">
-          提示：集数/画质只过滤文件，不作用于子目录；若分享里有整目录（如 001-184 合集），请在高级设置里填「匹配正则」（如
-          <code>$TV</code>）以排除非剧集目录。
-        </div>
       </div>
+
       <div class="f">
         <label class="field-label">下载到本地</label>
         <el-switch v-model="draft.auto_download" />
       </div>
-      <div class="f f--wide">
+      <div class="f">
         <label class="field-label">执行方式</label>
         <el-radio-group v-model="draft.run_mode">
           <el-radio-button v-for="o in RUN_MODE_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</el-radio-button>
         </el-radio-group>
-        <div class="hint">{{ RUN_MODE_OPTIONS.find((o) => o.value === draft.run_mode)?.hint }}</div>
-        <div v-if="!isFollow && draft.disabled" class="hint">
-          该行当前为停用状态；改回「定时追更」后需手动取消停用才会恢复自动运行。
+        <small class="hint">{{ RUN_MODE_OPTIONS.find((o) => o.value === draft.run_mode)?.hint }}</small>
+        <small class="hint">{{ disabledNote }}</small>
+        <!-- 「停用」只在编辑态出现：新建任务没有"暂停"语义（要等资源放出用「一次性」，先存着不跑用「仅手动」），
+             载荷里 disabled 恒为 false，后端字段照旧存在。 -->
+        <div v-if="task" class="sub">
+          <label class="field-label">停用</label>
+          <el-switch v-model="draft.disabled" />
         </div>
       </div>
+
       <div v-if="isFollow" class="f f--wide">
         <label class="field-label">更新频率</label>
-        <el-select v-model="scheduleMode" style="width: 100%">
+        <el-select v-model="scheduleMode">
           <el-option v-for="p in SCHEDULE_PRESETS" :key="p.value" :label="p.label" :value="p.value" />
         </el-select>
         <el-input
@@ -268,6 +467,14 @@ const hasId = computed(() => props.task?.id ?? null);
           频率过高可能触发夸克风控，建议 ≥5 分钟。
         </div>
       </div>
+
+      <div class="f f--wide">
+        <label class="field-label">子目录也按集数/画质过滤</label>
+        <el-switch v-model="subdirFilterOn" />
+        <small class="hint">{{ SUBDIR_FILTER_HINT }}</small>
+        <!-- 这句是 engine.py 的既有行为（子目录里的文件不参与魔法重命名），本轮没改引擎，不许写得像修好了。 -->
+        <small class="hint">{{ subdirHint }}</small>
+      </div>
     </div>
 
     <el-collapse v-model="advancedOpen" class="adv">
@@ -276,6 +483,7 @@ const hasId = computed(() => props.task?.id ?? null);
           <div class="f">
             <label class="field-label">匹配正则 (pattern)</label>
             <el-input
+              ref="patternInput"
               v-model="draft.pattern"
               data-field="pattern"
               placeholder="如 $TV 或 .*?.mp4"
@@ -305,21 +513,14 @@ const hasId = computed(() => props.task?.id ?? null);
             <label class="field-label">忽略扩展名</label>
             <el-switch v-model="draft.ignore_extension" />
           </div>
-          <div class="f">
-            <label class="field-label">起始文件 (startfid)</label>
-            <div class="row">
-              <el-input :model-value="draft.startfid_name || draft.startfid" placeholder="未选择" readonly>
-                <template #append>
-                  <el-button @click="openSelector('startfid')"> 选择 </el-button>
-                </template>
-              </el-input>
-              <el-button v-if="draft.startfid" text type="danger" @click="clearStart"> 清除 </el-button>
-            </div>
-          </div>
 
           <div class="f">
             <label class="field-label">子目录追更正则 (update_subdir)</label>
             <el-input v-model="draft.update_subdir" placeholder="留空=不递归子目录" />
+            <div class="hint">
+              首屏那个开关就是这一条的开关位：留空 = 关、<code>.*</code> = 开；填别的正则是自定义递归范围，
+              首屏的开关既不覆盖也不清空它。
+            </div>
           </div>
           <div class="f">
             <label class="field-label">子目录重存模式（重存时集数/画质过滤不生效，整目录搬运）</label>
@@ -351,7 +552,7 @@ const hasId = computed(() => props.task?.id ?? null);
           </div>
           <div class="f">
             <label class="field-label">指定账号</label>
-            <el-select v-model="draft.account_id" clearable placeholder="自动选择" style="width: 100%">
+            <el-select v-model="draft.account_id" clearable placeholder="自动选择">
               <el-option v-for="a in accounts" :key="a.id" :label="a.nickname || a.name || `#${a.id}`" :value="a.id" />
             </el-select>
           </div>
@@ -370,10 +571,6 @@ const hasId = computed(() => props.task?.id ?? null);
               </button>
             </div>
           </div>
-          <div class="f">
-            <label class="field-label">停用</label>
-            <el-switch v-model="draft.disabled" />
-          </div>
         </div>
       </el-collapse-item>
     </el-collapse>
@@ -381,8 +578,18 @@ const hasId = computed(() => props.task?.id ?? null);
     <div class="actions">
       <el-button v-if="hasId" type="danger" plain @click="emit('remove', hasId as number)"> 删除 </el-button>
       <span class="spacer" />
+      <el-button :disabled="dryRunning" @click="tryRun">
+        {{ dryRunning ? "正在只读访问网盘…" : "试跑（只读：不转存、不下载）" }}
+      </el-button>
       <el-button @click="emit('cancel')"> 取消 </el-button>
       <el-button type="primary" :disabled="hasId !== null && !isDirty" @click="submit"> 保存 </el-button>
+    </div>
+
+    <!-- 试跑结果：只在点按钮时才跑（每次都会真访问网盘，不做自动触发）；message 原样显示，
+         后端说 banned 就显示 banned 的原文，计数键缺席时那几行整行不出现。 -->
+    <div v-if="dryResult || dryError || dryRunning" class="dryrun">
+      <small :class="dryMsgClass">{{ dryMessage }}</small>
+      <small class="dryrun__body">{{ dryBody }}</small>
     </div>
 
     <FileSelector
@@ -430,6 +637,24 @@ const hasId = computed(() => props.task?.id ?? null);
   display: flex;
   gap: 8px;
   align-items: center;
+}
+.sub {
+  margin-top: 10px;
+}
+/* 说明文字一律用 small 承载并按块显示；下拉宽度收进 CSS，模板里不写 style 属性。 */
+small.hint {
+  display: block;
+}
+.f :deep(.el-select) {
+  width: 100%;
+}
+.link {
+  color: var(--primary);
+  cursor: pointer;
+  font-size: 13px;
+}
+.link--danger {
+  color: var(--danger);
 }
 .row :deep(.el-input) {
   flex: 1;
@@ -492,6 +717,30 @@ const hasId = computed(() => props.task?.id ?? null);
 }
 .spacer {
   flex: 1;
+}
+.dryrun {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px 12px;
+}
+.dryrun__msg {
+  display: block;
+  font-size: 13px;
+  margin: 0;
+}
+.dryrun__msg.err {
+  color: var(--danger);
+}
+/* 汇总与前 20 条由脚本拼成多行文本，这里按 pre-line 原样换行显示。 */
+.dryrun__body {
+  display: block;
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-line;
+  color: #5b6270;
 }
 @media (max-width: 640px) {
   .grid {

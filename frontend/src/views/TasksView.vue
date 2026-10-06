@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { storeToRefs } from "pinia";
 import { useTasksStore } from "../stores/tasks";
 import { useAccountsStore } from "../stores/accounts";
+import { useSettingsStore } from "../stores/settings";
 import TaskRow from "../components/TaskRow.vue";
 import TaskForm from "../components/TaskForm.vue";
 import RunLogDialog from "../components/RunLogDialog.vue";
@@ -11,8 +12,14 @@ import type { Task, TaskPayload } from "../api/types";
 
 const tasks = useTasksStore();
 const accountsStore = useAccountsStore();
+const settingsStore = useSettingsStore();
 const { sorted, savePaths, dirty } = storeToRefs(tasks);
 const { accounts } = storeToRefs(accountsStore);
+
+// 新建任务的初值全部来自后端 task_defaults（前端不写第二份默认值）：设置没载入完，
+// 「＋ 新建任务」按钮 disabled 并显示"正在读取默认值…"，于是 TaskForm 只在有一份真默认值时实例化。
+const defaultsReady = computed(() => !!settingsStore.settings.task_defaults);
+const newBlocked = computed(() => settingsStore.loading || !defaultsReady.value);
 
 const keyword = ref("");
 const pathFilter = ref("");
@@ -41,6 +48,7 @@ function toggleExpand(id: number) {
 }
 
 function startNew() {
+  if (newBlocked.value) return; // 按钮此时是 disabled，编程入口也一并挡住
   pendingPrefill.value = undefined;
   editingId.value = "new";
   newDirty.value = false;
@@ -90,6 +98,10 @@ function openRun(task: Task | null) {
 }
 
 async function importClipboard() {
+  if (newBlocked.value) {
+    ElMessage.warning("正在读取默认值…");
+    return;
+  }
   try {
     const text = await navigator.clipboard.readText();
     const m = text.match(/https?:\/\/pan\.quark\.cn\/s\/\w+[^\s"'《》]*/);
@@ -157,6 +169,8 @@ async function onDragEnd() {
 onMounted(() => {
   tasks.fetchTasks();
   accountsStore.fetchAccounts();
+  // 本视图自己拉一次设置：新建表单的初值全靠 task_defaults，不拉就永远停在"正在读取默认值…"。
+  settingsStore.load();
 });
 </script>
 
@@ -168,7 +182,9 @@ onMounted(() => {
         <span v-if="hasUnsaved" class="dot-unsaved" title="有未保存的修改" />
       </span>
       <el-button type="primary" @click="openRun(null)"> ▶ 立即运行 </el-button>
-      <el-button @click="startNew()"> ＋ 新建任务 </el-button>
+      <el-button :disabled="newBlocked" @click="startNew()">
+        {{ newBlocked ? "正在读取默认值…" : "＋ 新建任务" }}
+      </el-button>
     </div>
 
     <div class="toolbar">
@@ -210,7 +226,7 @@ onMounted(() => {
           @position="onPosition(t, $event)"
         />
         <TaskForm
-          v-if="editingId === t.id"
+          v-if="editingId === t.id && defaultsReady"
           :task="t"
           :accounts="accounts"
           @save="onSave"

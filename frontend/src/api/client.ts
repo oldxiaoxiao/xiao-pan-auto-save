@@ -7,8 +7,10 @@ import type {
   DownloadJob,
   DownloadRecord,
   DriverInfo,
+  DryRunResult,
   HealthResponse,
   LogEntry,
+  MagicExpand,
   NotifyTestResponse,
   RunSummary,
   SchedulerInfo,
@@ -107,6 +109,10 @@ export const api = {
     readSseStream("/api/tasks/run", undefined, onEntry, signal),
   runTask: (id: number, onEntry: (e: LogEntry) => void, signal?: AbortSignal) =>
     readSseStream(`/api/tasks/${id}/run`, undefined, onEntry, signal),
+  /** 只读试跑：守卫分支（无支持的驱动 / 无可用账号）只回 ok/status/message/items，几个计数键缺席。 */
+  dryRun: (body: TaskPayload) =>
+    request<DryRunResult>("/api/tasks/dry-run", { method: "POST", body: JSON.stringify(body) }),
+  magicExpand: (name: string) => request<MagicExpand>(`/api/settings/magic/expand?name=${encodeURIComponent(name)}`),
 
   // 账号
   listAccounts: () => request<Account[]>("/api/accounts"),

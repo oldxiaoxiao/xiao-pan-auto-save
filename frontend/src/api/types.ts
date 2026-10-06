@@ -119,6 +119,36 @@ export interface DownloadSettings {
   emby: { url: string; token: string };
 }
 
+/** GET/PUT /api/settings 的 task_defaults：只影响新建任务，绝不回写已有任务。 */
+export interface TaskDefaults {
+  savepath_root: string;
+  auto_download: boolean;
+  run_mode: RunMode;
+  pattern: string;
+  quality: string;
+  subdir_filter: boolean;
+}
+
+/** POST /api/tasks/dry-run 的响应（只读试跑；判定与真实运行同源）。 */
+export interface DryRunResult {
+  ok: boolean;
+  status: string;
+  message: string;
+  new_count?: number;
+  total_size?: number;
+  skipped_existing?: number;
+  filtered_out?: number;
+  items?: { share_name: string; final_name: string; dest_path: string; is_dir: boolean }[];
+}
+
+/** GET /api/settings/magic/expand 的响应。 */
+export interface MagicExpand {
+  ok: boolean;
+  name: string;
+  pattern: string;
+  replace: string;
+}
+
 export interface Settings {
   crontab: string;
   push_config: PushConfig;
@@ -127,6 +157,7 @@ export interface Settings {
   notify_enabled: boolean;
   sign_enabled: boolean;
   download: DownloadSettings;
+  task_defaults: TaskDefaults;
 }
 
 /** PUT /api/settings/{key} 可写的键集合。 */
