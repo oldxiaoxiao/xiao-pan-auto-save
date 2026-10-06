@@ -5,6 +5,7 @@ import { storeToRefs } from "pinia";
 import { useSettingsStore } from "../stores/settings";
 import type { Settings } from "../api/types";
 import SettingsCron from "../components/settings/SettingsCron.vue";
+import SettingsTaskDefaults from "../components/settings/SettingsTaskDefaults.vue";
 import SettingsNotify from "../components/SettingsNotify.vue";
 import SettingsMagic from "../components/SettingsMagic.vue";
 import SettingsSource from "../components/SettingsSource.vue";
@@ -23,6 +24,7 @@ const view = computed<Partial<Settings>>(() => store.settings ?? {});
 
 const groups = [
   { key: "cron", label: "定时规则", comp: SettingsCron },
+  { key: "task-defaults", label: "新建默认", comp: SettingsTaskDefaults },
   { key: "notify", label: "通知渠道", comp: SettingsNotify },
   { key: "magic", label: "魔法匹配", comp: SettingsMagic },
   { key: "source", label: "资源搜索源", comp: SettingsSource },
