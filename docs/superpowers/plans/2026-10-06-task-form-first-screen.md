@@ -12,7 +12,7 @@
 
 - 解释器一律 `.venv/bin/python`。测试 `.venv/bin/python -m pytest backend/tests -q`；lint `.venv/bin/python -m ruff check backend`；前端 `cd frontend && npm run typecheck && npm run build`。
 - Python >= 3.11；ruff `line-length = 110`，`select = ["E","F","W","I","UP","B"]`，`ignore = ["E501"]`；不新增依赖。
-- 基线：**317 passed + 1 skipped**。每阶段一次中文 conventional commit。
+- 基线：**321 passed + 1 skipped**（2026-10-06 实测；上一版写 317 是抄了前一特性修复波之前的数字，那波又加了 4 条）。每阶段一次中文 conventional commit。
 - **判定不许出现第二套实现**：试跑必须复用 `_check_dir`（`engine.py:176-305`）的既有分支，只把三类写操作（`ensure_dir`、重存的 `delete_items`、`driver.save`/`rename`）门控掉。任何"在 dry-run 端点里重写一遍过滤/去重"都算违背本设计的核心。
 - `backend/core/` 零数据库依赖（既有分层铁律）：`plan_only` 只看 `TaskSpec`；数据库与账号选择留在 services/api 层。
 - 转存段仍在 `_run_lock` 内串行、下载在锁外；**`dry-run` 不占 `_run_lock`、不写库**。
