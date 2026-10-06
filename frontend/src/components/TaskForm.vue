@@ -170,12 +170,13 @@ const disabledNote = computed(() =>
   !isFollow.value && draft.disabled ? "该行当前为停用状态；改回「定时追更」后需手动取消停用才会恢复自动运行。" : "",
 );
 
-/** 目录内过滤开关的副文案；自定义递归正则时改成点名高级区，绝不写得像"开关会接管它"。 */
-const subdirHint = computed(() =>
-  subdirCustom.value
-    ? `当前子目录递归正则是自定义值 ${draft.update_subdir}，开关不会覆盖它，要改请回高级设置那条 update_subdir。`
-    : "子目录内的文件不参与魔法重命名",
-);
+/** 目录内过滤开关的副文案；自定义递归正则时追加点名高级区的说明，但诚实提示永远在。 */
+const subdirHint = computed(() => {
+  // engine.py 的既有行为：子目录里的文件不参与魔法重命名。本轮没改引擎，这句不许被写成"已修好"，也不许被藏掉。
+  const honest = "子目录内的文件不参与魔法重命名";
+  if (!subdirCustom.value) return honest;
+  return `当前子目录递归正则是自定义值 ${draft.update_subdir}，开关不会覆盖它，要改请回高级设置那条 update_subdir。${honest}`;
+});
 
 // —— 更新频率 ——
 const SCHEDULE_PRESETS = [
@@ -347,6 +348,7 @@ async function tryRun() {
   }
   dryRunning.value = true;
   dryError.value = "";
+  dryResult.value = null; // 清掉上一轮结果，免得忙态里旧的计数被读成这一轮的
   try {
     const { startfid_name, ...payload } = draft;
     void startfid_name;
