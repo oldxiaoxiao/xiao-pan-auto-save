@@ -17,7 +17,7 @@ class TaskIn(BaseModel):
     update_subdir_resave: bool = False
     enddate: str = ""
     runweek: list[int] = []
-    auto_download: bool = False
+    auto_download: bool = True  # 默认下载到本地：与前端新建一致（破坏面：省略该字段的外部调用从此会下载）
     download_subdir: bool = False
     download_savepath: str = ""
     disabled: bool = False

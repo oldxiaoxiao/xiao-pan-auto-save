@@ -17,6 +17,14 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "source": {"pansou": {}, "cloudsaver": {}},
     "notify_enabled": True,
     "sign_enabled": True,
+    "task_defaults": {
+        "savepath_root": "/来自：分享",
+        "auto_download": True,
+        "run_mode": "follow",
+        "pattern": "",
+        "quality": "",
+        "subdir_filter": True,
+    },
     "download": {
         "mode": "builtin",
         "dir": "",
