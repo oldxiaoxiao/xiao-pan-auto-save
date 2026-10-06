@@ -118,6 +118,27 @@ def test_subdir_filter_recurses_only_into_existing_dirs():
     assert any(f.dest_path.endswith("/剧/合集/11.4K.SDR.mp4") for f in planned.files)
 
 
+def test_plan_only_never_deletes_for_resave_but_keeps_the_item():
+    """重存删除那道门（engine.py:237 `existing and not plan_only`）必须有测试真的走过。
+
+    场景：目标 /剧 里已有同名目录「合集」（桩 list_dir 就是这么摆的），spec 开
+    update_subdir=".*" + update_subdir_resave=True——这是全特性最核心的安全承诺：
+    - 试跑侧：delete_items 一次都不许发（桩已计数该写函数），但「会重存」这项必须
+      如实落进计划集，试跑数字不能因为不删就少算；
+    - 真跑侧：delete_items 必须恰好 1 次，防止有人把门反写成 `if existing and plan_only`。
+    """
+    planned = _plan(update_subdir=".*", update_subdir_resave=True)
+    assert PlanDriver.calls == {}, f"试跑动了写操作（重存删除没被 plan_only 门住？）：{PlanDriver.calls}"
+    dirs = [f for f in planned.files if f.is_dir]
+    assert {f.share_name for f in dirs} == {"合集"}, f"「会重存」的目录没如实落进计划：{dirs}"
+    assert {f.dest_path for f in dirs} == {"/剧/合集"}
+    assert planned.status == "updated"
+
+    real = _real(update_subdir=".*", update_subdir_resave=True)
+    assert PlanDriver.calls.get("delete_items") == 1, f"真跑重存应删且只删一次：{PlanDriver.calls}"
+    assert {f.share_name for f in real.files if f.is_dir} == {"合集"}
+
+
 def test_task_spec_accepts_taskin_payload():
     """dry-run 端点靠 _task_spec 直接吃 TaskIn；这条把"12 个字段同名同型"这个假设钉死。"""
     from backend.schemas import TaskIn
