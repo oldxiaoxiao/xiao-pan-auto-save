@@ -260,6 +260,10 @@ async def _check_dir(
                             )
                         if len(result.files) > before:
                             log("info", f"子目录有新内容：{rel_path}/{share_file.name}")
+                elif not share_file.is_dir:
+                    # 原名即撞且非目录（pattern="" 或恒等 replace 的最常见任务）：第一次 is_exists 就命中，
+                    # 真跑也是无声跳过——这里只补计数，不改任何控制流，否则界面的「已存在跳过 N 项」恒为 0。
+                    result.planned_existing += 1
             # 目录在目标里已存在且没开递归：既有代码就是什么都不做，这里也不计 planned_existing
             # （它不是"跳过"，是"目录本身已在目标里、内容由递归或整目录搬走决定"——计了会让 UI 说谎）
         # 起始文件订阅：列表新→旧遍历，遇到 startfid（含）即停止（不受过滤影响）
