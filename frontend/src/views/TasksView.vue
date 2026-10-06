@@ -57,11 +57,25 @@ function toggleExpand(id: number) {
   editingId.value = editingId.value === id ? null : id;
 }
 
+/**
+ * 打开/重建新建表单的三个入口（＋ 新建、剪贴板导入、复制为新任务）共用这道脏守卫。
+ * 新建表单已经展开且用户有未保存输入时，任何入口都不动它：TaskForm 对 [task, prefill] 是 deep watch，
+ * 一换 prefill 就整份重建草稿，刚打的字丢失。「取消」按钮就在表单上，先保存或取消再来。
+ */
+function newFormDirtyBlocked(): boolean {
+  if (editingId.value === "new" && newDirty.value) {
+    ElMessage.warning("新建表单有未保存的输入，请先保存或取消");
+    return true;
+  }
+  return false;
+}
+
 function startNew() {
   // 新建的门槛：必须有那份真默认值（TaskForm 的 blank(defaults) 要用它当表单初值），
   // 没拿到时（等待中或已读取失败）都不许实例化新建表单。
   // 编辑已有任务不走这道门——那一行自带全部字段，见下面 TaskForm 的注释。
   if (!defaultsReady.value) return;
+  if (newFormDirtyBlocked()) return;
   pendingPrefill.value = undefined;
   editingId.value = "new";
   newDirty.value = false;
@@ -120,6 +134,7 @@ function openRun(task: Task | null) {
 }
 
 async function importClipboard() {
+  if (newFormDirtyBlocked()) return;
   if (!defaultsReady.value) {
     // 与新建按钮同一套口径：读取失败别再谎称"正在读取"。
     ElMessage.warning(defaultsFailed.value ? "默认值读取失败，请先点「＋ 新建任务」重试" : "正在读取默认值…");
@@ -144,8 +159,13 @@ async function importClipboard() {
 // —— 复制为新任务：把来源行的业务字段灌进现成的 pendingPrefill 通道，走新建表单 ——
 function startCopy(task: Task) {
   // 与「＋ 新建任务」同一道门（同一个 defaultsReady，不写第二份判空）：那份真默认值没到手时，
-  // 新建表单连初值都没有，复制入口同样要挡住。
-  if (!defaultsReady.value) return;
+  // 新建表单连初值都没有，复制入口同样要挡住。这一条不能像原来那样闷着返回——
+  // ⋮ 菜单项此时仍可点，点了没反应会被当成"复制坏了"，所以照 importClipboard 同一口径说清楚。
+  if (!defaultsReady.value) {
+    ElMessage.warning(defaultsFailed.value ? "默认值读取失败，请先点「＋ 新建任务」重试" : "正在读取默认值…");
+    return;
+  }
+  if (newFormDirtyBlocked()) return;
   // 脏草稿守卫，与 onPosition 里那条注释同源：正在编辑该行且有未保存输入时连动作都不发起——
   // 切走会把编辑焦点从这一行挪到新建表单，TaskForm 对 props.task 是 deep watch，
   // 回来时 loadFrom 用服务端值重建草稿，用户刚打的字丢失。
