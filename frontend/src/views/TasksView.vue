@@ -19,7 +19,16 @@ const { accounts } = storeToRefs(accountsStore);
 // 新建任务的初值全部来自后端 task_defaults（前端不写第二份默认值）：设置没载入完，
 // 「＋ 新建任务」按钮 disabled 并显示"正在读取默认值…"，于是 TaskForm 只在有一份真默认值时实例化。
 const defaultsReady = computed(() => !!settingsStore.settings.task_defaults);
-const newBlocked = computed(() => settingsStore.loading || !defaultsReady.value);
+// 拉取失败是另一种"没载入完"，而且它永远载入不完：loading 已经收起、task_defaults 永远缺席。
+// 此时再说"正在读取默认值…"就是承诺一件不会发生的事，所以用 store.error 换成可操作的失败态。
+const defaultsFailed = computed(() => !defaultsReady.value && !!settingsStore.error);
+// 失败态不算"等待"（按钮要能点下去重试），其余未就绪都算：等待中按钮禁用。
+const newBlocked = computed(() => !defaultsReady.value && !defaultsFailed.value);
+const newLabel = computed(() => {
+  if (defaultsFailed.value) return "默认值读取失败，点击重试";
+  if (newBlocked.value) return "正在读取默认值…";
+  return "＋ 新建任务";
+});
 
 const keyword = ref("");
 const pathFilter = ref("");
@@ -48,10 +57,21 @@ function toggleExpand(id: number) {
 }
 
 function startNew() {
-  if (newBlocked.value) return; // 按钮此时是 disabled，编程入口也一并挡住
+  // 门控口径统一为"有没有那份真默认值"：TaskForm 的 blank(defaults) 在 setup 里就会取值，
+  // 没拿到 task_defaults 时（不管是等待中还是已经读取失败）都不许实例化表单。
+  if (!defaultsReady.value) return;
   pendingPrefill.value = undefined;
   editingId.value = "new";
   newDirty.value = false;
+}
+
+// 同一个按钮位：未就绪时是重试，就绪后才是新建。失败态不新增一次启动拉取，只有用户点击才重拉。
+function onNewClick() {
+  if (defaultsFailed.value) {
+    settingsStore.load();
+    return;
+  }
+  startNew();
 }
 
 async function onSave(payload: TaskPayload) {
@@ -98,8 +118,9 @@ function openRun(task: Task | null) {
 }
 
 async function importClipboard() {
-  if (newBlocked.value) {
-    ElMessage.warning("正在读取默认值…");
+  if (!defaultsReady.value) {
+    // 与新建按钮同一套口径：读取失败别再谎称"正在读取"。
+    ElMessage.warning(defaultsFailed.value ? "默认值读取失败，请先点「＋ 新建任务」重试" : "正在读取默认值…");
     return;
   }
   try {
@@ -182,8 +203,9 @@ onMounted(() => {
         <span v-if="hasUnsaved" class="dot-unsaved" title="有未保存的修改" />
       </span>
       <el-button type="primary" @click="openRun(null)"> ▶ 立即运行 </el-button>
-      <el-button :disabled="newBlocked" @click="startNew()">
-        {{ newBlocked ? "正在读取默认值…" : "＋ 新建任务" }}
+      <!-- 三种状态各有各的说法：等待中才是"正在读取"，读取失败改成可操作的重试提示。 -->
+      <el-button :disabled="newBlocked" @click="onNewClick()">
+        {{ newLabel }}
       </el-button>
     </div>
 

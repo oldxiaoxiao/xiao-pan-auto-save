@@ -76,11 +76,24 @@ const isFollow = computed(() => draft.run_mode === "follow");
 
 // 2) 路径跟随：只有"新建 + 未手改过路径"才跟随剧名
 const pathTouched = ref(false);
-/** prefill 显式带了 savepath（Task 4 的「复制为新任务」带原路径）时按 prefill 为准，剧名不把它盖掉。 */
+/**
+ * prefill 显式带了 savepath（Task 4 的「复制为新任务」带原路径）时按 prefill 为准，剧名不把它盖掉。
+ *
+ * 这是**刻意**的行为，看着反直觉，别当 bug 抹掉：
+ * - 它不是"用户手改过一次"。`pathTouched` 的置真点严格只有两处（保存路径输入框的 @input、
+ *   文件选择器回传 payload.path），程序代填一律不置真——这条规矩没有因为下面这行而变成三处。
+ * - 它代表的是**另一条任务已经定制好的路径**，属于要原样带出来的来源数据，不是本轮输入。
+ *   复制出来的任务本该落在同一个目录里；若让剧名跟随把它盖成 {root}/{剧名}，
+ *   「复制为新任务」就变成"复制并搬家"，用户会在完全不同的目录里发现一份重复任务。
+ * - 所以新建表单的跟随只让位于两种情况：用户改过（pathTouched）、复制带来的原路径（这个标志）。
+ *   今天唯一的 prefill 来源是剪贴板导入的 `{ shareurl }`（不带 savepath），该标志不会被触发；
+ *   它是为 Task 4 的复制入口预留的，不是死代码。
+ */
 const prefillPinnedPath = ref(false);
 watch(
   () => draft.taskname,
   (name) => {
+    // 三条前置 return：编辑态永不改 / 用户手改过不抢 / prefill 带来的原路径不盖（第三条是刻意例外，见上）。
     if (props.task || pathTouched.value || prefillPinnedPath.value) return;
     draft.savepath = name.trim() ? `${defaults.value.savepath_root}/${name.trim()}` : defaults.value.savepath_root;
   },
@@ -218,6 +231,9 @@ function loadFrom(task: Task | null) {
   // （Task 4 的「复制为新任务」靠这条把原任务的递归正则原样带出来）。
   if (!task && props.prefill) {
     Object.assign(draft, props.prefill);
+    // 同上口径扩到 savepath：prefill 带了路径就**故意**不再跟随剧名（见上面 prefillPinnedPath 的说明）。
+    // 这里用独立标志而不是去置真 pathTouched，正是为了让 pathTouched 的置真点仍然只有"用户亲手改过"两处；
+    // 抹掉这一行，复制来的定制路径会被剧名 watch 盖成 {root}/{剧名}，等于复制时静默搬了家。
     if (props.prefill.savepath !== undefined) prefillPinnedPath.value = true;
   }
   draft.runweek = [...(task?.runweek ?? [])];
@@ -341,9 +357,21 @@ const dryBody = computed(() => {
   return lines.join("\n");
 });
 
+/**
+ * 试跑前的必填校验与 submit 同口径、逐字段点名（spec 4.5）：说清到底是哪一项还没填，
+ * 不合并成"请先填写分享链接与保存路径"这种要用户自己对照的提示。
+ */
 async function tryRun() {
-  if (!draft.shareurl.trim() || !draft.savepath.trim()) {
-    ElMessage.warning("请先填写分享链接与保存路径");
+  if (!draft.taskname.trim()) {
+    ElMessage.warning("请填写任务名称");
+    return;
+  }
+  if (!draft.shareurl.trim()) {
+    ElMessage.warning("请填写分享链接");
+    return;
+  }
+  if (!draft.savepath.trim()) {
+    ElMessage.warning("请选择保存路径");
     return;
   }
   dryRunning.value = true;
@@ -588,11 +616,14 @@ const hasId = computed(() => props.task?.id ?? null);
     </div>
 
     <!-- 试跑结果：只在点按钮时才跑（每次都会真访问网盘，不做自动触发）；message 原样显示，
-         后端说 banned 就显示 banned 的原文，计数键缺席时那几行整行不出现。 -->
-    <div v-if="dryResult || dryError || dryRunning" class="dryrun">
-      <small :class="dryMsgClass">{{ dryMessage }}</small>
-      <small class="dryrun__body">{{ dryBody }}</small>
-    </div>
+         后端说 banned 就显示 banned 的原文，计数键缺席时那几行整行不出现。
+         aria-live 挂在这块上：结果是点完按钮异步回来的，读屏要能在它落地时读到那句话。 -->
+    <template v-if="dryResult || dryError || dryRunning">
+      <div class="dryrun" aria-live="polite">
+        <small :class="dryMsgClass">{{ dryMessage }}</small>
+        <small class="dryrun__body">{{ dryBody }}</small>
+      </div>
+    </template>
 
     <FileSelector
       v-model="selector"
