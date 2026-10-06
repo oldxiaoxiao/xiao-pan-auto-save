@@ -96,20 +96,34 @@ async def _run_retry_task(task_id: int) -> None:
     必须先清：once_next_driver 见 next_retry_at 非空会答"等重试作业"，
     不清就等于这轮运行自己把自己跳过。
     """
+    from datetime import datetime, timedelta
+    from functools import partial
+
     from .database import session_scope
     from .models import Task
     from .services import task_service
 
-    with session_scope() as s:
-        row = s.get(Task, task_id)
-        if row is None:
-            return
-        row.next_retry_at = None
-        s.add(row)
+    log = hub.make_logger("scheduled")
+    try:
+        with session_scope() as s:
+            row = s.get(Task, task_id)
+            if row is None:
+                return
+            row.next_retry_at = None
+            s.add(row)
+    except Exception as exc:  # noqa: BLE001 旁路写库：SQLite 无 WAL/busy_timeout，并发写抛锁冲突
+        # 抛回调度器 = 这格到点作业被消费移除而库里格子还在 ⇒ 每日扫永远让位，
+        # 和过期作业被 misfire 丢弃是同一种孤儿态。宁可让重试作业继续驱动，
+        # 也不能让它永远没人跑：按重试节奏重排一格，到点再清再试；
+        # replace_existing 保证同一行始终只有一格，不会叠加。
+        log("warn", f"任务 {task_id} 清除重试到点时间失败，本轮不运行：{exc}")
+        when = datetime.now() + timedelta(minutes=task_service.ONCE_RETRY_DELAY_MINUTES)
+        scheduler.reschedule_retry_at(task_id, when, partial(_run_retry_task, task_id))
+        return
     try:
         await task_service.run_tasks(task_ids=[task_id], trigger="scheduled")
     except Exception as exc:  # noqa: BLE001
-        hub.make_logger("scheduled")("error", f"任务 {task_id} 重试运行异常：{exc}")
+        log("error", f"任务 {task_id} 重试运行异常：{exc}")
 
 
 def apply_task_schedule(task) -> None:

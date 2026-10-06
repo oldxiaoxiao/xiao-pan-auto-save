@@ -61,12 +61,19 @@ class TaskScheduler:
         )
         return str(trigger)
 
-    def reschedule_retry_at(self, task_id: int, when, func) -> str:
-        """排一次"到点就跑"的重试作业；到点执行后由结局判定决定是否再排。"""
+    def reschedule_retry_at(self, task_id: int, when: datetime, func) -> str:
+        """排一次"到点就跑"的重试作业；到点执行后由结局判定决定是否再排。
+
+        misfire_grace_time 显式传 None（不设宽限）：调度器默认宽限只有 1 秒，停机跨过到期点或
+        事件循环卡顿超过 1 秒时，过期作业会被 APScheduler 打一条 "was missed" 后直接丢弃并移除
+        —— 库里的格子还在 ⇒ once_next_driver 答 "retry" ⇒ 每日扫永远让位 ⇒ 这一行永久失去驱动方，
+        界面还挂着「重试中」和一个已过去的 ETA。不设宽限=迟到多久都立刻补跑，正是 4.3
+        「重启后按库内 next_retry_at 重建」要的补跑语义。主 crontab 与任务级周期作业不受影响。
+        """
         job_id = f"xiao_pan_retry_{task_id}"
         self.scheduler.add_job(
             func, trigger=DateTrigger(run_date=when), id=job_id, replace_existing=True,
-            max_instances=1, coalesce=True,
+            max_instances=1, coalesce=True, misfire_grace_time=None,
         )
         return job_id
 

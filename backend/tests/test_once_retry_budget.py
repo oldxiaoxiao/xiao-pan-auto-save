@@ -547,3 +547,112 @@ def test_settle_once_write_failure_is_swallowed(monkeypatch):
     finally:
         monkeypatch.undo()
         _delete(tid)
+
+
+# ---------- C1 回归：过期的重试作业不能被静默丢弃 ----------
+
+
+def test_overdue_retry_slot_registers_job_without_misfire_grace(monkeypatch):
+    """重启重建出来的过期作业必须显式关掉宽限期：APScheduler 默认 1s 宽限会把它丢弃。
+
+    丢的链路（评审在仓库 venv 实证过）：停机期间格子到期 → reschedule_all_tasks 注册过期作业
+    → 调度器按默认宽限打 "was missed"、不执行并移除 → 库里格子仍在 ⇒ once_next_driver 答
+    "retry" ⇒ 每日扫永远让位 ⇒ 这一行永久失去驱动方，界面却还显示「重试中」和一个已过去的 ETA。
+    misfire_grace_time=None 意为"迟到多久都照跑"，正是 spec 4.3 重启重建的补跑语义。
+    """
+    async def fake_run(task_ids=None, trigger="manual"):
+        return {"run_id": "x"}
+
+    monkeypatch.setattr(ts, "run_tasks", fake_run)
+    # 在注册那一刻拿到作业对象：调度器已启动时，过期格子可能转瞬跑完自我移除，事后 get_job 不稳
+    registered: list = []
+    real = main.scheduler.reschedule_retry_at
+
+    def spy(task_id, when, func):
+        job_id = real(task_id, when, func)
+        job = main.scheduler.scheduler.get_job(job_id)
+        if job is not None:
+            registered.append(job)
+        return job_id
+
+    monkeypatch.setattr(main.scheduler, "reschedule_retry_at", spy)
+    tid = _persist(retry_attempts=1, next_retry_at=datetime.now() - timedelta(minutes=6))
+    try:
+        main.reschedule_all_tasks()
+        assert len(registered) == 1
+        assert registered[0].misfire_grace_time is None
+    finally:
+        _delete(tid)
+
+
+@pytest.mark.asyncio
+async def test_overdue_retry_job_catches_up_and_drives_the_row(client, monkeypatch):
+    """钉死"过期格子不会让这一行永久失去驱动方"：注册即补跑，格子真的被驱动。
+
+    修复前这条红：过期作业被 "was missed" 丢弃、一次都没执行，而每日扫对它永久让位——
+    本特性「重启后按库内时间重建」的承诺就此落空。
+    """
+    ran: list[int] = []
+
+    async def fake_run(task_ids=None, trigger="manual"):
+        ran.append(task_ids[0])
+        return {"run_id": "x"}
+
+    monkeypatch.setattr(ts, "run_tasks", fake_run)
+    tid = _persist(retry_attempts=1, next_retry_at=datetime.now() - timedelta(minutes=6))
+    try:
+        main.apply_task_schedule(_reload(tid))
+        for _ in range(50):  # 过期补跑应立刻发生；5s 只是调度抖动的上限，不是等待阈值
+            if ran:
+                break
+            await asyncio.sleep(0.1)
+        assert ran == [tid], "过期重试作业被静默丢弃，这一行已无任何驱动方"
+        assert _reload(tid).next_retry_at is None  # 跑前清格：让位逻辑得以闭环的前提
+    finally:
+        _delete(tid)
+
+
+@pytest.mark.asyncio
+async def test_retry_slot_clear_failure_re_registers_job(monkeypatch):
+    """跑前清格的写库撞 "database is locked" 时：吞异常、不裸跑、且必须再排一格。
+
+    抛回调度器 = 这格作业被消费移除而库里格子还在 ⇒ 每日扫永远让位，与 misfire 丢作业
+    是同一种孤儿态；不重新注册则同样把行丢成无人驱动。宁可让重试作业继续驱动
+    （按 5 分钟节奏到点再清再跑），也不能让它永远让位。
+    """
+    from contextlib import contextmanager
+
+    import backend.database
+
+    ran: list[int] = []
+
+    async def fake_run(task_ids=None, trigger="manual"):
+        ran.append(task_ids[0])
+        return {"run_id": "x"}
+
+    @contextmanager
+    def failing_scope():
+        with session_scope() as session:
+            real_add = session.add
+
+            def add(obj):
+                if isinstance(obj, Task):
+                    raise RuntimeError("database is locked")
+                return real_add(obj)
+
+            session.add = add
+            yield session
+
+    monkeypatch.setattr(ts, "run_tasks", fake_run)
+    monkeypatch.setattr(backend.database, "session_scope", failing_scope)
+    tid = _persist(retry_attempts=1, next_retry_at=datetime.now() - timedelta(minutes=1))
+    try:
+        await main._run_retry_task(tid)  # 不许抛回调度器
+        assert ran == []  # 格没清掉就不裸跑（判定会自我跳过），把这一轮让回给下一次到点
+        job = scheduler.scheduler.get_job(f"xiao_pan_retry_{tid}")
+        assert job is not None, "写失败后这一行仍须有驱动方，不能留下格在、作业已丢的孤儿态"
+        assert _naive_run_date(job) > datetime.now()  # 按重试节奏重排，不能拿过期格立刻补跑——锁不放开就是热循环
+        assert _reload(tid).retry_attempts == 1  # 写失败就是失败：没清掉不能假装清掉了
+    finally:
+        monkeypatch.undo()  # _reload/_delete 用的是测试模块顶部的原始绑定，但撤桩要在断言后立刻做
+        _delete(tid)
