@@ -230,7 +230,13 @@ async def _run_tasks_inner(
             summary["skipped"] += 1
             tlog("info", f"《{task.taskname}》已配置独立调度（schedule={task.schedule}），全局 sweep 不再驱动")
             continue
-        if trigger == "scheduled" and not task_due_today(task):
+        # runweek/enddate 这道今日门只关 follow 行：once 的截止日期已由上方的 once_next_driver 判过
+        # （scheduled_should_run 对过期 once 答 halted），不必也不能在这里重复拦一道——
+        # 表单 follow→once 只隐藏 runweek 不清空（TaskForm.vue 明示"不清空已有值"），
+        # 若连 once 一起拦，带遗留 runweek 的一次性行会连续最多 6 天不被驱动，
+        # 连到点重试作业触发时也被这条跳过，直接违背 spec 4.3「每天看一次，就是等放出」
+        # 与界面提示「每天再看一次」。
+        if trigger == "scheduled" and run_mode_of(task) == "follow" and not task_due_today(task):
             summary["skipped"] += 1
             tlog("info", f"《{task.taskname}》按 runweek/enddate 今日不运行")
             continue

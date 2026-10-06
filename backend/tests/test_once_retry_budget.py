@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta
 
 import pytest
@@ -656,3 +657,36 @@ async def test_retry_slot_clear_failure_re_registers_job(monkeypatch):
     finally:
         monkeypatch.undo()  # _reload/_delete 用的是测试模块顶部的原始绑定，但撤桩要在断言后立刻做
         _delete(tid)
+
+
+# ---------- I1 回归：runweek 那道门只关得住 follow 行 ----------
+
+
+@pytest.mark.asyncio
+async def test_legacy_runweek_gates_follow_rows_only_not_once_rows(monkeypatch):
+    """once 行带着"今天不在其中"的遗留 runweek 仍须被每日扫驱动。
+
+    表单切到 once 只隐藏不清空 runweek（follow→once 可达），而 spec 4.3 说 once 无到点时间
+    「参与每日扫（每天看一次，就是等放出）」、界面提示也写着"每天再看一次"。若 runweek 门
+    连 once 一起拦，这行会连续最多 6 天没人看，连到点重试作业触发时都被跳过——徽标还挂着
+    「重试中」。enddate 那条腿不受影响：once 的过期判定本就由 once_next_driver 承担。
+    """
+    acc_id = _seed_account()
+    monkeypatch.setattr(ts, "route_driver", lambda url: DownloadOkDriver)
+    ran: list[str] = []
+
+    async def fake_run_update(driver, spec, magic_regex=None, log=None):
+        ran.append(spec.taskname)
+        return TaskRunResult(status="no_changes")
+
+    monkeypatch.setattr(ts, "run_update_task", fake_run_update)
+    off_day = next(d for d in range(1, 8) if d != datetime.now().isoweekday())  # 今天必然不在这一周内
+    once_row = _persist(taskname="带遗留runweek的一次性", runweek=json.dumps([off_day]))
+    follow_row = _persist(taskname="按runweek该歇的追更", run_mode="follow", runweek=json.dumps([off_day]))
+    try:
+        summary = await ts.run_tasks(trigger="scheduled")
+        assert ran == ["带遗留runweek的一次性"]  # once 照跑，follow 照旧被 runweek 拦
+        assert summary["skipped"] == 1 and summary["driven"] == 1
+    finally:
+        _delete(once_row, follow_row)
+        _drop_account(acc_id)
