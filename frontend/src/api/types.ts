@@ -91,23 +91,41 @@ export interface MagicRegex {
   [keyword: string]: MagicRegexRule;
 }
 
-export interface PansouSource {
-  server?: string;
-  enable?: boolean | string;
-}
-
-export interface CloudSaverSource {
-  server?: string;
+/** 一个搜索引擎实例：同一协议可配多条，互为备份。 */
+export interface SearchEngine {
+  id: string;
+  type: string;
+  name: string;
+  server: string;
+  enable: boolean;
   username?: string;
   password?: string;
   token?: string;
-  enable?: boolean | string;
+  [key: string]: unknown;
+}
+
+export interface EngineFieldSpec {
+  key: string;
+  label: string;
+  required: boolean;
+  secret: boolean;
+}
+
+/** GET /api/search/engine-types：协议自描述，引擎表单按它渲染。 */
+export interface EngineTypeSpec {
+  type: string;
+  label: string;
+  default_server: string;
+  fields: EngineFieldSpec[];
 }
 
 export interface SearchSource {
-  pansou?: PansouSource;
-  cloudsaver?: CloudSaverSource;
-  [key: string]: unknown;
+  engines: SearchEngine[];
+}
+
+export interface SearchError {
+  engine: string;
+  reason: string;
 }
 
 export interface DownloadSettings {
@@ -266,6 +284,8 @@ export interface Suggestion {
 export interface SuggestionResponse {
   ok: boolean;
   data: Suggestion[];
+  /** 逐源失败说明：哪些引擎没出结果、为什么。 */
+  errors?: SearchError[];
 }
 
 export interface ValidateResponse {

@@ -1,13 +1,41 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { ref, watch, computed } from "vue";
 import { api } from "../api/client";
-import type { Suggestion } from "../api/types";
+import { useSettingsStore } from "../stores/settings";
+import type { SearchError, Suggestion } from "../api/types";
 
 // taskname = 用户输入的关键词/任务名；选中结果不再覆盖它（仅在输入为空时用资源标题兜底）。
 const taskname = defineModel<string>("taskname", { default: "" });
 const shareurl = defineModel<string>("shareurl", { default: "" });
 
+const PREF_KEY = "search.engine-pref";
+const settings = useSettingsStore();
+
+const engineOptions = computed(() =>
+  (settings.settings?.source?.engines ?? [])
+    .filter((e) => e.enable !== false)
+    .map((e) => ({ id: e.id, name: e.name || e.type })),
+);
+
+// "" = 全部启用引擎聚合；记住上次挑的那个，只服务于下次建表单，不写进任务
+const engine = ref(String(localStorage.getItem(PREF_KEY) || ""));
+
+function rememberEngine(id: string) {
+  engine.value = id;
+  localStorage.setItem(PREF_KEY, id);
+}
+
+watch(
+  // 停用到设置到手为止：GET 未到就重置会把有效偏好抹掉；到了又校验一次，被删/被停用的引擎不会留着继续搜
+  [engineOptions, () => settings.settings],
+  ([opts, loaded]) => {
+    if (loaded && engine.value && !opts.some((o) => o.id === engine.value)) rememberEngine("");
+  },
+  { immediate: true },
+);
+
 const suggestions = ref<Suggestion[]>([]);
+const searchErrors = ref<SearchError[]>([]);
 const open = ref(false);
 const searching = ref(false);
 const searched = ref(false);
@@ -30,13 +58,24 @@ function doSearch() {
   searching.value = true;
   open.value = true;
   api
-    .suggestions(q)
-    .then((r) => (suggestions.value = r.data.slice(0, 12)))
-    .catch(() => (suggestions.value = []))
+    .suggestions(q, false, engine.value)
+    .then((r) => {
+      suggestions.value = r.data.slice(0, 12);
+      searchErrors.value = r.errors ?? [];
+    })
+    .catch(() => {
+      suggestions.value = [];
+      searchErrors.value = [];
+    })
     .finally(() => {
       searching.value = false;
       searched.value = true;
     });
+}
+
+function pickEngine(id: string) {
+  rememberEngine(id);
+  if ((taskname.value || "").trim().length >= 2) doSearch();
 }
 
 // 防抖：停止输入 700ms 后才发一次搜索，避免每字一请求
@@ -114,16 +153,31 @@ defineExpose({ runValidate });
       @focus="open = suggestions.length > 0"
       @keyup.enter="doSearch"
     >
+      <template #prepend>
+        <el-select
+          :model-value="engine"
+          class="engine"
+          placeholder="全部引擎"
+          @update:model-value="(v: string) => pickEngine(v)"
+        >
+          <el-option label="全部引擎" value="" />
+          <el-option v-for="o in engineOptions" :key="o.id" :label="o.name" :value="o.id" />
+        </el-select>
+      </template>
       <template #append>
         <el-button :loading="searching" @click="doSearch">搜索</el-button>
       </template>
     </el-input>
 
+    <div v-if="searchErrors.length && suggestions.length" class="hint text-muted">
+      {{ searchErrors.map((e) => `${e.engine}：${e.reason}`).join("；") }}
+    </div>
+
     <ul v-if="open && suggestions.length" class="panel">
       <li v-for="(s, i) in suggestions" :key="i" class="item" @click="pick(s)">
         <div class="item__top">
           <span class="item__title">{{ s.taskname }}</span>
-          <span class="badge" :class="s.source === 'CloudSaver' ? 'badge--primary' : 'badge--muted'">
+          <span class="badge" :class="s.source.includes('+') ? 'badge--primary' : 'badge--muted'">
             {{ s.source }}
           </span>
         </div>
@@ -134,7 +188,11 @@ defineExpose({ runValidate });
       </li>
     </ul>
     <div v-else-if="open && !searching && searched" class="panel panel--empty">
-      未搜到资源（公共搜索源可能限流），可点「搜索」重试或手动填写链接
+      <template v-if="!engineOptions.length"> 还没有启用中的搜索引擎，请到「设置 → 资源搜索源」添加 </template>
+      <template v-else-if="searchErrors.length">
+        <div v-for="(e, i) in searchErrors" :key="i">{{ e.engine }}：{{ e.reason }}</div>
+      </template>
+      <template v-else>未搜到资源（公共搜索源可能限流），可点「搜索」重试或手动填写链接</template>
     </div>
 
     <!-- 已选资源：单独展示，不覆盖任务名；可清除 / 重新校验 -->
@@ -158,6 +216,13 @@ defineExpose({ runValidate });
 <style scoped>
 .suggest {
   position: relative;
+}
+.engine {
+  width: 132px;
+}
+.hint {
+  margin-top: 4px;
+  font-size: 12px;
 }
 .panel {
   list-style: none;

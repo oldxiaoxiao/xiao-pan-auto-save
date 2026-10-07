@@ -7,6 +7,7 @@ import type {
   DownloadJob,
   DownloadRecord,
   DriverInfo,
+  EngineTypeSpec,
   DryRunResult,
   HealthResponse,
   LogEntry,
@@ -178,8 +179,11 @@ export const api = {
     }),
 
   // 搜索
-  suggestions: (q: string, d = false) =>
-    request<SuggestionResponse>(`/api/search/suggestions?q=${encodeURIComponent(q)}&d=${d ? 1 : 0}`),
+  suggestions: (q: string, d = false, engine = "") =>
+    request<SuggestionResponse>(
+      `/api/search/suggestions?q=${encodeURIComponent(q)}&d=${d ? 1 : 0}&engine=${encodeURIComponent(engine)}`,
+    ),
+  engineTypes: () => request<{ ok: boolean; data: EngineTypeSpec[] }>("/api/search/engine-types"),
   validateShare: (shareurl: string) =>
     request<ValidateResponse>("/api/search/validate", { method: "POST", body: JSON.stringify({ shareurl }) }),
 
