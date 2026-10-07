@@ -32,6 +32,22 @@ def merge_task_defaults(value: object) -> dict:
     return base
 
 
+def merge_source(value: object) -> dict:
+    """source 与 task_defaults 同理：老形状在读取口径折成 {"engines": [...]}，前端和搜索只有一份答案。"""
+    from ..services.search_engines import normalize_source_cfg
+
+    return {"engines": normalize_source_cfg(value if isinstance(value, dict) else None)}
+
+
+def read_value(key: str, value: object) -> object:
+    """设置值出 API 的唯一口径：旁路写进来的旧形状、部分写入都在这里被规整。"""
+    if key == "task_defaults":
+        return merge_task_defaults(value)
+    if key == "source":
+        return merge_source(value)
+    return value
+
+
 class SettingIn(BaseModel):
     value: object
 
@@ -39,7 +55,8 @@ class SettingIn(BaseModel):
 @router.get("")
 async def read_settings() -> dict:
     merged = all_settings()
-    merged["task_defaults"] = merge_task_defaults(merged.get("task_defaults"))
+    for key in ("task_defaults", "source"):
+        merged[key] = read_value(key, merged.get(key))
     return merged
 
 
@@ -59,27 +76,24 @@ async def expand_magic(name: str) -> dict:
 async def read_one(key: str) -> dict:
     if key not in EDITABLE_KEYS:
         raise HTTPException(404, f"不允许读取/写入设置项: {key}")
-    value = get_setting(key)
-    if key == "task_defaults":
-        # 读单键必须与读全量同一口径：库里若有旁路写进来的半份 task_defaults，
-        # 不 merge 就会让 GET /api/settings 给六键、GET /api/settings/task_defaults 给残缺——第二套答案。
-        value = merge_task_defaults(value)
-    return {"key": key, "value": value}
+    # 读单键必须与读全量同一口径：库里若有旁路写进来的旧形状值，不规整就会给两套答案。
+    return {"key": key, "value": read_value(key, get_setting(key))}
 
 
 @router.put("/{key}")
 async def write_one(key: str, body: SettingIn) -> dict:
     if key not in EDITABLE_KEYS:
         raise HTTPException(404, f"不允许写入设置项: {key}")
-    if key == "task_defaults":
-        set_setting(key, merge_task_defaults(body.value))
+    if key in ("task_defaults", "source"):
+        # 写入即规整成规范形状落库，读回来不用二次猜
+        set_setting(key, read_value(key, body.value))
     else:
         set_setting(key, body.value)
     if key == "crontab":
         from ..main import reschedule_main_job
 
         reschedule_main_job()
-    return {"key": key, "value": get_setting(key), "job": MAIN_JOB_ID}
+    return {"key": key, "value": read_value(key, get_setting(key)), "job": MAIN_JOB_ID}
 
 
 class NotifyTestIn(BaseModel):

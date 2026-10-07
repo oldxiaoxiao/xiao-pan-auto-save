@@ -6,24 +6,34 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from ..api.deps import get_setting, set_setting
+from ..services.search_engines import engine_type_specs, normalize_source_cfg
 from ..services.search_service import search_all
 
 router = APIRouter(prefix="/api/search", tags=["search"])
 
 
+@router.get("/engine-types")
+async def engine_types() -> dict:
+    """有哪些协议可配、各要填哪些字段：前端按这个渲染引擎表单，加协议不用改 UI。"""
+    return {"ok": True, "data": engine_type_specs()}
+
+
 @router.get("/suggestions")
-async def suggestions(q: str, d: str = "0") -> dict:
+async def suggestions(q: str, d: str = "0", engine: str = "") -> dict:
+    """engine 传引擎 id；留空=搜所有启用引擎。errors 逐源说明谁没出结果。"""
     if not q.strip():
-        return {"ok": True, "data": []}
-    source_cfg = get_setting("source") or {}
-    result = await search_all(q.strip(), d == "1", source_cfg)
-    if result["new_cs_token"]:
-        cfg = dict(source_cfg)
-        cs = dict(cfg.get("cloudsaver") or {})
-        cs["token"] = result["new_cs_token"]
-        cfg["cloudsaver"] = cs
-        set_setting("source", cfg)
-    return {"ok": True, "data": result["data"]}
+        return {"ok": True, "data": [], "errors": []}
+    engines = normalize_source_cfg(get_setting("source"))
+    result = await search_all(q.strip(), d == "1", {"engines": engines}, engine_id=engine)
+    written = False
+    for engine_id, token in result["token_updates"].items():
+        hit = next((item for item in engines if item["id"] == engine_id), None)
+        if hit is not None and hit.get("token") != token:
+            hit["token"] = token
+            written = True
+    if written:
+        set_setting("source", {"engines": engines})
+    return {"ok": True, "data": result["data"], "errors": result["errors"]}
 
 
 class ValidateIn(BaseModel):

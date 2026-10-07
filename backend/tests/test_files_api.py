@@ -133,7 +133,8 @@ def test_search_suggestions_endpoint(client, monkeypatch):
                     "source": "PanSou",
                 }
             ],
-            "new_cs_token": "",
+            "token_updates": {},
+            "errors": [],
         }
 
     monkeypatch.setattr(routes_search, "search_all", fake_search_all)

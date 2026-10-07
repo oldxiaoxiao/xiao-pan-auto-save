@@ -1,23 +1,46 @@
-"""资源搜索聚合：PanSou / CloudSaver 两种搜索源，清洗出夸克分享链接。
+"""资源搜索聚合：按引擎列表并发搜索，清洗出夸克分享链接并合并去重。
 
 协议对齐已验证实现：
 - PanSou: GET {server}/api/search?kw=&cloud_types=[quark]&res=merge&refresh= → data.merged_by_type.quark[]
 - CloudSaver: GET {server}/api/search?keyword=&lastMessageId= Bearer token（失效自动登录重试），
   结果在 data[].list[].cloudLinks[]（cloudType=quark）
+
+引擎配置（多实例、启用、单源选取）在 search_engines 归一化，本模块只管打请求与合并结果。
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import UTC, datetime, timedelta, timezone
 
 import httpx
+
+from .search_engines import resolve_engines
 
 CST = timezone(timedelta(hours=8))
 
 _PANSOU_TITLE = re.compile(r"^(.*?)(?:[【\[]?(?:简介|介绍|描述)[】\]]?[:：]?)(.*)$", re.S)
 _CS_TITLE = re.compile(r"(?:名称|标题)[：:]?(.*)", re.S)
 _CS_CONTENT = re.compile(r"(?:描述|简介)[：:]?(.*)(?:链接|标签)", re.S)
+
+
+class SourceError(Exception):
+    """搜索源返回了业务失败，reason 里带对方的话，好让用户知道是哪个源、为什么没结果。"""
+
+
+async def _json(resp: httpx.Response) -> dict:
+    """公共实例被限流时返回的是 HTML 错误页，别把 JSONDecodeError 的原文甩到界面上。"""
+    try:
+        return resp.json()
+    except Exception:  # noqa: BLE001 响应根本不是 JSON，原因就是说给界面上看的
+        raise SourceError(f"返回的不是 JSON（HTTP {resp.status_code}），可能被限流") from None
+
+
+def _reason(exc: BaseException) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        return "请求超时"
+    return str(exc) or type(exc).__name__
 
 
 def _iso_to_cst(value: str) -> str:
@@ -32,16 +55,13 @@ def _iso_to_cst(value: str) -> str:
         return value
 
 
-async def pansou_search(client: httpx.AsyncClient, server: str, keyword: str, refresh: bool) -> list[dict]:
-    url = f"{server.rstrip('/')}/api/search"
-    params = {"kw": keyword, "cloud_types": ["quark"], "res": "merge", "refresh": str(refresh).lower()}
-    try:
-        resp = await client.get(url, params=params)
-        result = resp.json()
-    except Exception:  # noqa: BLE001 搜索源失败静默降级
-        return []
+async def pansou_search(client: httpx.AsyncClient, engine: dict, keyword: str, deep: bool) -> tuple[list[dict], str]:
+    server = engine["server"].rstrip("/")
+    params = {"kw": keyword, "cloud_types": ["quark"], "res": "merge", "refresh": str(deep).lower()}
+    resp = await client.get(f"{server}/api/search", params=params)
+    result = await _json(resp)
     if result.get("code") != 0:
-        return []
+        raise SourceError(str(result.get("message") or "PanSou 返回异常"))
     rows = (result.get("data") or {}).get("merged_by_type", {}).get("quark", []) or []
     out = []
     for item in rows:
@@ -59,42 +79,43 @@ async def pansou_search(client: httpx.AsyncClient, server: str, keyword: str, re
                     "content": content.strip(),
                     "datetime": _iso_to_cst(item.get("datetime", "")),
                     "channel": item.get("source", ""),
-                    "source": "PanSou",
                 }
             )
-    return out
+    return out, ""
 
 
-async def cloudsaver_search(client: httpx.AsyncClient, cfg: dict, keyword: str) -> tuple[list[dict], str]:
-    """返回 (结果, 新token或空串)。token 失效时自动登录重试。"""
-    server = (cfg.get("server") or "").rstrip("/")
-    if not (server and cfg.get("username") and cfg.get("password")):
-        return [], ""
-    headers = {"content-type": "application/json", "authorization": f"Bearer {cfg.get('token', '')}"}
+async def cloudsaver_search(
+    client: httpx.AsyncClient, engine: dict, keyword: str, deep: bool
+) -> tuple[list[dict], str]:
+    """返回 (结果, 新 token 或空串)。token 失效时自动登录重试。"""
+    server = engine["server"].rstrip("/")
+    if not (engine.get("username") and engine.get("password")):
+        raise SourceError("未填写用户名或密码")
+    headers = {
+        "content-type": "application/json",
+        "authorization": f"Bearer {engine.get('token', '')}",
+    }
     params = {"keyword": keyword, "lastMessageId": ""}
 
     async def do_search() -> dict:
         resp = await client.get(f"{server}/api/search", params=params, headers=headers)
-        return resp.json()
+        return await _json(resp)
 
     new_token = ""
-    try:
-        result = await do_search()
-        if not result.get("success") and "token" in str(result.get("message", "")):
-            login = await client.post(
-                f"{server}/api/user/login",
-                json={"username": cfg["username"], "password": cfg["password"]},
-                headers=headers,
-            )
-            data = login.json()
-            if data.get("success"):
-                new_token = (data.get("data") or {}).get("token", "")
-                headers["authorization"] = f"Bearer {new_token}"
-                result = await do_search()
-    except Exception:  # noqa: BLE001
-        return [], ""
+    result = await do_search()
+    if not result.get("success") and "token" in str(result.get("message", "")):
+        login = await client.post(
+            f"{server}/api/user/login",
+            json={"username": engine["username"], "password": engine["password"]},
+            headers=headers,
+        )
+        data = await _json(login)
+        if data.get("success"):
+            new_token = (data.get("data") or {}).get("token", "")
+            headers["authorization"] = f"Bearer {new_token}"
+            result = await do_search()
     if not result.get("success"):
-        return [], ""
+        raise SourceError(str(result.get("message") or "CloudSaver 返回异常"))
 
     out: list[dict] = []
     seen: set[str] = set()
@@ -121,46 +142,81 @@ async def cloudsaver_search(client: httpx.AsyncClient, cfg: dict, keyword: str) 
                         "content": content,
                         "datetime": _iso_to_cst(item.get("pubDate", "")),
                         "channel": item.get("channelId", ""),
-                        "source": "CloudSaver",
                     }
                 )
     return out, new_token
 
 
+ADAPTERS: dict = {
+    "pansou": pansou_search,
+    "cloudsaver": cloudsaver_search,
+}
+
+
+def _share_key(url: str) -> str:
+    """去重键：忽略尾斜杠与 #片段，但保留 query —— ?pwd= 提取码不同就是两条不同的分享。"""
+    return url.strip().rstrip("/").split("#", 1)[0]
+
+
+def _merge(rows: list[dict]) -> list[dict]:
+    """同一条分享被多引擎命中时并成一条：保留先出现的清洗结果，来源并注，时间取较新。"""
+    by_key: dict[str, dict] = {}
+    order: list[str] = []
+    for row in rows:
+        key = _share_key(row["shareurl"])
+        if not key:
+            continue
+        kept = by_key.get(key)
+        if kept is None:
+            by_key[key] = dict(row)
+            order.append(key)
+            continue
+        kept["datetime"] = max(kept["datetime"], row["datetime"])
+        if row["source"] not in kept["source"].split(" + "):
+            kept["source"] = f"{kept['source']} + {row['source']}"
+    merged = [by_key[key] for key in order]
+    merged.sort(key=lambda row: row["datetime"], reverse=True)  # 空时间自然沉底；同时间保持配置顺序
+    return merged
+
+
 async def search_all(
-    query: str, deep: bool, source_cfg: dict, timeout: float = 15.0, client: httpx.AsyncClient | None = None
+    query: str,
+    deep: bool,
+    source_cfg: dict | None,
+    engine_id: str = "",
+    timeout: float = 15.0,
+    client: httpx.AsyncClient | None = None,
 ) -> dict:
-    """聚合搜索并去重排序；返回 {data, new_cs_token}。client 可注入（测试用）。"""
-    results: list[dict] = []
-    new_token = ""
+    """并发搜各引擎并合并去重。
+
+    返回 {data, errors, token_updates}：errors 逐源说明谁没出结果，
+    token_updates 是 {引擎 id: 新 token}，由调用方写回该引擎。
+    """
+    targets, errors = resolve_engines(source_cfg, engine_id)
+    if not targets:
+        return {"data": [], "errors": errors, "token_updates": {}}
+
     own_client = client is None
     client = client or httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+    rows: list[dict] = []
+    token_updates: dict[str, str] = {}
     try:
-        tasks = []
-        ps_cfg = source_cfg.get("pansou") or {}
-        cs_cfg = source_cfg.get("cloudsaver") or {}
-        if ps_cfg.get("server", True) and str(ps_cfg.get("enable", "true")).lower() != "false":
-            tasks.append(
-                pansou_search(client, str(ps_cfg.get("server") or "https://so.252035.xyz"), query, deep)
-            )
-        if str(cs_cfg.get("enable", "true")).lower() != "false" and cs_cfg.get("server"):
-            tasks.append(cloudsaver_search(client, cs_cfg, query))
-        for coro in tasks:
-            res = await coro
-            if isinstance(res, tuple):
-                rows, new_token = res
-            else:
-                rows = res
-            results.extend(rows)
+        outs = await asyncio.gather(
+            *(ADAPTERS[engine["type"]](client, engine, query, deep) for engine in targets),
+            return_exceptions=True,
+        )
     finally:
         if own_client:
             await client.aclose()
 
-    seen: set[str] = set()
-    unique = []
-    for item in results:
-        if item["shareurl"] and item["shareurl"] not in seen:
-            seen.add(item["shareurl"])
-            unique.append(item)
-    unique.sort(key=lambda x: x.get("datetime", ""), reverse=True)
-    return {"data": unique, "new_cs_token": new_token}
+    for engine, out in zip(targets, outs, strict=True):
+        if isinstance(out, BaseException):
+            errors.append({"engine": engine["name"], "reason": _reason(out)})
+            continue
+        got_rows, new_token = out
+        if new_token:
+            token_updates[engine["id"]] = new_token
+        for row in got_rows:
+            row["source"] = engine["name"]
+        rows.extend(got_rows)
+    return {"data": _merge(rows), "errors": errors, "token_updates": token_updates}

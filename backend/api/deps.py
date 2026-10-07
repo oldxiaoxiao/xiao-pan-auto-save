@@ -14,7 +14,11 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "crontab": CRONTAB_DEFAULT,
     "push_config": {"CONSOLE": True},
     "magic_regex": {},
-    "source": {"pansou": {}, "cloudsaver": {}},
+    "source": {
+        "engines": [
+            {"id": "pansou-default", "type": "pansou", "name": "PanSou 公共站", "server": "https://so.252035.xyz", "enable": True}
+        ]
+    },
     "notify_enabled": True,
     "sign_enabled": True,
     "task_defaults": {
