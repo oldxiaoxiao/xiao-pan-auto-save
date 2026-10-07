@@ -260,6 +260,15 @@ defineExpose({ runValidate });
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0; /* 不给这条，flex 项不肯收缩到内容宽度以下，长标题会把右侧标签挤成竖排 */
+}
+.item__top .badge {
+  flex: none;
+  max-width: 50%; /* 多引擎命中时来源是「A + B」，不封顶又会把标题挤没 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .item__sub {
   display: flex;
