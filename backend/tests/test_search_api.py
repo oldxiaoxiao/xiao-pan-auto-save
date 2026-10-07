@@ -20,8 +20,8 @@ def test_engine_types_describe_their_fields(client):
     types = {t["type"]: t for t in client.get("/api/search/engine-types").json()["data"]}
     assert set(types) >= {"pansou", "kkso", "cloudsaver"}
     ps_fields = {f["key"]: f for f in types["pansou"]["fields"]}
-    assert types["pansou"]["default_server"] == ""
-    assert ps_fields["server"]["required"] is True  # 没有可用的内置公共站了，地址必填
+    assert types["pansou"]["default_server"] == "https://so.252035.xyz"
+    assert ps_fields["server"]["required"] is False  # 留空=用内置公共站
     kk_fields = {f["key"]: f for f in types["kkso"]["fields"]}
     assert types["kkso"]["default_server"] == "https://kkso.net"
     assert kk_fields["server"]["required"] is False  # 留空=用内置的 kkso.net

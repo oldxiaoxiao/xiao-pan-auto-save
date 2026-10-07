@@ -1,7 +1,8 @@
 """资源搜索聚合：按引擎列表并发搜索，清洗出夸克分享链接并合并去重。
 
 协议对齐已验证实现：
-- PanSou: GET {server}/api/search?kw=&cloud_types=[quark]&res=merge&refresh= → data.merged_by_type.quark[]
+- PanSou: GET {server}/api/search?kw=&cloud_types=quark&res=merge&refresh= → data.merged_by_type.quark[]
+  （cloud_types 发裸值，发成 JSON 串 ["quark"] 时公共站回 code=0 但一条都不给）
 - kkso: GET {server}/s/<关键词>.html，服务端渲染，条目里 copyText 入参带标题+描述/链接/提取码
 - CloudSaver: GET {server}/api/search?keyword=&lastMessageId= Bearer token（失效自动登录重试），
   结果在 data[].list[].cloudLinks[]（cloudType=quark）

@@ -261,6 +261,21 @@ async def test_pansou_clean_dedup_and_cst():
 
 
 @pytest.mark.asyncio
+async def test_pansou_sends_cloud_types_as_bare_value_not_json():
+    """公共实例只认 cloud_types=quark；发成 ["quark"] 它回 code=0 但一条都不给。
+
+    这种「成功但空」最难查：探测的人以为是站点废了（我踩过），其实是参数编码不对。
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["cloud_types"] == "quark"
+        assert "[" not in str(request.url.query) and "%5B" not in str(request.url.query)
+        return httpx.Response(200, json=PANSOUResp)
+
+    await search_all("凡人", False, {"pansou": {"server": "https://ps.test"}}, client=make_client(handler))
+
+
+@pytest.mark.asyncio
 async def test_cloudsaver_token_refresh_is_written_back_to_that_engine():
     """多实例时新 token 只能写回它自己的引擎，不能串到别的 CloudSaver 上。"""
     calls = []

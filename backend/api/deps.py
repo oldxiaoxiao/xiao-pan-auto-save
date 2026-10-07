@@ -16,7 +16,14 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "magic_regex": {},
     "source": {
         "engines": [
-            {"id": "kkso-default", "type": "kkso", "name": "夸克搜", "server": "https://kkso.net", "enable": True}
+            {
+                "id": "pansou-default",
+                "type": "pansou",
+                "name": "PanSou 公共站",
+                "server": "https://so.252035.xyz",
+                "enable": True,
+            },
+            {"id": "kkso-default", "type": "kkso", "name": "夸克搜", "server": "https://kkso.net", "enable": True},
         ]
     },
     "notify_enabled": True,

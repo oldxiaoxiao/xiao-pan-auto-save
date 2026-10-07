@@ -20,11 +20,6 @@ def test_old_shape_folds_into_engine_list():
     assert all(e["enable"] is True for e in engines)
 
 
-def test_old_shape_blank_pansou_server_is_dropped_not_folded():
-    """pansou 没有内置地址了：老形状里空地址折算成一条废引擎不如直接不要。"""
-    assert normalize_source_cfg({"pansou": {"server": ""}, "cloudsaver": {"server": ""}}) == []
-
-
 def test_enable_string_false_normalizes_to_false():
     engines = normalize_source_cfg({"pansou": {"server": "https://ps.test", "enable": "false"}})
     assert engines[0]["enable"] is False
@@ -87,23 +82,23 @@ def test_resolve_disabled_engine_id_reports():
     assert "已停用" in errors[0]["reason"]
 
 
-def test_default_settings_seed_engine_with_stable_id():
-    """默认那条引擎每次读到的 id 要一致：前端的「上次用的引擎」预选按 id 记。"""
+def test_default_settings_seed_both_public_engines():
+    """预设必须同时给两个源：一个挂了另一个还能搜（用户加引擎的本意）。"""
     from backend.api.deps import DEFAULT_SETTINGS
 
-    engines = normalize_source_cfg(DEFAULT_SETTINGS["source"])
     ids = [[e["id"] for e in normalize_source_cfg(DEFAULT_SETTINGS["source"])] for _ in range(2)]
-    assert ids[0] == ids[1] == ["kkso-default"]
-    assert engines[0]["type"] == "kkso"
-    assert engines[0]["server"] == "https://kkso.net"
-    assert engines[0]["enable"] is True
+    assert ids[0] == ids[1] == ["pansou-default", "kkso-default"]
+    engines = normalize_source_cfg(DEFAULT_SETTINGS["source"])
+    assert [e["server"] for e in engines] == ["https://so.252035.xyz", "https://kkso.net"]
+    assert all(e["enable"] for e in engines)
 
 
-def test_pansou_has_no_builtin_public_instance():
-    """so.252035.xyz 实测恒返 0 条夸克结果，不能再当内置公共实例塞给用户。"""
-    assert SEARCH_ENGINES["pansou"]["default_server"] == ""
-    server_field = next(f for f in SEARCH_ENGINES["pansou"]["fields"] if f["key"] == "server")
-    assert server_field["required"] is True
+def test_old_shape_blank_pansou_server_falls_back_to_default_site():
+    """设置里服务器留空 = 用内置公共站，不是悄悄不搜（这是原来 search_all 的静默失效）。"""
+    engines = normalize_source_cfg({"pansou": {"server": ""}, "cloudsaver": {"server": ""}})
+    assert len(engines) == 1  # 没填地址的 CloudSaver 不折算成废引擎
+    assert engines[0]["type"] == "pansou"
+    assert engines[0]["server"] == "https://so.252035.xyz"
 
 
 def test_kkso_spec_needs_only_server():

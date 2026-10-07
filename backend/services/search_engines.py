@@ -14,9 +14,9 @@ from uuid import uuid4
 SEARCH_ENGINES: dict[str, dict] = {
     "pansou": {
         "label": "PanSou",
-        "default_server": "",
+        "default_server": "https://so.252035.xyz",
         "fields": [
-            {"key": "server", "label": "服务器地址", "required": True, "secret": False},
+            {"key": "server", "label": "服务器地址", "required": False, "secret": False},
         ],
     },
     "kkso": {
