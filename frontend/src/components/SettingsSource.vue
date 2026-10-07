@@ -69,6 +69,13 @@ function setField(engine: SearchEngine, key: string, value: string) {
   engine[key] = value;
 }
 
+function fieldPlaceholder(engine: SearchEngine, key: string): string {
+  if (key === "token") return "留空，登录后自动写入";
+  if (key !== "server") return "";
+  const builtin = specOf(engine.type)?.default_server ?? "";
+  return builtin ? `留空=用内置地址 ${builtin}` : "必填，自建服务地址";
+}
+
 function removeEngine(index: number) {
   engines.splice(index, 1);
 }
@@ -142,15 +149,7 @@ async function save() {
             :type="field.secret ? 'password' : 'text'"
             :show-password="field.secret"
             @update:model-value="(v: string) => setField(engine, field.key, String(v))"
-            :placeholder="
-              field.key === 'server'
-                ? engine.type === 'pansou'
-                  ? '留空=用内置公共实例'
-                  : '必填，自建服务地址'
-                : field.key === 'token'
-                  ? '留空，登录后自动写入'
-                  : ''
-            "
+            :placeholder="fieldPlaceholder(engine, field.key)"
           />
         </div>
       </div>
