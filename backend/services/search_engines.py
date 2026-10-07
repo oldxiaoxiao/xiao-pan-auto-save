@@ -14,7 +14,14 @@ from uuid import uuid4
 SEARCH_ENGINES: dict[str, dict] = {
     "pansou": {
         "label": "PanSou",
-        "default_server": "https://so.252035.xyz",
+        "default_server": "",
+        "fields": [
+            {"key": "server", "label": "服务器地址", "required": True, "secret": False},
+        ],
+    },
+    "kkso": {
+        "label": "夸克搜 kkso.net",
+        "default_server": "https://kkso.net",
         "fields": [
             {"key": "server", "label": "服务器地址", "required": False, "secret": False},
         ],

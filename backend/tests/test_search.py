@@ -51,6 +51,44 @@ CS_SEARCH_OK = {
 }
 
 
+KKSO_HTML = """
+<html><body><div class="list">
+  <div class="item">
+    <a href="javascript:;" onclick="linkBtn(this)" data-index="0" class="title">
+      资源标题：凡人修仙传剧版 4K更新至24集资源描述：电影版紧接原著和动画年番中韩立的修仙之旅。
+    </a>
+    <!-- <div class="type cate">分类：其它</div> -->
+    <div class="type time">2025-10-04</div>
+    <div class="type"><span>来源：夸克网盘</span></div>
+    <div class="btns">
+      <div class="btn" @click.stop="copyText($event,'资源标题：凡人修仙传剧版 4K更新至24集资源描述：电影版紧接原著和动画年番中韩立的修仙之旅。','https://pan.quark.cn/s/4a1fe2f8929d','')"><i class="iconfont icon-fenxiang1"></i>复制分享</div>
+      <a href="/d/13926.html" class="btn"><i class="iconfont icon-fangwen"></i>查看详情</a>
+    </div>
+  </div>
+  <div class="item">
+    <a href="javascript:;" onclick="linkBtn(this)" data-index="1" class="title">
+      资源标题：三体&amp;凡人外传资源描述：科幻合集
+    </a>
+    <div class="type time">2026-03-01</div>
+    <div class="type"><span>来源：夸克网盘</span></div>
+    <div class="btns">
+      <div class="btn" @click.stop="copyText($event,'资源标题：三体&amp;凡人外传资源描述：科幻合集','https://pan.quark.cn/s/b7c1d2e3f4a5','abcd')"><i class="iconfont icon-fenxiang1"></i>复制分享</div>
+    </div>
+  </div>
+  <div class="item">
+    <a href="javascript:;" onclick="linkBtn(this)" data-index="2" class="title">资源标题：只有百度的那条</a>
+    <div class="type time">2026-02-02</div>
+    <div class="type"><span>来源：百度网盘</span></div>
+    <div class="btns">
+      <div class="btn" @click.stop="copyText($event,'资源标题：只有百度的那条','https://pan.baidu.com/s/1abcdef','-')"><i class="iconfont icon-fenxiang1"></i>复制分享</div>
+    </div>
+  </div>
+</div></body></html>
+"""
+
+KKSO_NO_ITEMS = "<html><body><div class=\"list\"><p>没有找到相关资源</p></div></body></html>"
+
+
 def make_client(handler):
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
@@ -294,3 +332,123 @@ async def test_disabled_source_skipped():
     cfg = {"pansou": {"enable": "false", "server": "https://ps.test"}}
     out = await search_all("x", False, cfg, client=make_client(handler))
     assert out["data"] == []
+
+
+KKSO_CFG = {"engines": [{"id": "k1", "type": "kkso", "name": "夸克搜", "server": "https://kkso.test"}]}
+
+
+def kkso_client(body: str, seen: list | None = None):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append(request)
+        return httpx.Response(200, text=body)
+
+    return make_client(handler)
+
+
+@pytest.mark.asyncio
+async def test_kkso_search_requests_keyword_page_path():
+    """kkso 的搜索入口是服务端渲染的 /s/<关键词>.html，没有 JSON 接口。"""
+    from urllib.parse import unquote
+
+    seen: list = []
+    await search_all("凡人", False, KKSO_CFG, client=kkso_client(KKSO_HTML, seen))
+    assert unquote(str(seen[0].url.path)) == "/s/凡人.html"
+
+
+@pytest.mark.asyncio
+async def test_kkso_search_keeps_only_quark_rows():
+    out = await search_all("凡人", False, KKSO_CFG, client=kkso_client(KKSO_HTML))
+    assert {r["shareurl"].split("?")[0] for r in out["data"]} == {
+        "https://pan.quark.cn/s/4a1fe2f8929d",
+        "https://pan.quark.cn/s/b7c1d2e3f4a5",
+    }  # 百度那条不留：本项目只走夸克转存
+
+
+@pytest.mark.asyncio
+async def test_kkso_search_splits_title_and_description_and_reads_date():
+    out = await search_all("凡人", False, KKSO_CFG, client=kkso_client(KKSO_HTML))
+    first, second = out["data"]  # 按日期新的在前
+    assert first["datetime"] == "2026-03-01"
+    assert first["taskname"] == "三体&凡人外传"  # HTML 实体要还原
+    assert first["content"] == "科幻合集"
+    assert second["taskname"] == "凡人修仙传剧版 4K更新至24集"
+    assert second["content"] == "电影版紧接原著和动画年番中韩立的修仙之旅。"
+    assert second["channel"] == "夸克网盘"
+    assert second["source"] == "夸克搜"
+
+
+@pytest.mark.asyncio
+async def test_kkso_search_appends_password_to_share_url():
+    out = await search_all("凡人", False, KKSO_CFG, client=kkso_client(KKSO_HTML))
+    assert out["data"][0]["shareurl"] == "https://pan.quark.cn/s/b7c1d2e3f4a5?pwd=abcd"
+    assert out["data"][1]["shareurl"] == "https://pan.quark.cn/s/4a1fe2f8929d"  # 无提取码不拼
+
+
+@pytest.mark.asyncio
+async def test_kkso_search_says_structure_changed_instead_of_returning_empty():
+    """站点改版抓不到条目时不能说「没搜到」，得让用户知道是这个源坏了。"""
+    out = await search_all("凡人", False, KKSO_CFG, client=kkso_client(KKSO_NO_ITEMS))
+    assert out["data"] == []
+    assert out["errors"][0]["engine"] == "夸克搜"
+    assert "结构" in out["errors"][0]["reason"]
+
+
+KKSO_TWO_TITLE_FORMATS = """
+<html><body><div class="list"><div class="item">
+  <a href="javascript:;" class="title">【标题】：近20年贺岁片合集【描述】：英雄、手机、功夫、流浪地球、满江红下载地址</a>
+  <div class="type time">2025-10-04</div>
+  <div class="type"><span>来源：夸克网盘</span></div>
+  <div class="btns"><div class="btn" @click.stop="copyText($event,'【标题】：近20年贺岁片合集【描述】：英雄、手机、功夫、流浪地球、满江红下载地址','https://pan.quark.cn/s/4bd3d7a0c047','')"><i></i>复制分享</div></div>
+</div></div></body></html>
+"""
+
+
+@pytest.mark.asyncio
+async def test_kkso_search_handles_the_bracket_title_format_too():
+    """真机遇到两种标题写法：只认「资源标题：」会把一大段描述当剧名（建任务时名字就废了）。"""
+    out = await search_all("流浪地球", False, KKSO_CFG, client=kkso_client(KKSO_TWO_TITLE_FORMATS))
+    row = out["data"][0]
+    assert row["taskname"] == "近20年贺岁片合集"
+    assert row["content"].startswith("英雄、手机")
+
+
+KKSO_BAIDU_ONLY = """
+<html><body><div class="list"><div class="item">
+  <a href="javascript:;" class="title">资源标题：只有百度的那条</a>
+  <div class="type time">2026-02-02</div>
+  <div class="type"><span>来源：百度网盘</span></div>
+  <div class="btns"><div class="btn" @click.stop="copyText($event,'资源标题：只有百度的那条','https://pan.baidu.com/s/1abcdef','')"><i></i>复制分享</div></div>
+</div></div></body></html>
+"""
+
+
+@pytest.mark.asyncio
+async def test_kkso_search_names_no_quark_result_instead_of_blaming_structure():
+    """关键词有结果但全是别家网盘：要说「没有夸克结果」，不能诬陷站点改版。"""
+    out = await search_all("流浪地球", False, KKSO_CFG, client=kkso_client(KKSO_BAIDU_ONLY))
+    assert out["data"] == []
+    assert out["errors"][0]["reason"] == "夸克搜有结果但都不是夸克网盘，本项目转存不了"
+
+
+@pytest.mark.asyncio
+async def test_kkso_search_sends_browser_user_agent():
+    """kkso 会挡默认 httpx UA：不带浏览器 UA 时页面里根本抓不到条目（真机验证踩到的）。"""
+    seen: list = []
+    await search_all("凡人", False, KKSO_CFG, client=kkso_client(KKSO_HTML, seen))
+    assert "Mozilla" in seen[0].headers["user-agent"]
+
+
+KKSO_SITE_SAYS_EMPTY = """
+<html><body><div class="list"><div class="item">
+  <span class="t">{{dialogItem.title}}</span>
+</div><p>网盘接口暂时无响应</p></div></body></html>
+"""
+
+
+@pytest.mark.asyncio
+async def test_kkso_search_uses_site_own_marker_for_no_results():
+    """站点自己说「接口暂时无响应」时就是没结果，别报成页面结构变了。"""
+    out = await search_all("不可能存在的剧名", False, KKSO_CFG, client=kkso_client(KKSO_SITE_SAYS_EMPTY))
+    assert out["data"] == []
+    assert out["errors"][0]["reason"] == "夸克搜没有这个关键词的结果"

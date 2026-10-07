@@ -20,12 +20,9 @@ def test_old_shape_folds_into_engine_list():
     assert all(e["enable"] is True for e in engines)
 
 
-def test_old_shape_blank_pansou_server_falls_back_to_default_site():
-    """设置里服务器留空 = 用内置公共站，不是悄悄不搜（这是原来 search_all 的静默失效）。"""
-    engines = normalize_source_cfg({"pansou": {"server": ""}, "cloudsaver": {"server": ""}})
-    assert len(engines) == 1  # 没填地址的 CloudSaver 不折算成废引擎
-    assert engines[0]["type"] == "pansou"
-    assert engines[0]["server"] == "https://so.252035.xyz"
+def test_old_shape_blank_pansou_server_is_dropped_not_folded():
+    """pansou 没有内置地址了：老形状里空地址折算成一条废引擎不如直接不要。"""
+    assert normalize_source_cfg({"pansou": {"server": ""}, "cloudsaver": {"server": ""}}) == []
 
 
 def test_enable_string_false_normalizes_to_false():
@@ -91,12 +88,36 @@ def test_resolve_disabled_engine_id_reports():
 
 
 def test_default_settings_seed_engine_with_stable_id():
-    """默认那条 PanSou 公共实例每次读到的 id 要一致：前端的「上次用的引擎」预选按 id 记。"""
+    """默认那条引擎每次读到的 id 要一致：前端的「上次用的引擎」预选按 id 记。"""
     from backend.api.deps import DEFAULT_SETTINGS
 
+    engines = normalize_source_cfg(DEFAULT_SETTINGS["source"])
     ids = [[e["id"] for e in normalize_source_cfg(DEFAULT_SETTINGS["source"])] for _ in range(2)]
-    assert ids[0] == ids[1] == ["pansou-default"]
-    assert normalize_source_cfg(DEFAULT_SETTINGS["source"])[0]["server"] == "https://so.252035.xyz"
+    assert ids[0] == ids[1] == ["kkso-default"]
+    assert engines[0]["type"] == "kkso"
+    assert engines[0]["server"] == "https://kkso.net"
+    assert engines[0]["enable"] is True
+
+
+def test_pansou_has_no_builtin_public_instance():
+    """so.252035.xyz 实测恒返 0 条夸克结果，不能再当内置公共实例塞给用户。"""
+    assert SEARCH_ENGINES["pansou"]["default_server"] == ""
+    server_field = next(f for f in SEARCH_ENGINES["pansou"]["fields"] if f["key"] == "server")
+    assert server_field["required"] is True
+
+
+def test_kkso_spec_needs_only_server():
+    """kkso 是无鉴权公开站：前端按这个自描述渲染，只要一个地址框。"""
+    spec = SEARCH_ENGINES["kkso"]
+    assert spec["default_server"] == "https://kkso.net"
+    assert [f["key"] for f in spec["fields"]] == ["server"]
+    assert spec["fields"][0]["required"] is False and spec["fields"][0]["secret"] is False
+
+
+def test_kkso_engine_defaults_to_builtin_server_when_blank():
+    engines = normalize_source_cfg({"engines": [{"type": "kkso", "name": ""}]})
+    assert engines[0]["server"] == "https://kkso.net"
+    assert engines[0]["name"] == SEARCH_ENGINES["kkso"]["label"]
 
 
 def test_protocols_registered_for_config_all_have_adapters():

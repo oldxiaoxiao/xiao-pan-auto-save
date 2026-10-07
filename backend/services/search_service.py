@@ -2,6 +2,7 @@
 
 协议对齐已验证实现：
 - PanSou: GET {server}/api/search?kw=&cloud_types=[quark]&res=merge&refresh= → data.merged_by_type.quark[]
+- kkso: GET {server}/s/<关键词>.html，服务端渲染，条目里 copyText 入参带标题+描述/链接/提取码
 - CloudSaver: GET {server}/api/search?keyword=&lastMessageId= Bearer token（失效自动登录重试），
   结果在 data[].list[].cloudLinks[]（cloudType=quark）
 
@@ -11,8 +12,10 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import re
 from datetime import UTC, datetime, timedelta, timezone
+from urllib.parse import quote
 
 import httpx
 
@@ -147,8 +150,63 @@ async def cloudsaver_search(
     return out, new_token
 
 
+_KKSO_SHARE = re.compile(r"copyText\(\$event,'[^']*','(https?://[^']*)','([^']*)'\)")
+_KKSO_TITLE = re.compile(r'class="title"[^>]*>(.*?)</a>', re.S)
+_KKSO_TIME = re.compile(r'class="type time">([^<]+)<')
+_KKSO_SOURCE = re.compile(r"来源：([^<]+?)</span>")
+_KKSO_HEAD_DESC = re.compile(r"^(?:资源标题|【标题】)[：:](.*?)(?:资源描述|【描述】)[：:](.*)$")
+_KKSO_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+
+
+def _kkso_text(value: str) -> str:
+    return " ".join(html.unescape(value).split())
+
+
+async def kkso_search(client: httpx.AsyncClient, engine: dict, keyword: str, deep: bool) -> tuple[list[dict], str]:
+    """kkso.net 没有 JSON 接口，搜索结果是服务端渲染的 /s/<关键词>.html。
+
+    每个条目里 copyText(...) 的入参就带齐了标题+描述、分享链接、提取码，不用二跳详情页。
+    """
+    server = engine["server"].rstrip("/")
+    resp = await client.get(f"{server}/s/{quote(keyword)}.html", headers={"User-Agent": _KKSO_UA})
+    body = resp.text
+    out = []
+    for block in re.split(r'<div\s+class="item"', body)[1:]:
+        share = _KKSO_SHARE.search(block)
+        if not share:
+            continue
+        link, pwd = share.group(1), share.group(2)
+        if "pan.quark.cn" not in link:  # 只走夸克转存，别的盘给了也存不了
+            continue
+        title_match = _KKSO_TITLE.search(block)
+        raw_title = _kkso_text(title_match.group(1)) if title_match else link
+        taskname, content = raw_title, ""
+        if head := _KKSO_HEAD_DESC.search(raw_title):
+            taskname, content = _kkso_text(head.group(1)), _kkso_text(head.group(2))
+        time_match = _KKSO_TIME.search(block)
+        source_match = _KKSO_SOURCE.search(block)
+        out.append(
+            {
+                "shareurl": f"{link}?pwd={pwd}" if pwd else link,
+                "taskname": taskname,
+                "content": content,
+                "datetime": _kkso_text(time_match.group(1)) if time_match else "",
+                "channel": _kkso_text(source_match.group(1)) if source_match else "",
+            }
+        )
+    if out:
+        return out, ""
+    # 三种「没结果」得说得不一样，否则用户分不清是关键词的问题、盘的口径的问题还是站点改版
+    if "copyText(" in body:
+        raise SourceError("夸克搜有结果但都不是夸克网盘，本项目转存不了")
+    if "网盘接口暂时无响应" in body:
+        raise SourceError("夸克搜没有这个关键词的结果")
+    raise SourceError(f"没抓到条目（HTTP {resp.status_code}），可能页面结构变了")
+
+
 ADAPTERS: dict = {
     "pansou": pansou_search,
+    "kkso": kkso_search,
     "cloudsaver": cloudsaver_search,
 }
 
