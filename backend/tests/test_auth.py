@@ -81,6 +81,7 @@ def test_static_route_cannot_escape_dist(client):
 
 def test_desktop_session_last_for_the_process_lifetime(client, monkeypatch):
     from types import SimpleNamespace
+
     from backend.api import auth
 
     monkeypatch.setattr(config, "DESKTOP_MODE", True)
