@@ -39,6 +39,10 @@
 - [发行预检流水线](https://github.com/oldxiaoxiao/xiao-pan-auto-save/actions/runs/37724837482) 全部通过：Windows x64、macOS arm64、macOS Intel 原生构建、冻结后服务冒烟及 ZIP 归档；Linux amd64/arm64 镜像构建。
 - Windows 图形窗口未在该原生 runner 上人工检查；本次 GUI 验收范围为 macOS arm64 和 Compose Web。Windows ARM 虚拟机的 x64 模拟编译探测不能替代 Windows x64 原生 runner 结果。
 - Markdown 本地文档链接检查通过，桌面/Compose ZIP 未包含 `xiao_pan.db`、`.env` 或桌面服务日志。
+- [v0.1.1 正式发行](https://github.com/oldxiaoxiao/xiao-pan-auto-save/releases/tag/v0.1.1) 与[标签流水线](https://github.com/oldxiaoxiao/xiao-pan-auto-save/actions/runs/37725635226) 已完成，公开提供四个 ZIP 和 `SHA256SUMS`。
+- 公开 GHCR 镜像匿名清单验证通过，`0.1.1` 与 `latest` 指向同一 digest，包含 Linux amd64/arm64；两个正式镜像实际启动、健康端点与已鉴权驱动列表通过（amd64 使用 Docker 平台模拟）。
+- Compose 从本地预检镜像替换为正式镜像后，原数据库中的定时设置仍保留。Windows 原生 CI ZIP 在 Windows 11 ARM 虚拟机中另行执行 x64 服务冒烟，退出码为 0。
+- 首次上传误收集 Docker `.dockerbuild` 辅助记录导致下载步骤失败；回收该记录后重跑发布成功。主分支已修正为只下载 `desktop-*` 制品，三个客户端包保持完整，发行标签未改写。
 
 ## 可用性结论的含义
 

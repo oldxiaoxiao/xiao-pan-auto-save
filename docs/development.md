@@ -94,7 +94,9 @@ Windows x64、macOS arm64 和 macOS x64 在各自原生 runner 编译；PyInstal
 5. 所有构建成功后，工作流创建公开 Release，上传桌面 ZIP、Compose ZIP 和 `SHA256SUMS`。失败时不会把缺失的平台伪装成已交付。
 6. 核对 Release 的 commit、附件、校验和，以及 GHCR 镜像的平台列表；按版本标签部署验证。
 
-首次发布 GHCR 包后，在 GitHub 的包设置中将这个开源项目的容器包设为 Public，再用匿名访问验证镜像可以拉取。GHCR 的首次发布默认是 Private，仅关联公开仓库不等于镜像已经公开。Dockerfile 的 OCI source 标签用于关联源码仓库；后续版本沿用已有包权限。[GitHub 容器包可见性说明](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)。
+首次发布 GHCR 包后，核对包页面显示 Public，并用匿名访问验证镜像可以拉取；若仍为 Private，在包设置中将这个开源项目的容器包设为 Public。不要只凭源码仓库公开就假定镜像可匿名访问。Dockerfile 的 OCI source 标签用于关联源码仓库；后续版本沿用已有包权限。[GitHub 容器包可见性说明](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)。
+
+发布步骤只收集 `desktop-*` artifacts；Docker 构建动作生成的 `.dockerbuild` 是辅助记录，不进入客户端 ZIP 收集流程。
 
 源码分支推送到 `codex/release-*` 或手动运行工作流只编译并保存 Actions artifacts，不发布公开 Release。发行标签不得复用已有版本；失败后按日志修复再发布，不能绕过验证门槛。
 
