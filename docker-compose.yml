@@ -1,16 +1,17 @@
 services:
   xiao-pan:
     build: .
-    image: xiao-pan-auto-save:latest
+    image: ghcr.io/oldxiaoxiao/xiao-pan-auto-save:${XIAO_PAN_VERSION:-0.1.1}
     container_name: xiao-pan-auto-save
     restart: unless-stopped
     ports:
-      - "8432:8432"
+      - "${WEBUI_BIND:-127.0.0.1}:${WEBUI_PORT:-8432}:8432"
     volumes:
       - ./data:/app/data
     environment:
       # WebUI 登录密码（留空则本地免登录，公网部署务必设置）
       - WEBUI_PASSWORD=${WEBUI_PASSWORD:-}
+      - WEBUI_USERNAME=${WEBUI_USERNAME:-admin}
       # 对外 API 的兜底 Token（推荐改用 Web 上管理的多 Token）
       - API_TOKEN=${API_TOKEN:-}
       # 默认定时（可在 Web 设置页修改）
@@ -37,7 +38,7 @@ services:
       - --rpc-secret=${ARIA2_SECRET:-}
       - --dir=/app/data/downloads
       - --max-concurrent-downloads=3
-      # 多连接是突破夸克免费账号单流限速的关键
+      # 多连接并行下载，实际速度仍受账号和网盘策略限制
       - --max-connection-per-server=5
       - --split=5
       - --min-split-size=10M

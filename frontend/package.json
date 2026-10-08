@@ -1,7 +1,7 @@
 {
   "name": "xiao-pan-frontend",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -28,6 +28,6 @@
     "vue-tsc": "^2.0.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   }
 }

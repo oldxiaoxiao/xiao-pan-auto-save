@@ -22,14 +22,14 @@ from pathlib import Path
 
 import httpx
 
-from ..config import PROXY
+from ..config import DATA_DIR, PROXY
 from ..core.download_registry import registry
 from ..core.engine import SavedFile
 from ..core.logstream import LogFn
 from ..drivers.base import CloudDrive, DriveError
 from . import download_history as history
 
-DEFAULT_DOWNLOAD_DIR = str(Path(__file__).resolve().parent.parent.parent / "data" / "downloads")
+DEFAULT_DOWNLOAD_DIR = str(DATA_DIR / "downloads")
 
 
 @dataclass
@@ -75,6 +75,7 @@ class DownloadItem:
 
 
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+_WINDOWS_DEVICE = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)", re.I)
 
 # 同路径在途下载守卫：内置下载器正在落盘 / aria2 正在投递的 dest_path（解析后）集合。
 # 查库的 has_open_for_path 拦不住"取直链窗口"里的第二次点击——账本行要等取到直链才写入，
@@ -93,8 +94,10 @@ def is_downloading(path: str) -> bool:
 
 
 def safe_name(name: str) -> str:
-    cleaned = _UNSAFE.sub("_", (name or "").strip()).lstrip(".")
-    return cleaned[:200] or "_"
+    cleaned = _UNSAFE.sub("_", (name or "").strip()).lstrip(".")[:200].rstrip(". ")
+    if _WINDOWS_DEVICE.match(cleaned):
+        cleaned = "_" + cleaned
+    return cleaned or "_"
 
 
 def _history_start(log, *, source: str, ref_id: str, item: DownloadItem, size: int, task_id, taskname,

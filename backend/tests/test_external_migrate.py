@@ -6,7 +6,7 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import delete
+from sqlmodel import delete, select
 
 from backend.database import session_scope
 from backend.main import app
@@ -137,3 +137,52 @@ def test_migrate_preview_and_import(client):
     assert settings["crontab"] == "15 10 * * *"
     assert settings["push_config"]["PUSH_KEY"] == "SCT123"
     assert settings["magic_regex"]["$DEMO"]["pattern"] == "x"
+
+
+def test_overwrite_migration_preserves_other_driver_accounts(client):
+    with session_scope() as s:
+        acc = Account(driver_key="baidu", name="保留账号", cookie="PRIVATE")
+        s.add(acc)
+    assert client.post("/api/migrate", json={"config": {"cookie": "QUARK", "tasklist": []}, "overwrite": True}).status_code == 200
+    assert any(a["driver_key"] == "baidu" for a in client.get("/api/accounts").json())
+
+
+def test_migration_settings_only_does_not_lock_itself(client):
+    from backend.api.deps import set_setting
+
+    set_setting("crontab", "0 9 * * *")
+    result = client.post("/api/migrate", json={"config": {"cookie": [], "tasklist": [], "crontab": "15 10 * * *"}, "overwrite": True})
+    assert result.status_code == 200
+    assert client.get("/api/settings").json()["crontab"] == "15 10 * * *"
+
+
+def test_migration_error_rolls_back_all_changes(client):
+    from backend.api.deps import get_setting
+    from backend.services.migrate_service import import_config
+
+    with session_scope() as s:
+        s.add(Account(driver_key="quark", name="旧账号", cookie="OLD"))
+    before = get_setting("push_config")
+    with pytest.raises(TypeError):
+        import_config({"cookie": "NEW", "tasklist": [], "push_config": {"invalid": object()}}, overwrite=True)
+    with session_scope() as s:
+        assert [a.cookie for a in s.exec(select(Account)).all()] == ["OLD"]
+    assert get_setting("push_config") == before
+
+
+def test_migration_rebuilds_main_and_task_schedules(client):
+    from backend.main import scheduler
+
+    created = client.post("/api/tasks", json={"taskname": "旧任务", "shareurl": "https://pan.quark.cn/s/old", "savepath": "/old", "schedule": "interval:5"}).json()
+    assert scheduler.scheduler.get_job(f"xiao_pan_task_{created['id']}")
+    result = client.post("/api/migrate", json={"config": {"cookie": "Q", "crontab": "15 10 * * *", "tasklist": [{"taskname": "新任务", "shareurl": "https://pan.quark.cn/s/new", "savepath": "/new"}]}, "overwrite": True})
+    assert result.status_code == 200
+    assert "hour='10'" in client.get("/api/scheduler").json()["trigger"]
+    assert not any(j.id.startswith(("xiao_pan_task_", "xiao_pan_retry_")) for j in scheduler.scheduler.get_jobs())
+
+
+def test_malformed_migration_rejected_before_deleting_data(client):
+    client.post("/api/accounts", json={"driver_key": "quark", "cookie": "OLD", "name": "旧账号"})
+    result = client.post("/api/migrate", json={"config": {"cookie": "NEW", "tasklist": [{"taskname": "bad", "shareurl": "u", "savepath": "/s", "addition": True}]}, "overwrite": True})
+    assert result.status_code == 400
+    assert client.get("/api/accounts").json()[0]["name"] == "旧账号"

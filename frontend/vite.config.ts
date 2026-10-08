@@ -12,7 +12,8 @@ export default defineConfig({
   build: { outDir: "dist" },
   server: {
     proxy: {
-      "/api": { target: "http://127.0.0.1:8432", changeOrigin: true },
+      // 保留浏览器 Host，使同源写请求的 Origin 与后端收到的 Host 一致。
+      "/api": { target: "http://127.0.0.1:8432", changeOrigin: false },
     },
   },
 });

@@ -2,17 +2,20 @@
 FROM node:24-alpine AS frontend
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build
 
 # ---------- 阶段 2：运行时 ----------
 FROM python:3.11-slim
+LABEL org.opencontainers.image.source="https://github.com/oldxiaoxiao/xiao-pan-auto-save" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 DATA_DIR=/app/data TZ=Asia/Shanghai
 
 COPY pyproject.toml README.md ./
 COPY backend ./backend
+COPY desktop ./desktop
 RUN pip install --no-cache-dir .
 
 COPY --from=frontend /build/dist ./frontend/dist
