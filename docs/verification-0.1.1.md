@@ -34,8 +34,11 @@
 - macOS Intel 本地冻结编译通过，使用 Rosetta 执行冻结服务冒烟，返回版本 0.1.1 和 9 个驱动。
 - Docker Linux arm64 镜像完成本地构建；发行 Compose 配置在隔离目录启动主服务和 Aria2，健康检查、密码登录、匿名管理 401、静态越界 404、容器内 RPC 连接通过。
 - Compose Web 页面登录、设置保存及重新调度、SSE 实时连接已执行浏览器检查。
+- Vite 开发代理使用隔离服务验证登录和同源设置写入，均返回 200。
 - 独立最终复审重跑鉴权、桌面和迁移相关 38 项测试通过，未发现新增代码发布阻断项。
-- Windows/macOS 三个平台的远程冻结构建及双架构容器最终结果将在发行检查完成后追加。
+- [发行预检流水线](https://github.com/oldxiaoxiao/xiao-pan-auto-save/actions/runs/37724837482) 全部通过：Windows x64、macOS arm64、macOS Intel 原生构建、冻结后服务冒烟及 ZIP 归档；Linux amd64/arm64 镜像构建。
+- Windows 图形窗口未在该原生 runner 上人工检查；本次 GUI 验收范围为 macOS arm64 和 Compose Web。Windows ARM 虚拟机的 x64 模拟编译探测不能替代 Windows x64 原生 runner 结果。
+- Markdown 本地文档链接检查通过，桌面/Compose ZIP 未包含 `xiao_pan.db`、`.env` 或桌面服务日志。
 
 ## 可用性结论的含义
 
