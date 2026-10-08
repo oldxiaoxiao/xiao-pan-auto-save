@@ -77,6 +77,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          pattern: desktop-*
           path: release
           merge-multiple: true
       - run: python -m pip install pyyaml
