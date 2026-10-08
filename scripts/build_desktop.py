@@ -18,6 +18,8 @@ from backend import __version__  # noqa: E402
 
 
 def main() -> None:
+    if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-frontend", action="store_true")
     args = parser.parse_args()

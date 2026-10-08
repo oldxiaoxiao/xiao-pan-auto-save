@@ -8,6 +8,8 @@ RUN npm run build
 
 # ---------- 阶段 2：运行时 ----------
 FROM python:3.11-slim
+LABEL org.opencontainers.image.source="https://github.com/oldxiaoxiao/xiao-pan-auto-save" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 DATA_DIR=/app/data TZ=Asia/Shanghai
 
