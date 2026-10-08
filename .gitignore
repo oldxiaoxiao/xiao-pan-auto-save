@@ -17,3 +17,8 @@ frontend/tsconfig.tsbuildinfo
 *.tsbuildinfo
 # 不含斜杠的规则在任意层级都匹配，所以这一行也挡住子目录里的（frontend/、backend/ 等）
 .DS_Store
+build/
+dist/
+release/
+.superpowers/
+.env

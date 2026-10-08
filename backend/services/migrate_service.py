@@ -11,15 +11,15 @@ import json
 
 from sqlmodel import delete, select
 
-from ..api.deps import set_setting
 from ..database import session_scope
-from ..models import Account, Task
+from ..models import Account, Setting, Task
 
 _TASK_KEYS_HINT = "旧版字段直映射；update_subdir_resave_mode→update_subdir_resave；addition(插件) 丢弃"
 
 
 def analyze(config: dict) -> dict:
     """预览迁移内容，不落库。"""
+    _validate(config)
     cookies = config.get("cookie") or []
     if isinstance(cookies, str):
         cookies = [cookies] if cookies.strip() else []
@@ -31,6 +31,27 @@ def analyze(config: dict) -> dict:
         "settings": [k for k in ("crontab", "push_config", "magic_regex", "source") if k in config],
         "plugin_tasks_ignored": with_plugin,
     }
+
+
+def _validate(config: dict) -> None:
+    if "tasklist" not in config and "cookie" not in config:
+        raise ValueError("不像 quark_config.json：缺少 tasklist/cookie 字段")
+    cookies = config.get("cookie") or []
+    if not isinstance(cookies, (str, list)) or isinstance(cookies, list) and any(not isinstance(c, str) for c in cookies):
+        raise ValueError("cookie 必须是字符串或字符串列表")
+    tasks = config.get("tasklist") or []
+    if not isinstance(tasks, list) or any(not isinstance(t, dict) for t in tasks):
+        raise ValueError("tasklist 必须是任务对象列表")
+    for task in tasks:
+        for key in ("taskname", "shareurl", "savepath"):
+            if task.get(key) is not None and not isinstance(task[key], str):
+                raise ValueError(f"任务 {key} 必须是字符串")
+        addition = task.get("addition") or {}
+        if not isinstance(addition, dict) or not isinstance(addition.get("aria2") or {}, dict):
+            raise ValueError("任务 addition/aria2 必须是对象")
+    plugins = config.get("plugins") or {}
+    if not isinstance(plugins, dict) or not isinstance(plugins.get("aria2") or {}, dict):
+        raise ValueError("plugins/aria2 必须是对象")
 
 
 def import_config(config: dict, overwrite: bool = False) -> dict:
@@ -48,7 +69,14 @@ def import_config(config: dict, overwrite: bool = False) -> dict:
     with session_scope() as session:
         if overwrite:
             session.exec(delete(Task))
-            session.exec(delete(Account))
+            session.exec(delete(Account).where(Account.driver_key == "quark"))
+
+        def write_setting(key: str, value) -> None:
+            row = session.get(Setting, key)
+            if row is None:
+                row = Setting(key=key)
+                session.add(row)
+            row.set(value)
 
         cookies = config.get("cookie") or []
         if isinstance(cookies, str):
@@ -63,8 +91,7 @@ def import_config(config: dict, overwrite: bool = False) -> dict:
                 sort_order=i,
             )
             session.add(acc)
-            session.commit()
-            session.refresh(acc)
+            session.flush()
             account_ids.append(acc.id)
 
         n_tasks = 0
@@ -97,12 +124,12 @@ def import_config(config: dict, overwrite: bool = False) -> dict:
 
         for key in ("crontab", "push_config", "magic_regex", "source"):
             if key in config and config[key] is not None:
-                set_setting(key, config[key])
+                write_setting(key, config[key])
 
         # 旧 aria2 插件全局配置 → 下载设置
         old_aria2 = (config.get("plugins") or {}).get("aria2") or {}
         if old_aria2:
-            set_setting(
+            write_setting(
                 "download",
                 {
                     "mode": "aria2",

@@ -53,7 +53,7 @@ async function save() {
     </div>
     <div class="row">
       <label>下载根目录</label>
-      <el-input v-model="draft.dir" placeholder="留空 = data/downloads（Docker 内为 /app/data/downloads）" />
+      <el-input v-model="draft.dir" placeholder="留空 = 当前数据目录下的 downloads；也可填写绝对路径" />
     </div>
     <div class="row">
       <label>并发数</label>

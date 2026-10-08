@@ -10,6 +10,8 @@ DB_PATH = DATA_DIR / "xiao_pan.db"
 
 WEBUI_USERNAME = os.getenv("WEBUI_USERNAME", "admin")
 WEBUI_PASSWORD = os.getenv("WEBUI_PASSWORD", "")
+DESKTOP_TOKEN = os.getenv("XIAO_PAN_DESKTOP_TOKEN", "")
+DESKTOP_MODE = os.getenv("XIAO_PAN_DESKTOP_MODE", "") == "1"
 
 CRONTAB_DEFAULT = os.getenv("CRONTAB", "0 9 * * *")
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "30"))

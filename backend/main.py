@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from sqlmodel import select
 
 from . import __version__, config
@@ -20,6 +20,8 @@ from .api import (
     routes_tasks,
     routes_tokens,
 )
+from .api.auth import WebAuthMiddleware
+from .api.auth import router as auth_router
 from .core.logstream import hub
 from .core.scheduler import TaskScheduler
 from .database import init_db
@@ -184,6 +186,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="xiao-pan-auto-save", version=__version__, lifespan=lifespan)
+app.add_middleware(WebAuthMiddleware)
+app.include_router(auth_router)
 
 app.include_router(routes_tasks.router)
 app.include_router(routes_accounts.router)
@@ -226,7 +230,9 @@ if _DIST.is_dir():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str) -> FileResponse:
-        file = _DIST / full_path
+        file = (_DIST / full_path).resolve()
+        if not file.is_relative_to(_DIST.resolve()):
+            raise HTTPException(404, "文件不存在")
         if full_path and file.is_file():
             return FileResponse(file)
         # index.html 不缓存：前端重新构建后用户无需强刷即可拿到新 hash 资源

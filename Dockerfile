@@ -2,7 +2,7 @@
 FROM node:24-alpine AS frontend
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build
 
@@ -13,6 +13,7 @@ ENV PYTHONUNBUFFERED=1 DATA_DIR=/app/data TZ=Asia/Shanghai
 
 COPY pyproject.toml README.md ./
 COPY backend ./backend
+COPY desktop ./desktop
 RUN pip install --no-cache-dir .
 
 COPY --from=frontend /build/dist ./frontend/dist

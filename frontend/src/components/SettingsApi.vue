@@ -85,8 +85,10 @@ async function doImport() {
   <div class="pane">
     <h3>API 与迁移</h3>
     <p class="text-muted">
-      对外接口：<code>POST /api/add_task?token=…</code>（兼容旧油猴格式）、<code>/api/v1/task/add|list|update|run</code>。
-      配套脚本：<code>scripts/xiao-pan-auto-save.user.js</code>
+      对外接口：<code>POST /api/add_task?token=…</code
+      >（兼容旧油猴格式）、<code>/api/v1/task/add|list|update|run</code>。 配套脚本：<code
+        >scripts/xiao-pan-auto-save.user.js</code
+      >
     </p>
 
     <h4>API Token</h4>
@@ -133,8 +135,8 @@ async function doImport() {
       <el-button type="primary" :disabled="!preview" :loading="migrating" @click="doImport">确认导入</el-button>
     </div>
     <el-alert v-if="preview" type="info" :closable="false" class="tok">
-      将导入：夸克账号 <b>{{ preview.accounts }}</b> 个 · 任务 <b>{{ preview.tasks }}</b> 个 ·
-      设置项 {{ preview.settings.join("、") || "无" }}
+      将导入：夸克账号 <b>{{ preview.accounts }}</b> 个 · 任务 <b>{{ preview.tasks }}</b> 个 · 设置项
+      {{ preview.settings.join("、") || "无" }}
       <template v-if="preview.plugin_tasks_ignored.length">
         <br />插件配置不支持迁移，以下任务的 addition 将被忽略：{{ preview.plugin_tasks_ignored.join("、") }}
       </template>
