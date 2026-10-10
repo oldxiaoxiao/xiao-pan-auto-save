@@ -95,4 +95,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          gh release create "$GITHUB_REF_NAME" release/*.zip release/SHA256SUMS --verify-tag --title "$GITHUB_REF_NAME · 小盘自动转存" --notes-file "docs/release-notes-${{ steps.version.outputs.version }}.md"
+          gh release create "$GITHUB_REF_NAME" release/*.zip release/SHA256SUMS --title "$GITHUB_REF_NAME · 小盘自动转存" --notes-file "docs/release-notes-${{ steps.version.outputs.version }}.md"
