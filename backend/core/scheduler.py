@@ -38,10 +38,10 @@ class TaskScheduler:
         )
         return str(trigger)
 
-    def add_daily(self, job_id: str, func, hour: int = 4) -> None:
-        """注册一个每天整点执行的维护任务（重复注册覆盖）。"""
+    def add_daily(self, job_id: str, func, hour: int = 4, minute: int = 0) -> None:
+        """注册一个每天定时执行的维护任务（重复注册覆盖）。"""
         self.scheduler.add_job(
-            func, trigger=CronTrigger(hour=hour, minute=0), id=job_id, replace_existing=True,
+            func, trigger=CronTrigger(hour=hour, minute=minute), id=job_id, replace_existing=True,
             max_instances=1, coalesce=True,
         )
 

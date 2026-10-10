@@ -20,7 +20,11 @@ from ..models import DownloadRecord
 
 logger = logging.getLogger(__name__)
 
-TERMINAL = {"done", "failed", "skipped", "stopped"}
+# interrupted 也属终态：它是"这次尝试已经结束（被中断）"，只是还能从断点再开一次。
+# 不放进 TERMINAL 的话，这些行会一直挂在「进行中」，既不能被重下（has_open_for_path 拦），
+# 也要等到 24h 的 STALE 规则才被判失败——用户两头都看不到"被中断"这件事。
+TERMINAL = {"done", "failed", "skipped", "stopped", "interrupted"}
+INTERRUPTED = "interrupted"
 
 
 def start(
@@ -187,6 +191,49 @@ def prune(mode: str, retention: str = "days_90") -> int:
 
 STALE_HOURS = 24
 ACTIVE_STATES = ("queued", "downloading")
+
+
+def _part_bytes(dest_path: str) -> int:
+    """磁盘上 `.part` 已下到的字节数——进程重启后唯一可信的进度来源。"""
+    try:
+        return os.stat(str(dest_path) + ".part").st_size
+    except OSError:
+        return 0
+
+
+def mark_interrupted() -> int:
+    """把内置下载的在途账本行收口为 `interrupted`（FR-07 队列持久化）。
+
+    进度原本只活在两个地方：内存 registry（重启即清空）与磁盘上的 `.part`。
+    重启后前者没了，这些行如果不收口，就会一直挂在"进行中"——界面显示永远转圈，
+    重下入口还被 `has_open_for_path` 堵着，直到 24h 后被 STALE 规则判成失败。
+
+    aria2 的行不动：它自己有持久化与断点续传，且 reconcile 会逐个 gid 问 tellStatus，
+    在这里抢先判"中断"反而会盖掉它真实的在途状态。
+    """
+    moved = 0
+    now = datetime.now()
+    with session_scope() as session:
+        rows = session.exec(
+            select(DownloadRecord).where(col(DownloadRecord.status).in_(ACTIVE_STATES))
+        ).all()
+        for row in rows:
+            if row.source != "builtin":
+                continue
+            got = _part_bytes(row.dest_path)
+            total = int(row.size_total or 0)
+            if got and total:
+                row.error = f"程序中断，已下 {got / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f}MB（{got / total * 100:.0f}%），可从断点继续"
+            elif got:
+                row.error = f"程序中断，已下 {got / 1024 / 1024:.1f}MB（总大小未知，无法续传）"
+            else:
+                row.error = "程序中断，尚未写入数据"
+            row.size_done = got
+            row.status = INTERRUPTED
+            row.finished_at = now
+            session.add(row)
+            moved += 1
+    return moved
 
 
 def open_records() -> list[dict]:

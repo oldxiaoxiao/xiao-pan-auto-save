@@ -1,7 +1,7 @@
 {
   "name": "xiao-pan-frontend",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,9 @@
     "lint:check": "eslint src && prettier --check src"
   },
   "dependencies": {
+    "dompurify": "^3.4.16",
     "element-plus": "^2.7.0",
+    "marked": "^18.1.0",
     "pinia": "^2.1.7",
     "vue": "^3.4.0",
     "vue-router": "^4.3.0"

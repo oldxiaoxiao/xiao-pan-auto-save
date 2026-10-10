@@ -23,6 +23,11 @@ const form = reactive<AccountPayload>({
 
 const driverName = computed(() => new Map(drivers.value.map((d) => [d.key, d.name])));
 
+/** 失效 = 检查过且结论为不可用。没检查过的账号 check_ok 是默认值，不能误标。 */
+function isInvalid(a: Account) {
+  return a.check_ok === false && !!a.last_check_at;
+}
+
 function openAdd() {
   editing.value = null;
   Object.assign(form, { name: "", driver_key: "quark", cookie: "", enabled: true, sort_order: sorted.value.length });
@@ -159,6 +164,7 @@ onMounted(async () => {
         v-for="a in sorted"
         :key="a.id"
         class="acc card"
+        :class="{ 'acc--invalid': isInvalid(a) }"
         draggable="true"
         @dragstart="onDragStart(a.id)"
         @dragover="onDragOver($event, a.id)"
@@ -168,7 +174,17 @@ onMounted(async () => {
           <span class="handle">⠿</span>
           <span class="nick">{{ a.nickname || a.name || `账号 #${a.id}` }}</span>
           <span class="badge badge--primary">{{ driverName.get(a.driver_key) || a.driver_key }}</span>
+          <span v-if="isInvalid(a)" class="badge badge--danger" :title="a.check_message">
+            需更新
+          </span>
           <el-switch :model-value="a.enabled" size="small" class="sw" @change="toggleEnabled(a)" />
+        </div>
+
+        <div v-if="isInvalid(a)" class="invalid">
+          {{ a.check_message || "账号不可用" }}
+          <template v-if="a.enabled">
+            — 该账号的任务已暂停执行，重新粘贴 Cookie 后自动恢复
+          </template>
         </div>
 
         <div v-if="a.capacity_total" class="cap">
@@ -295,5 +311,32 @@ onMounted(async () => {
 }
 .err {
   color: var(--danger);
+}
+.badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.badge--primary {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.badge--danger {
+  background: #fdeceb;
+  color: var(--danger);
+  font-weight: 600;
+}
+.acc--invalid {
+  border: 1px solid #f7cbc9;
+}
+.invalid {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--danger);
+  background: #fdf3f2;
+  border-radius: 6px;
+  padding: 6px 8px;
 }
 </style>

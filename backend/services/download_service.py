@@ -127,6 +127,25 @@ def _history_finish(log, *, source: str, ref_id: str, ok: bool, fallback_name: s
         log("warn", f"下载账本终态写入失败（不影响下载）：{exc}")
 
 
+def _guard_history(log, items: list[DownloadItem], reason: str, *, task_id, taskname, account_id,
+                   driver_key: str) -> None:
+    """预检拦截也要留账本行：否则用户只能看到"没下载"，看不到为什么。"""
+    from uuid import uuid4
+
+    for item in items:
+        ref = f"guard-{uuid4().hex[:8]}"
+        try:
+            history.start(
+                source="guard", ref_id=ref, task_id=task_id, taskname=taskname, filename=item.name,
+                dest_path=str(item.local_path), size_total=int(item.size or 0), fid=item.fid,
+                driver_key=driver_key, account_id=account_id,
+            )
+            history.finish(ref, source="guard", status="failed", size_done=0,
+                           size_total=int(item.size or 0), error=reason)
+        except Exception as exc:  # noqa: BLE001 账本是旁路观测，绝不因它中断
+            log("warn", f"下载账本写入失败（不影响结果）：{exc}")
+
+
 def resolve_local(dest_path: str, cfg: DownloadSettings, override: str) -> Path:
     """云端绝对路径 → 本地路径。override 非空时平铺到 dir/override/文件名，否则镜像网盘目录。"""
     if override:
@@ -173,6 +192,20 @@ async def download_items(
     task_id: int | None = None, taskname: str = "", account_id: int | None = None, driver_key: str = "",
 ) -> list[str]:
     """执行已解析的下载清单：分派内置/aria2、写账本、成功后刷新 Emby。"""
+    # FR-01 磁盘预检：装不下就别开始。过去是写了一半才发现磁盘满，
+    # 留下一堆 failed 记录和一个残缺的 .part，用户还得自己去猜原因。
+    need = sum(int(i.size or 0) for i in items)
+    if need > 0 and items:
+        from .resource_guard import check_disk_space
+
+        ok, why = check_disk_space(items[0].local_path.parent, need)
+        if not ok:
+            log("error", f"❌ {why}，本次未开始下载")
+            _guard_history(
+                log, items, why, task_id=task_id, taskname=taskname,
+                account_id=account_id, driver_key=driver_key,
+            )
+            return [f"❌ {why}"]
     if cfg.mode == "aria2" and not await aria2_reachable(cfg):
         log("warn", "⚠️ aria2 不可达，自动改用内置下载器（保证下载不中断）")
         cfg = _as_builtin(cfg)
@@ -236,6 +269,37 @@ async def aria2_reachable(cfg: DownloadSettings) -> bool:
         return False
 
 
+def _resume_offset(part: Path, size: int) -> int:
+    """`.part` 里能接着往下写的字节偏移；不能续则返回 0。
+
+    三条判据缺一不可：总大小已知、part 存在、已写字节严格小于总大小。
+    等于或超过说明是"写完没改名"的残留，留着会让续传写出超长文件，直接删。
+    """
+    if not size:
+        return 0
+    try:
+        got = part.stat().st_size
+    except OSError:
+        return 0
+    if got >= size:
+        part.unlink(missing_ok=True)
+        return 0
+    return got if got > 0 else 0
+
+
+def _resume_hint(part: Path, size: int) -> str:
+    """给中断/失败记录的进度提示：让用户知道已经下了多少、还能接着下。"""
+    try:
+        got = part.stat().st_size
+    except OSError:
+        got = 0
+    if not got:
+        return "尚未写入数据"
+    if size:
+        return f"已下 {got / 1024 / 1024:.1f}/{size / 1024 / 1024:.1f}MB（{got / size * 100:.0f}%），可从断点继续"
+    return f"已下 {got / 1024 / 1024:.1f}MB（总大小未知，无法续传）"
+
+
 async def _resolve_links(driver: CloudDrive, items: list[DownloadItem]) -> tuple[dict[str, dict], str]:
     rows, cookie_str = await driver.get_download_urls([i.fid for i in items])
     return {r["fid"]: r for r in rows if r.get("download_url")}, cookie_str
@@ -296,43 +360,69 @@ async def _fetch_one(row: dict, item: DownloadItem, cookie_str: str, ua: str, *,
             registry.update(job_id, status="skipped")
         return True, f"跳过（已存在）{item.name}"
     part = path.with_name(path.name + ".part")
+    # FR-07 断点续传：`.part` 里已下到的字节是唯一能扛过进程重启的进度（内存 registry 重启即清空）。
+    # 只有「总大小已知 且 part 比它小」才敢续——大小未知时无从判断 part 是否完整，续了会写出坏文件。
+    resume = _resume_offset(part, size)
     headers = {"user-agent": ua}
     if cookie_str:
         headers["cookie"] = cookie_str
+    if resume:
+        headers["range"] = f"bytes={resume}-"
     started = time.monotonic()
     last_tick = started
-    written = 0
+    written = resume
     # read=60s 空闲上限：卡住的流最迟 60s 后抛 ReadTimeout 走失败路径，stop() 也能及时响应；
     # 免费盘分片间隔远小于 60s，不影响正常长下载（不加总超时）。
     async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10, read=60), follow_redirects=True) as client:
         async with client.stream("GET", row["download_url"], headers=headers) as resp:
-            if resp.status_code != 200:
+            if resp.status_code == 206:
+                # 服务端认了 Range：从断点往后追加
+                mode = "ab"
+            elif resp.status_code == 200:
+                # 服务端忽略/不支持 Range：整个资源从头回来了，带着旧 part 追加必然写坏，
+                # 必须截断重写（这一支会丢掉已下的进度，但正确性优先）。
+                # resume 一并清零：否则文案会谎报"续传自"，而实际是从头下的
+                mode = "wb"
+                written = 0
+                resume = 0
+            elif resp.status_code == 416:
+                # Range 不满足：part 比资源还大，多半是资源换过了。删掉重来，不叠加
+                part.unlink(missing_ok=True)
+                mode = "wb"
+                written = 0
+                resume = 0
+            elif resp.status_code != 200:
                 if job_id:
                     registry.update(job_id, status="failed", error=f"HTTP {resp.status_code}")
                 return False, f"{item.name}: HTTP {resp.status_code}"
-            with part.open("wb") as fh:
+            else:  # pragma: no cover - 上面的分支已覆盖 200
+                mode = "wb"
+                written = 0
+            # 上面 elif 链把 200 之前的分支都接住了，这里 mode 必有值
+            with part.open(mode) as fh:
                 async for chunk in resp.aiter_bytes(1 << 16):
                     if job_id and registry.cancel_requested(job_id):
                         fh.close()
-                        part.unlink(missing_ok=True)
-                        registry.update(job_id, status="stopped", error="已停止")
-                        return False, f"{item.name}: 已停止"
+                        # FR-07：part 保留——它是断点续传的唯一凭据，删了就得从头再下
+                        registry.update(job_id, status="stopped", error=_resume_hint(part, size))
+                        return False, f"{item.name}: 已停止（{_resume_hint(part, size)}）"
                     fh.write(chunk)
                     written += len(chunk)
                     now = time.monotonic()
                     if job_id and now - last_tick >= 0.25:
                         last_tick = now
-                        speed = written / max(now - started, 1e-6)
+                        speed = (written - resume) / max(now - started, 1e-6)
                         registry.update(job_id, done=written, speed=speed, status="downloading")
     if size and written != size:
-        part.unlink(missing_ok=True)
+        # 同样保留 part：流断了也能从断处继续，而不是每次都从头
         if job_id:
-            registry.update(job_id, status="failed", error=f"大小不符 {written}/{size}")
-        return False, f"{item.name}: 大小不符 {written}/{size}"
+            registry.update(job_id, status="failed", error=f"大小不符 {written}/{size}（{_resume_hint(part, size)}）")
+        return False, f"{item.name}: 大小不符 {written}/{size}，可继续"
     os.replace(part, path)
     if job_id:
         registry.update(job_id, done=written, total=written or size, status="done")
-    return True, f"{item.name}（{written / 1024 / 1024:.1f}MB）"
+    resumed = f"，续传自 {resume / 1024 / 1024:.1f}MB" if resume else ""
+    return True, f"{item.name}（{written / 1024 / 1024:.1f}MB{resumed}）"
 
 
 def _rpc_url(host_port: str) -> str:
@@ -365,15 +455,21 @@ async def aria2_status(cfg: DownloadSettings) -> list[dict]:
     token = [f"token:{cfg.aria2_secret}"] if cfg.aria2_secret else []
     keys = ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "files"]
     out: list[dict] = []
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
+    # 两个通道各自容错：任一通道失败只丢该通道，不能把另一个已取到的进度一起吞掉。
+    # 曾因 tellWaiting 返回空响应体使 resp.json() 抛错，外层 except 直接返回 []，
+    # 结果 aria2 明明在跑、界面上却完全看不到进度。
+    for method, extra in (("aria2.tellActive", []), ("aria2.tellWaiting", [0, 200])):
+        params = token + extra + [keys]
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
                 # tellWaiting 窗口取 200：排队深过窗口的 gid 对 reconcile 不可见，会被 24h 规则误判失败——盲区宁大勿漏
-            for method, extra in (("aria2.tellActive", []), ("aria2.tellWaiting", [0, 200])):
-                params = token + extra + [keys]
                 resp = await client.post(
                     url, json={"jsonrpc": "2.0", "id": "st", "method": method, "params": params}
                 )
-                for st in resp.json().get("result") or []:
+            rows = resp.json().get("result") or []
+        except Exception:  # noqa: BLE001 单通道不可用静默跳过，不影响另一通道
+            continue
+        for st in rows:
                     files = st.get("files") or []
                     path = files[0].get("path", "") if files else ""
                     raw = st.get("status")
@@ -395,8 +491,6 @@ async def aria2_status(cfg: DownloadSettings) -> list[dict]:
                             "source": "aria2",
                         }
                     )
-    except Exception:  # noqa: BLE001 aria2 不可达时静默降级
-        return []
     return out
 
 
@@ -542,7 +636,9 @@ async def retry_record(rec: dict, cfg: DownloadSettings, *, log: LogFn) -> None:
     if acc is None:
         log("error", f"《{rec.get('taskname') or ''}》重下失败：没有可用的 {rec.get('driver_key')} 账号")
         return
-    driver = cls(cookie=acc.cookie, proxy=PROXY, index=acc.sort_order)
+    from .credential_store import plain_cookie
+
+    driver = cls(cookie=plain_cookie(acc) or "", proxy=PROXY, index=acc.sort_order)
     if not driver.has("download"):
         log("error", f"《{rec.get('taskname') or ''}》重下失败：{driver.name} 不支持下载")
         return

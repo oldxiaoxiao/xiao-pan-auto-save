@@ -213,7 +213,6 @@ def test_retry_rejected_while_same_dest_has_open_row(tmp_path, monkeypatch):
 
     dest = str(tmp_path / "dup.mkv")
     rid = _seed_retry_row(hist, "api-dup-src", 928, dest, terminal=True)
-    open_id = _seed_retry_row(hist, "api-dup-open", 928, dest, terminal=False)
     started: list[str] = []
 
     async def spy_retry(rec, cfg, *, log):
@@ -222,6 +221,9 @@ def test_retry_rejected_while_same_dest_has_open_row(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "retry_record", spy_retry)
     try:
         with TestClient(app) as c:
+            # 在途行必须在启动之后落：FR-07 的启动收口会把 builtin 的开放行判成 interrupted，
+            # 那正是"进程重启"的语义；这里要测的是运行期连点两次，得模拟真正在途的那一次。
+            open_id = _seed_retry_row(hist, "api-dup-open", 928, dest, terminal=False)
             resp = c.post(f"/api/downloads/history/{rid}/retry")
         assert resp.status_code == 409
         assert resp.json()["detail"] == "该文件已有进行中的下载，请等待完成后再重下"
@@ -236,7 +238,6 @@ def test_retry_rejected_when_record_itself_not_terminal(tmp_path, monkeypatch):
     from backend.services import download_history as hist
 
     dest = str(tmp_path / "double-click.mkv")
-    rid = _seed_retry_row(hist, "api-selfopen", 929, dest, terminal=False)
     started: list[str] = []
 
     async def spy_retry(rec, cfg, *, log):
@@ -245,6 +246,8 @@ def test_retry_rejected_when_record_itself_not_terminal(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "retry_record", spy_retry)
     try:
         with TestClient(app) as c:
+            # 同上：启动收口会把 builtin 开放行判成 interrupted，所以这行必须在启动之后再落
+            rid = _seed_retry_row(hist, "api-selfopen", 929, dest, terminal=False)
             resp = c.post(f"/api/downloads/history/{rid}/retry")
         assert resp.status_code == 409
         assert resp.json()["detail"] == "该文件已有进行中的下载，请等待完成后再重下"

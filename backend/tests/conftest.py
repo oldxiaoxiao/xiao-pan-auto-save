@@ -27,3 +27,16 @@ def _init_test_db():
     from backend.database import init_db
 
     init_db()
+
+
+@pytest.fixture(autouse=True)
+def _no_quiet_hours():
+    """默认关掉免打扰，让通知相关用例不受"跑测试的时刻"影响。
+
+    FR-04 的免打扰默认 23:00–08:00，若沿用默认，夜里跑测试时所有通知都会改成入队，
+    一堆既有用例会随挂钟时间翻脸。专门测免打扰的用例自己显式传 settings 覆盖。
+    """
+    from backend.api.deps import set_setting
+
+    set_setting("notify_quiet", {"enabled": False, "start": "23:00", "end": "08:00"})
+    yield

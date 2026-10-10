@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
+import { useRoute } from "vue-router";
 import { ElMessage } from "element-plus";
 import { storeToRefs } from "pinia";
 import { useSettingsStore } from "../stores/settings";
@@ -12,10 +13,14 @@ import SettingsSource from "../components/SettingsSource.vue";
 import SettingsDownload from "../components/settings/SettingsDownload.vue";
 import SettingsApi from "../components/SettingsApi.vue";
 import SettingsDrivers from "../components/SettingsDrivers.vue";
+import SettingsAi from "../components/settings/SettingsAi.vue";
+import SettingsBackup from "../components/settings/SettingsBackup.vue";
 
 const store = useSettingsStore();
 const { loading, error } = storeToRefs(store);
-const active = ref("cron");
+// 支持 /settings?g=ai 这类直达：助手等页面带分组参数跳过来时不必再找一遍
+const route = useRoute();
+const active = ref(typeof route.query.g === "string" && route.query.g ? route.query.g : "cron");
 
 // 这里刻意保留一份**显式**的空值边界：本视图和它下挂的各个面板都建立在"GET /api/settings 已经成功"
 // 的假设上（每个面板自己 watch 服务端值，值一到就同步），所以 null 只覆盖"还没拉到"那一小段窗口：
@@ -31,6 +36,8 @@ const groups = [
   { key: "download", label: "下载设置", comp: SettingsDownload },
   { key: "api", label: "API", comp: SettingsApi },
   { key: "drivers", label: "驱动管理", comp: SettingsDrivers },
+  { key: "ai", label: "AI 助手", comp: SettingsAi },
+  { key: "backup", label: "备份与恢复", comp: SettingsBackup },
 ];
 
 async function toggle(key: "notify_enabled" | "sign_enabled", val: boolean) {

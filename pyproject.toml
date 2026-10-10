@@ -17,6 +17,7 @@ dependencies = [
     "sqlmodel>=0.0.16",
     "natsort>=8.4",
     "pydantic>=2.5",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

@@ -159,6 +159,12 @@ const lastRun = computed(() => relativeTime(props.task.last_run_at));
 
 /** 一次性任务停用即「已完成」：此时不再显示灰「停用」，改由绿徽标说明状态。 */
 const isOnceDone = computed(() => props.task.run_mode === "once" && props.task.disabled);
+
+/** FR-03 健康度：服务端下发，字段缺失时按正常处理（老数据/接口异常都不该显示成红）。 */
+const health = computed(() => {
+  const h = (props.task.health || {}) as { status?: string; reason?: string };
+  return { status: h.status || "ok", reason: h.reason || "" };
+});
 </script>
 
 <template>
@@ -171,6 +177,20 @@ const isOnceDone = computed(() => props.task.run_mode === "once" && props.task.d
         <span class="name">{{ task.taskname }}</span>
         <span v-if="dirty" class="dot-unsaved" title="未保存" />
         <span v-if="task.shareurl_ban" class="badge badge--danger">失效</span>
+        <span
+          v-else-if="health.status === 'attention'"
+          class="badge badge--warn"
+          :title="health.reason"
+        >
+          待处理
+        </span>
+        <span
+          v-else-if="health.status === 'stale'"
+          class="badge badge--warn"
+          :title="health.reason"
+        >
+          停摆
+        </span>
         <span v-if="task.disabled && !isOnceDone" class="badge badge--muted">停用</span>
         <span v-else-if="lastRun" class="badge badge--muted">{{ lastRun }}</span>
       </div>

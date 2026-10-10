@@ -17,6 +17,19 @@ export function relativeTime(iso: string | null | undefined): string {
   return new Date(iso).toLocaleDateString("zh-CN");
 }
 
+/** 绝对时间：yyyy-MM-dd hh:mm:ss（去掉 ISO 里的 T，统一全站显示口径）。 */
+export function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const raw = String(iso).trim();
+  // 优先按字符串归一（后端时间是本地 naive datetime，避免 Date 解析引入时区偏移）
+  const m = raw.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::(\d{2}))?/);
+  if (m) return `${m[1]} ${m[2]}:${m[3] ?? "00"}`;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 /** 字节 → 人类可读。size 后端按字节给（0 时显示空）。 */
 export function formatSize(bytes: number | undefined | null): string {
   if (!bytes || bytes <= 0) return "";

@@ -3,11 +3,13 @@ import { onMounted, ref } from "vue";
 import { api } from "./api/client";
 
 const nav = [
+  { to: "/overview", label: "总览", icon: "M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z" },
   { to: "/tasks", label: "任务", icon: "M3 5h18M3 12h18M3 19h18" },
   { to: "/accounts", label: "账号", icon: "M16 20v-2a4 4 0 0 0-8 0v2M12 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" },
   { to: "/settings", label: "设置", icon: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM4 12h2m12 0h2" },
   { to: "/downloads", label: "下载", icon: "M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" },
   { to: "/logs", label: "日志", icon: "M4 6h16M4 12h16M4 18h10" },
+  { to: "/chat", label: "助手", icon: "M21 12a8 8 0 0 1-8 8H7l-4 3v-6a8 8 0 0 1 8-8h2a8 8 0 0 1 8 3z" },
 ];
 
 const backendDown = ref(false);

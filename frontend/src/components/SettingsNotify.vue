@@ -1,14 +1,65 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { ref, watch, onMounted } from "vue";
 import { ElMessage } from "element-plus";
 import { useSettingsStore } from "../stores/settings";
 import { api } from "../api/client";
 import { NOTIFY_CHANNELS } from "../constants";
-import type { NotifyTestResult, PushConfig } from "../api/types";
+import type { NotifyPending, NotifyQuiet, NotifyTestResult, PushConfig } from "../api/types";
 
 const store = useSettingsStore();
 const cfg = ref<PushConfig>({});
 const saving = ref(false);
+
+// FR-04：免打扰窗口与待发队列
+const DEFAULT_QUIET: NotifyQuiet = { enabled: true, start: "23:00", end: "08:00" };
+const quiet = ref<NotifyQuiet>({ ...DEFAULT_QUIET });
+const pending = ref<NotifyPending | null>(null);
+const savingQuiet = ref(false);
+const flushing = ref(false);
+
+watch(
+  () => store.settings?.notify_quiet,
+  (v) => {
+    quiet.value = { ...DEFAULT_QUIET, ...(v ?? {}) };
+  },
+  { immediate: true, deep: true },
+);
+
+async function loadPending() {
+  try {
+    pending.value = await api.notifyPending();
+  } catch {
+    pending.value = null; // 拿不到就不显示，不猜一个数给用户看
+  }
+}
+
+async function saveQuiet() {
+  savingQuiet.value = true;
+  try {
+    await store.save("notify_quiet", quiet.value);
+    ElMessage.success("免打扰设置已保存");
+    await loadPending();
+  } catch (e) {
+    ElMessage.error((e as Error).message);
+  } finally {
+    savingQuiet.value = false;
+  }
+}
+
+async function flushPending() {
+  flushing.value = true;
+  try {
+    const r = await api.notifyFlush();
+    ElMessage.success(r.sent ? `已补发 ${r.sent} 条` : "没有待发的通知");
+    await loadPending();
+  } catch (e) {
+    ElMessage.error((e as Error).message);
+  } finally {
+    flushing.value = false;
+  }
+}
+
+onMounted(loadPending);
 
 watch(
   // settings 是 Settings | null：这里判空只是"还没拉到"的窗口，回调里 `?? {}` 已经容得下 undefined。
@@ -80,6 +131,47 @@ async function test(channel?: string) {
     </div>
     <p class="text-muted">填写各渠道密钥即启用；关闭开关会写入 <code>*_ENABLE=false</code> 显式禁用。</p>
 
+    <div class="card quiet">
+      <div class="quiet__top">
+        <b>通知分级与免打扰</b>
+        <el-switch v-model="quiet.enabled" size="small" />
+        <span class="text-muted">{{ quiet.enabled ? "已开启" : "已关闭" }}</span>
+        <el-button size="small" :loading="savingQuiet" @click="saveQuiet"> 保存时段 </el-button>
+      </div>
+      <div class="quiet__times">
+        <label>开始</label>
+        <el-time-picker
+          v-model="quiet.start"
+          :disabled="!quiet.enabled"
+          format="HH:mm"
+          value-format="HH:mm"
+          size="small"
+          class="hm"
+        />
+        <label>结束</label>
+        <el-time-picker
+          v-model="quiet.end"
+          :disabled="!quiet.enabled"
+          format="HH:mm"
+          value-format="HH:mm"
+          size="small"
+          class="hm"
+        />
+      </div>
+      <ul class="quiet__hint text-muted">
+        <li><b>需处理</b>：链接失效、Cookie 过期、磁盘/配额不足、下载失败 —— 免打扰时段内<b>不丢弃</b>，攒到次日合成一条摘要补发。</li>
+        <li><b>仅告知</b>：转存成功、退避跳过 —— 可在任务表单里按任务单独关掉。</li>
+      </ul>
+      <div class="quiet__queue">
+        <span v-if="pending && pending.count">
+          待发 {{ pending.count }} 条（需处理 {{ pending.action }} / 仅告知 {{ pending.info }}）
+          <span v-if="pending.quiet" class="text-muted">· 当前处于免打扰时段</span>
+        </span>
+        <span v-else class="text-muted">当前没有待发通知</span>
+        <el-button size="small" text :loading="flushing" @click="flushPending"> 立即补发 </el-button>
+      </div>
+    </div>
+
     <div v-for="ch in NOTIFY_CHANNELS" :key="ch.name" class="chan card">
       <div class="chan__top">
         <span class="chan__name">{{ ch.label }}</span>
@@ -148,6 +240,42 @@ code {
 }
 .chan {
   padding: 12px 14px;
+}
+.quiet {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.quiet__top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.quiet__times {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.quiet__times .hm {
+  width: 110px;
+}
+.quiet__hint {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+.quiet__queue {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
 }
 .chan__top {
   display: flex;

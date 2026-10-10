@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api } from "../api/client";
+import { formatDateTime } from "../utils";
 import { useTasksStore } from "../stores/tasks";
 import type { DownloadJob, DownloadRecord } from "../api/types";
 
@@ -59,6 +60,7 @@ const statusOptions = [
   { label: "失败", value: "failed" },
   { label: "跳过", value: "skipped" },
   { label: "已停止", value: "stopped" },
+  { label: "已中断（可继续）", value: "interrupted" },
 ];
 let hTimer: number | undefined;
 let retryTimer: number | undefined;
@@ -203,6 +205,7 @@ function statusText(s: string): string {
         downloading: "下载中",
         paused: "已暂停",
         stopped: "已停止",
+        interrupted: "已中断",
         done: "完成",
         failed: "失败",
         skipped: "跳过",
@@ -212,7 +215,7 @@ function statusText(s: string): string {
 }
 
 function fmtTime(iso: string | null): string {
-  return iso ? iso.replace("T", " ").slice(0, 19) : "-";
+  return formatDateTime(iso) || "-";
 }
 
 onMounted(() => {
@@ -332,7 +335,13 @@ function onVisible() {
           <el-table-column label="状态" width="90">
             <template #default="{ row }">
               <el-tag
-                :type="row.status === 'failed' ? 'danger' : row.status === 'done' ? 'success' : 'info'"
+                :type="
+                  row.status === 'failed' || row.status === 'interrupted'
+                    ? 'danger'
+                    : row.status === 'done'
+                      ? 'success'
+                      : 'info'
+                "
                 size="small"
               >
                 {{ statusText(row.status) }}
@@ -354,7 +363,10 @@ function onVisible() {
           </el-table-column>
           <el-table-column label="操作" width="170">
             <template #default="{ row }">
-              <el-button size="small" text type="primary" @click="retry(row)">重下</el-button>
+              <!-- FR-07：中断的行还能从断点接着下，按钮文案要说清这一点 -->
+              <el-button size="small" text type="primary" @click="retry(row)">
+                {{ row.status === "interrupted" ? "继续下载" : "重下" }}
+              </el-button>
               <el-button size="small" text type="danger" @click="delRecord(row)">删记录</el-button>
             </template>
           </el-table-column>

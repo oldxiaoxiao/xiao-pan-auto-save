@@ -19,14 +19,31 @@ from ..services.task_service import above_sort_order, below_sort_order, run_task
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
-def _to_out(task: Task) -> TaskOut:
+def _to_out(task: Task, health: dict | None = None) -> TaskOut:
     data = task.model_dump()
     data["runweek"] = task.runweek_list()
     data["last_run_at"] = task.last_run_at.isoformat() if task.last_run_at else None
     data["next_retry_at"] = task.next_retry_at.isoformat() if task.next_retry_at else None
     # 老库升级出来的空串在这层归一化：前端与油猴列表永远看不到 ''
     data["run_mode"] = run_mode_of(task)
+    if health is None:  # 单个任务（创建/更新）不走批量 map，就地算一次
+        try:
+            from ..services.task_health import compute_health
+
+            health = compute_health(task)
+        except Exception:  # noqa: BLE001
+            health = {}
+    data["health"] = health
     return TaskOut(**data)
+
+
+def _health_map() -> dict[int, dict]:
+    from ..services.task_health import health_map
+
+    try:
+        return health_map()
+    except Exception:  # noqa: BLE001 健康度是附加信息，算不出来也不能让列表打不开
+        return {}
 
 
 def _check_run_mode(value: str) -> None:
@@ -37,9 +54,76 @@ def _check_run_mode(value: str) -> None:
 
 @router.get("", response_model=list[TaskOut])
 async def list_tasks() -> list[TaskOut]:
+    health = _health_map()
     with session_scope() as session:
         tasks = session.exec(select(Task).order_by(Task.sort_order, Task.id)).all()
-        return [_to_out(t) for t in tasks]
+        return [_to_out(t, health.get(int(t.id or 0))) for t in tasks]
+
+
+@router.get("/issues")
+async def task_issues() -> dict:
+    """FR-03：待处理聚合视图——所有非正常任务连原因一起给，不用去翻日志。"""
+    from ..services.task_health import issues
+
+    return {"ok": True, "data": issues()}
+
+
+@router.get("/{task_id}/runs")
+async def task_runs(task_id: int) -> dict:
+    """最近几次运行结论，用于失败归因。"""
+    from ..services.task_health import recent_runs
+
+    return {"ok": True, "data": recent_runs(task_id)}
+
+
+@router.post("/{task_id}/revalidate")
+async def revalidate(task_id: int) -> dict:
+    """重新验证失效的分享链接：真恢复了才清除失效标记，没恢复就如实说。
+
+    不做"看着像就行"的乐观清除——那会让任务在下次运行时再次静默失败。
+    """
+    from ..core.router import route_driver
+    from ..drivers.base import DriveError, ShareBanned, ShareUnavailable
+    from ..services.task_health import record_run
+
+    with session_scope() as session:
+        task = session.get(Task, task_id)
+        if task is None:
+            raise HTTPException(404, "任务不存在")
+        url = task.shareurl
+    cls = route_driver(url)
+    if cls is None:
+        return {"ok": False, "message": "无法识别的网盘链接"}
+    if not cls.supported:
+        return {"ok": False, "message": f"{cls.name} 驱动即将支持", "pending": True}
+
+    from ..api.routes_files import _driver
+
+    drv = _driver(cls.key)
+    try:
+        ref = drv.parse_share(url)
+        items = await drv.list_share(ref, "")
+    except ShareBanned as exc:
+        return {"ok": False, "message": exc.message}
+    except ShareUnavailable as exc:
+        return {"ok": False, "message": f"网络异常：{exc.message}", "retry": True}
+    except DriveError as exc:
+        return {"ok": False, "message": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+    finally:
+        await drv.close()
+
+    if not items:
+        return {"ok": False, "message": "链接可访问但内容为空，请确认分享是否正常"}
+
+    with session_scope() as session:
+        row = session.get(Task, task_id)
+        if row is not None:
+            row.shareurl_ban = ""
+            session.add(row)
+    record_run(task_id, "revalidated", f"链接已恢复，可访问 {len(items)} 项")
+    return {"ok": True, "message": f"链接已恢复（{len(items)} 项），失效标记已清除"}
 
 
 @router.post("", response_model=TaskOut)
@@ -184,7 +268,9 @@ async def dry_run(body: TaskIn) -> dict:
     from ..services.task_service import _task_spec
 
     spec = _task_spec(body)  # TaskIn 与 Task 字段同名，直接复用
-    driver = cls(cookie=account.cookie, proxy=PROXY, index=account.sort_order)
+    from ..services.credential_store import plain_cookie
+
+    driver = cls(cookie=plain_cookie(account) or "", proxy=PROXY, index=account.sort_order)
     try:
         result = await run_update_task(driver, spec, magic_regex=all_settings().get("magic_regex") or {}, plan_only=True)
     finally:
@@ -198,6 +284,8 @@ async def dry_run(body: TaskIn) -> dict:
         "total_size": sum(f.size for f in result.files),
         "skipped_existing": result.planned_existing,
         "filtered_out": result.filtered_out,
+        # FR-10：命名正则没匹配上的样本。为空却 0 新增 = 真的没更新；有样本 = 正则写错了
+        "unmatched_samples": result.unmatched_samples,
         "items": [
             {"share_name": f.share_name, "final_name": f.final_name, "dest_path": f.dest_path, "is_dir": f.is_dir}
             for f in result.files[:20]

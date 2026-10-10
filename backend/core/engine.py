@@ -25,6 +25,9 @@ LogFn = Callable[[str, str], None]
 
 _I_RE = re.compile(r"\{I+\}")
 
+# FR-10：试跑带出去的「正则未命中」样本上限。够了能看出问题，又不至于把整份分享列表塞进响应
+UNMATCHED_SAMPLE_LIMIT = 20
+
 
 @dataclass
 class TaskSpec:
@@ -96,6 +99,9 @@ class TaskRunResult:
     files: list[SavedFile] = field(default_factory=list)
     planned_existing: int = 0  # 因"目标目录里已有"而跳过的条目数（目录不算，它会继续递归）
     filtered_out: int = 0  # 被集数/画质过滤拒掉的条目数
+    # FR-10：命名正则没匹配上的样本。过去这类文件被静默丢掉，试跑显示"0 个新增"，
+    # 新手根本分不清是"正则写错了"还是"真的没有更新"——必须把样本带出来
+    unmatched_samples: list[str] = field(default_factory=list)
 
     def render(self) -> str:
         lines = []
@@ -266,6 +272,10 @@ async def _check_dir(
                     result.planned_existing += 1
             # 目录在目标里已存在且没开递归：既有代码就是什么都不做，这里也不计 planned_existing
             # （它不是"跳过"，是"目录本身已在目标里、内容由递归或整目录搬走决定"——计了会让 UI 说谎）
+            elif not share_file.is_dir and len(result.unmatched_samples) < UNMATCHED_SAMPLE_LIMIT:
+                # FR-10：正则没命中 = 这个文件根本不会被转存。过去静默丢弃，试跑只说"0 个新增"，
+                # 用户分不清是正则写错还是真没更新。带 20 个样本出去，一眼就能看出正则对不对。
+                result.unmatched_samples.append(share_file.name)
         # 起始文件订阅：列表新→旧遍历，遇到 startfid（含）即停止（不受过滤影响）
         if share_file.fid == spec.startfid and spec.startfid:
             break

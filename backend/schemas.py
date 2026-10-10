@@ -22,12 +22,16 @@ class TaskIn(BaseModel):
     download_savepath: str = ""
     disabled: bool = False
     account_id: int | None = None
+    # FR-06：绑定账号不可用时是否允许切到同驱动的其它可用账号（关掉=严格只用绑定账号）
+    account_failover: bool = True
     sort_order: int = 0
     episode_start: int = 0
     episode_end: int = 0
     quality: str = ""
     schedule: str = ""
     run_mode: str = "follow"
+    # FR-04：仅告知级通知（转存成功摘要）开关；需处理级不受它影响
+    notify_info: bool = True
 
 
 class TaskOut(TaskIn):
@@ -36,6 +40,7 @@ class TaskOut(TaskIn):
     last_run_at: str | None = None
     retry_attempts: int = 0
     next_retry_at: str | None = None
+    health: dict = {}  # FR-03：{status, reason, fail_streak, last_status, kind}
 
 
 class AccountIn(BaseModel):
@@ -61,3 +66,5 @@ class AccountOut(BaseModel):
     last_sign_at: str | None = None
     sign_message: str = ""
     cookie_masked: str = ""
+    check_ok: bool = True
+    check_message: str = ""

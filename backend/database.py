@@ -21,6 +21,37 @@ def init_db() -> None:
 
     SQLModel.metadata.create_all(engine)
     _auto_add_columns()
+    _normalize_unchecked_accounts()
+    _encrypt_plaintext_cookies()
+
+
+def _encrypt_plaintext_cookies() -> None:
+    """FR-08：把存量明文 Cookie 加密。加密前后取值一致，升级不中断已有任务。"""
+    try:
+        from .services.credential_store import migrate_plaintext_cookies
+
+        moved = migrate_plaintext_cookies()
+        if moved:
+            from .core.logstream import hub
+
+            hub.make_logger("startup")("info", f"已将 {moved} 个账号的 Cookie 转为加密存储")
+    except Exception:  # noqa: BLE001 迁移失败不影响启动
+        pass
+
+
+def _normalize_unchecked_accounts() -> None:
+    """「从没检查过」的账号一律归位为健康。
+
+    补列默认值（老版本补成 0）或新建账号都可能留下 check_ok=0 但没有检查记录的行，
+    直接读这个字段会得出"失效"的错误结论。判据以 last_check_at 为准，这里把脏值修平。
+    """
+    from sqlalchemy import text
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE account SET check_ok = 1 WHERE check_ok = 0 AND last_check_at IS NULL"))
+    except Exception:  # noqa: BLE001 归一失败不影响启动
+        pass
 
 
 def _auto_add_columns() -> None:
@@ -40,9 +71,13 @@ def _auto_add_columns() -> None:
                 if col.nullable:
                     default = ""
                 elif isinstance(col.type, Integer) or "BOOL" in coltype.upper():
-                    default = " NOT NULL DEFAULT 0"
+                    # 取模型写的默认值，别一律补 0：check_ok 这类"默认健康"的布尔列
+                    # 补成 0 会让所有存量账号一夜之间被标成"需更新"。
+                    py_default = getattr(col.default, "arg", None) if col.default is not None else None
+                    default = f" NOT NULL DEFAULT {1 if py_default else 0}"
                 else:
-                    default = " NOT NULL DEFAULT ''"
+                    py_default = getattr(col.default, "arg", None) if col.default is not None else None
+                    default = f" NOT NULL DEFAULT '{py_default if isinstance(py_default, str) else ''}'"
                 conn.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {col.name} {coltype}{default}"))
 
 

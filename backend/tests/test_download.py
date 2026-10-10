@@ -348,7 +348,12 @@ async def test_aria2_status_unreachable_degrades(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_one_cancellation_removes_part(tmp_path, monkeypatch):
+async def test_fetch_one_cancellation_keeps_part_for_resume(tmp_path, monkeypatch):
+    """取消后 .part 必须留着（FR-07 有意变更，原用例断言的是"删掉"）。
+
+    旧语义"停止即删 part"等于放弃已下进度：3GB 下到 90% 手滑点停，再下就得从头。
+    part 是断点续传的唯一凭据，改由它承载进度；目标文件仍然不能产生（未完成就不算数）。
+    """
     from backend.core.download_registry import registry
 
     class Resp:
@@ -384,7 +389,13 @@ async def test_fetch_one_cancellation_removes_part(tmp_path, monkeypatch):
     registry.stop(jid)  # 立即请求取消
     ok, msg = await dl._fetch_one({"download_url": "http://x", "size": 999}, item, "", "UA", job_id=jid)
     assert ok is False and "已停止" in msg
-    assert not target.exists() and not list(tmp_path.glob("*.part"))
+    # 目标文件仍不能出现：没下完就是没下完
+    assert not target.exists()
+    # 但半成品要留着，且提示里要告诉用户还能接着下
+    parts = list(tmp_path.glob("*.part"))
+    assert parts, "取消后 part 必须保留，否则断点续传无从谈起"
+    # 取消检查发生在写 chunk 之前，所以这里是 0 字节的 part；下次续传按 0 偏移从头下，不叠加
+    assert parts[0].stat().st_size == 0
     assert registry.get(jid).status == "stopped"  # 终态改由 registry.get 观察，snapshot 只含进行中
 
 

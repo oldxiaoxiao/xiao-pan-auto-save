@@ -2,6 +2,7 @@
 import { reactive, ref, watch, computed, toRaw } from "vue";
 import { ElMessage } from "element-plus";
 import FileSelector from "./FileSelector.vue";
+import NameTemplatePicker from "./NameTemplatePicker.vue";
 import SearchSuggest from "./SearchSuggest.vue";
 import { api } from "../api/client";
 import { useSettingsStore } from "../stores/settings";
@@ -47,11 +48,13 @@ function blank(d: TaskDefaults): TaskPayload & { startfid_name: string } {
     download_savepath: "",
     disabled: false,
     account_id: null,
+    account_failover: true, // FR-06：指定账号失效时默认切到同网盘的其它可用账号
     sort_order: 0,
     episode_start: 0,
     episode_end: 0,
     quality: d.quality,
     schedule: "",
+    notify_info: true, // FR-04：默认收转存成功摘要，用户可在本表单按任务关掉
   };
 }
 
@@ -270,6 +273,11 @@ function loadFrom(task: Task | null) {
     // task_defaults 会盖住的键，编辑本来就该以那一行自己的值为准（服务端权威），前端没有任何可猜的空间；
     // 所以 settings 没读到（task_defaults 缺席）也照样能渲染编辑表单，不再是个死点击。
     Object.assign(draft, toRaw(task), { startfid_name: "" });
+    // 老服务端/旁路写入的行可能还没有这个字段：缺了按"开"处理，
+    // 不能让 undefined 在开关上显示成关闭、保存时静默把通知关掉。
+    draft.notify_info = task.notify_info !== false;
+    // 同上：补列前的老行没有这个字段，缺了按"开"处理
+    draft.account_failover = task.account_failover !== false;
   } else if (defaults.value) {
     // 新建态的初值只能来自那份真默认值；门槛在 TasksView 的「＋ 新建任务」上，这里只做兜底不实例化。
     Object.assign(draft, blank(defaults.value));
@@ -371,6 +379,13 @@ function clearStart() {
 // —— 试跑（只读）——
 const dryRunning = ref(false);
 const dryResult = ref<DryRunResult | null>(null);
+
+/** FR-10：命名模板库弹窗。 */
+const tplOpen = ref(false);
+function applyNameTemplate(pattern: string, replace: string) {
+  draft.pattern = pattern;
+  draft.replace = replace;
+}
 const dryError = ref("");
 /** 顶部那一行：忙态 > 请求异常 > 后端 message 原文（banned 就说 banned，不美化成「没有新文件」）。 */
 const dryMessage = computed(() => {
@@ -407,6 +422,16 @@ const dryBody = computed(() => {
     lines.push(`${it.final_name}${renamed}${it.is_dir ? "（目录）" : ""} · ${it.dest_path}`);
   }
   if ((r.items?.length ?? 0) >= 20) lines.push("只列前 20 条。");
+  // FR-10：正则没命中的样本。没有它，"0 个新增"分不清是正则写错还是真的没有更新。
+  const unmatched = r.unmatched_samples ?? [];
+  if (unmatched.length) {
+    lines.push(
+      `⚠️ 有 ${unmatched.length} 个文件没被匹配正则命中，它们不会被转存：` + unmatched.slice(0, 8).join("、"),
+    );
+    lines.push("如果这不是你想要的，去「命名模板库」换个模板，或把匹配正则留空（留空 = 全部命中）。");
+  } else if (r.new_count === 0 && (r.skipped_existing ?? 0) === 0 && (r.filtered_out ?? 0) === 0) {
+    lines.push("分享里没有任何待转存条目（不是被过滤掉的），说明目标目录已经是最新的。");
+  }
   return lines.join("\n");
 });
 
@@ -538,6 +563,13 @@ const hasId = computed(() => props.task?.id ?? null);
         <label class="field-label">下载到本地</label>
         <el-switch v-model="draft.auto_download" />
       </div>
+      <!-- FR-04：只关「仅告知」（转存成功摘要）。需处理级永远发，这里不给开关——
+           关掉静音却漏掉链接失效/Cookie 过期，比吵一点糟得多。 -->
+      <div class="f">
+        <label class="field-label">转存成功时通知我</label>
+        <el-switch v-model="draft.notify_info" />
+        <small class="hint">关闭后不再推送这个任务的转存成功摘要；链接失效、账号过期等需处理消息照旧推送。</small>
+      </div>
       <div class="f">
         <label class="field-label">执行方式</label>
         <el-radio-group v-model="draft.run_mode">
@@ -610,6 +642,8 @@ const hasId = computed(() => props.task?.id ?? null);
                 {{ v }}
               </button>
               <el-button size="small" text @click="openSelector('preview')"> 预览正则效果 </el-button>
+              <!-- FR-10：新手面对两个空框无从下手，给可一键套用的预设 -->
+              <el-button size="small" text type="primary" @click="tplOpen = true"> 命名模板库 </el-button>
             </div>
           </div>
 
@@ -659,6 +693,14 @@ const hasId = computed(() => props.task?.id ?? null);
             <el-select v-model="draft.account_id" clearable placeholder="自动选择">
               <el-option v-for="a in accounts" :key="a.id" :label="a.nickname || a.name || `#${a.id}`" :value="a.id" />
             </el-select>
+          </div>
+          <div v-if="draft.account_id" class="f">
+            <label class="field-label">账号容灾</label>
+            <el-switch v-model="draft.account_failover" />
+            <p class="hint">
+              开启：该账号失效 / 被风控 / 空间不足时，自动切到同网盘的其它可用账号继续跑（会通知你切到了哪个号）。<br />
+              关闭：严格只用这个号，宁可本轮失败也不换。
+            </p>
           </div>
 
           <div v-if="isFollow" class="f f--wide">
@@ -711,6 +753,8 @@ const hasId = computed(() => props.task?.id ?? null);
       :savepath="draft.savepath"
       @confirm="onSelectorConfirm"
     />
+
+    <NameTemplatePicker v-model="tplOpen" :taskname="draft.taskname" @apply="applyNameTemplate" />
   </div>
 </template>
 

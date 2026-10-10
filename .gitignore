@@ -22,3 +22,6 @@ dist/
 release/
 .superpowers/
 .env
+# 本地运行数据（含实时数据库/凭据/下载）与 WorkBuddy 项目记忆，禁止入库
+data/
+.workbuddy/

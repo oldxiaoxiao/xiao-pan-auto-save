@@ -2,6 +2,7 @@
 import { onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, type ApiTokenInfo, type MigratePreview } from "../api/client";
+import { formatDateTime } from "../utils";
 
 const tokens = ref<ApiTokenInfo[]>([]);
 const newToken = ref("");
@@ -116,7 +117,7 @@ async function doImport() {
         <tr v-for="t in tokens" :key="t.token_preview">
           <td>{{ t.name }}</td>
           <td class="mono">{{ t.token_preview }}</td>
-          <td>{{ t.created_at.replace("T", " ").slice(0, 16) }}</td>
+          <td>{{ formatDateTime(t.created_at) }}</td>
           <td>
             <el-button size="small" text type="danger" @click="remove(t)">删除</el-button>
           </td>

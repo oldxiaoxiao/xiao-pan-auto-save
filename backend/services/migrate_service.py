@@ -82,14 +82,17 @@ def import_config(config: dict, overwrite: bool = False) -> dict:
         if isinstance(cookies, str):
             cookies = [cookies] if cookies.strip() else []
         account_ids: list[int] = []
+        from .credential_store import store_cookie
+
         for i, ck in enumerate(c for c in cookies if str(c).strip()):
             acc = Account(
                 driver_key="quark",
                 name=f"迁移账号{i + 1}",
-                cookie=str(ck).strip(),
+                cookie="",
                 enabled=True,
                 sort_order=i,
             )
+            store_cookie(acc, str(ck).strip())  # FR-08：导入的 Cookie 同样加密入库
             session.add(acc)
             session.flush()
             account_ids.append(acc.id)

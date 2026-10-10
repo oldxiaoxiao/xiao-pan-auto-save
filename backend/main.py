@@ -10,11 +10,15 @@ from sqlmodel import select
 from . import __version__, config
 from .api import (
     routes_accounts,
+    routes_agent,
+    routes_backup,
     routes_downloads,
     routes_external,
     routes_files,
     routes_logs,
     routes_migrate,
+    routes_name_templates,
+    routes_overview,
     routes_search,
     routes_settings,
     routes_tasks,
@@ -169,16 +173,88 @@ def reschedule_all_tasks() -> None:
         apply_task_schedule(t)
 
 
+async def _account_check_job() -> None:
+    """FR-02：每日账号健康检查 + 失效提醒。
+
+    刻意独立于「自动签到」开关：过去账号检查挂在 sign_enabled 下面，
+    关掉签到就等于关掉了失效检测，Cookie 过期只能等任务失败才被发现。
+    """
+    from .services import account_service
+
+    log = hub.make_logger("account-check")
+    try:
+        await account_service.refresh_accounts(log=log)
+        await account_service.alert_invalid_accounts(log=log)
+    except Exception as exc:  # noqa: BLE001 调度任务不允许裸崩
+        log("error", f"账号健康检查异常：{exc}")
+
+
+async def _notify_digest_job() -> None:
+    """FR-04：免打扰结束后的摘要补发。
+
+    必须独立于"有没有新事件"：半夜攒下 3 条需处理，早上若没有任何任务运行，
+    就永远没人去触发补发，攒的事件会一直躺在队里。
+    """
+    from .api.deps import get_setting
+    from .services import notify_center
+
+    log = hub.make_logger("notify-digest")
+    try:
+        sent = await notify_center.flush_pending(
+            settings={
+                "notify_enabled": bool(get_setting("notify_enabled")),
+                "notify_quiet": get_setting("notify_quiet"),
+            },
+            push_config=get_setting("push_config") or {},
+            log=log,
+        )
+        if sent:
+            log("info", f"免打扰摘要补发 {sent} 条")
+    except Exception as exc:  # noqa: BLE001 调度任务不允许裸崩
+        log("error", f"免打扰摘要补发异常：{exc}")
+
+
+def reschedule_notify_digest() -> None:
+    """按免打扰结束时间安排摘要作业；免打扰关掉时仍挂一个默认时间点兜底。
+
+    挂作业的用意是"到点一定有人去补发"，而不是精确对时：真正下发前 flush_pending
+    还会再判一次窗口，没出窗口就不发。
+    """
+    from .api.deps import get_setting
+    from .services.notify_center import DEFAULT_QUIET, DIGEST_DELAY_MINUTES, quiet_config
+
+    cfg = quiet_config({"notify_quiet": get_setting("notify_quiet")})
+    end = cfg["end"] or DEFAULT_QUIET["end"]
+    try:
+        hour, minute = (int(x) for x in str(end).split(":")[:2])
+    except (ValueError, TypeError):
+        hour, minute = 8, 0
+    minute = min(minute + DIGEST_DELAY_MINUTES, 59)
+    scheduler.add_daily("xiao_pan_notify_digest", _notify_digest_job, hour=hour, minute=minute)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     backup_db(config.DB_PATH, config.DATA_DIR / "backups")
     init_db()
+    # FR-07：先把上次进程留下的内置下载在途行收口成 interrupted。
+    # 必须在 scheduler 启动之前——否则新任务可能与这些半成品抢同一个 .part。
+    try:
+        from .services.download_history import mark_interrupted
+
+        orphan = mark_interrupted()
+        if orphan:
+            hub.make_logger("startup")("warn", f"上次有 {orphan} 个内置下载被中断，已标记为可继续")
+    except Exception as exc:  # noqa: BLE001 启动阶段不允许因收口失败而挂掉
+        hub.make_logger("startup")("warn", f"中断下载收口失败（不影响启动）：{exc}")
     scheduler.start()
     # 启动补一次清理（停机跨过凌晨四点的场景），再挂每日维护 job；replace_existing 保证重启不叠加
     # XIAO_PAN_SKIP_STARTUP_PRUNE=1（测试环境）只跳启动这一次，每日 job 照常注册
     if not config.SKIP_STARTUP_PRUNE:
         await _prune_job()
     scheduler.add_daily("xiao_pan_prune", _prune_job)
+    scheduler.add_daily("xiao_pan_account_check", _account_check_job)
+    reschedule_notify_digest()
     reschedule_main_job()
     reschedule_all_tasks()
     yield
@@ -199,11 +275,20 @@ app.include_router(routes_external.router)
 app.include_router(routes_tokens.router)
 app.include_router(routes_migrate.router)
 app.include_router(routes_downloads.router)
+app.include_router(routes_agent.router)
+app.include_router(routes_overview.router)
+app.include_router(routes_name_templates.router)
+app.include_router(routes_backup.router)
 
 
 @app.get("/api/health")
 async def health() -> dict:
-    return {"status": "ok", "version": __version__, "data_dir": str(config.DATA_DIR)}
+    return {
+        "status": "ok",
+        "version": __version__,
+        "data_dir": str(config.DATA_DIR),
+        "desktop_mode": config.DESKTOP_MODE,
+    }
 
 
 @app.get("/api/drivers")

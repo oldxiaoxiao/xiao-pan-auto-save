@@ -233,7 +233,8 @@ async def test_download_failure_marks_failed_but_run_succeeds(monkeypatch, tmp_p
     assert "直链 403" in failed.error
     assert failed.account_id == acc.id and failed.taskname == "半坏剧"
 
-    # 转存/通知行为不变：既有添加追更的成功行，也带下载失败明细（1/2）
-    content = pushed[0][1]
+    # FR-04：通知按级别拆成两条下发——下载失败属「需处理」，转存成功属「仅告知」。
+    # 文案契约不变（既有成功也有失败明细），所以合并起来断言，不钉死在一条消息里。
+    content = "\n".join(body for _, body in pushed)
     assert "添加追更" in content
     assert "本地下载 1/2" in content

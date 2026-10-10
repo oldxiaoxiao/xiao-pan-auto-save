@@ -2,6 +2,13 @@ import type {
   Account,
   AccountActionResult,
   AccountPayload,
+  AgentEvent,
+  AiConfig,
+  BackupPayload,
+  BackupRestoreCounts,
+  AiMessage,
+  AiSession,
+  AiUsage,
   DirList,
   DownloadHistoryQuery,
   DownloadJob,
@@ -12,7 +19,11 @@ import type {
   HealthResponse,
   LogEntry,
   MagicExpand,
+  NameTemplate,
+  NameTemplatePreview,
+  NotifyPending,
   NotifyTestResponse,
+  Overview,
   RunSummary,
   SchedulerInfo,
   SettingKey,
@@ -50,10 +61,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 /** 读取 POST SSE 流（EventSource 仅支持 GET，运行任务用 fetch 手动解析）。 */
-async function readSseStream(
+async function readSseStream<T>(
   path: string,
   body: unknown,
-  onEntry: (entry: LogEntry) => void,
+  onEntry: (entry: T) => void,
   signal?: AbortSignal,
 ): Promise<void> {
   let resp: Response;
@@ -88,7 +99,7 @@ async function readSseStream(
         const payload = line.slice(5).trim();
         if (!payload) continue;
         try {
-          onEntry(JSON.parse(payload) as LogEntry);
+          onEntry(JSON.parse(payload) as T);
         } catch {
           /* 忽略非 JSON 心跳/坏行 */
         }
@@ -137,6 +148,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(channel ? { channel } : {}),
     }),
+  /** FR-04：免打扰队列现状（攒了几条、其中几条需处理）。 */
+  notifyPending: () => request<NotifyPending>("/api/settings/notify/pending"),
+  /** FR-04：立刻补发攒下的摘要；忽略当前是否在免打扰窗口内。 */
+  notifyFlush: () => request<{ ok: boolean; sent: number }>("/api/settings/notify/flush", { method: "POST" }),
 
   // 文件
   listDir: (path: string, driver = "quark") =>
@@ -221,6 +236,66 @@ export const api = {
 
   /** 全局日志流地址（EventSource 可直接订阅 GET）。 */
   logsStreamUrl: () => "/api/logs/stream",
+
+  // AI 助手
+  aiConfig: () => request<{ ok: boolean; data: AiConfig }>("/api/agent/config"),
+  aiSaveConfig: (body: Partial<AiConfig> & { api_key?: string; clear_key?: boolean }) =>
+    request<{ ok: boolean; data: AiConfig }>("/api/agent/config", { method: "PUT", body: JSON.stringify(body) }),
+  aiTest: (body: Partial<AiConfig> & { api_key?: string }) =>
+    request<{ ok: boolean; message: string; kind: string; tool_call: boolean }>("/api/agent/test", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  aiSessions: () => request<{ ok: boolean; data: AiSession[] }>("/api/agent/sessions"),
+  aiCreateSession: (title: string) =>
+    request<{ ok: boolean; data: { id: number; title: string } }>("/api/agent/sessions", {
+      method: "POST",
+      body: JSON.stringify({ title }),
+    }),
+  aiDeleteSession: (id: number) => request<{ ok: boolean }>(`/api/agent/sessions/${id}`, { method: "DELETE" }),
+  aiMessages: (sessionId: number) =>
+    request<{ ok: boolean; data: AiMessage[] }>(`/api/agent/sessions/${sessionId}/messages`),
+  aiSend: (sessionId: number, content: string, onEvent: (e: AgentEvent) => void, signal?: AbortSignal) =>
+    readSseStream<AgentEvent>(`/api/agent/sessions/${sessionId}/messages`, { content }, onEvent, signal),
+  aiExecuteAction: (actionId: string, params?: Record<string, string | number | boolean>) =>
+    request<{ ok: boolean; message: string; started?: boolean }>(`/api/agent/actions/${actionId}/execute`, {
+      method: "POST",
+      body: JSON.stringify({ params: params || {} }),
+    }),
+  aiFeedback: (messageId: number, feedback: string) =>
+    request<{ ok: boolean }>(`/api/agent/messages/${messageId}/feedback`, {
+      method: "POST",
+      body: JSON.stringify({ feedback }),
+    }),
+  aiUsage: () => request<{ ok: boolean; data: AiUsage }>("/api/agent/usage"),
+
+  // 备份与恢复（FR-05）
+  exportBackup: (mode: "safe" | "full" = "safe") =>
+    request<{ ok: boolean; data: BackupPayload; version: string }>(`/api/backup/export?mode=${mode}`),
+  importBackup: (payload: object) =>
+    request<{ ok: boolean; message: string; restored?: BackupRestoreCounts; snapshot?: string }>(
+      "/api/backup/import",
+      { method: "POST", body: JSON.stringify({ payload }) },
+    ),
+
+  // FR-09 总览
+  overview: () => request<{ ok: boolean; message?: string; data: Overview }>("/api/overview"),
+
+  // FR-10 命名模板库
+  nameTemplates: () =>
+    request<{ ok: boolean; data: { builtin: NameTemplate[]; custom: NameTemplate[] } }>("/api/name-templates"),
+  previewNameTemplate: (pattern: string, replace: string, samples: string[], taskname = "") =>
+    request<{ ok: boolean; data: NameTemplatePreview[] }>("/api/name-templates/preview", {
+      method: "POST",
+      body: JSON.stringify({ pattern, replace, samples, taskname }),
+    }),
+  saveNameTemplate: (body: { name: string; pattern: string; replace: string; desc?: string }) =>
+    request<{ ok: boolean; data: NameTemplate[] }>("/api/name-templates", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteNameTemplate: (id: string) =>
+    request<{ ok: boolean; data: NameTemplate[] }>(`/api/name-templates/${id}`, { method: "DELETE" }),
 };
 
 export type { LogEntry };

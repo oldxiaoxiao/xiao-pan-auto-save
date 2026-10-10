@@ -117,6 +117,10 @@ a {
   background: var(--primary-soft);
   color: var(--primary);
 }
+.badge--warn {
+  background: #fff5e6;
+  color: var(--warn);
+}
 
 .text-muted {
   color: var(--text-muted);

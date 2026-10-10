@@ -36,7 +36,9 @@ def _driver(driver_key: str):
     cls = get_driver_class(driver_key)
     if cls is None or not cls.supported:
         raise HTTPException(400, f"{driver_key} 驱动即将支持")
-    return cls(cookie=acc.cookie, proxy=PROXY, index=acc.sort_order)
+    from ..services.credential_store import plain_cookie
+
+    return cls(cookie=plain_cookie(acc) or "", proxy=PROXY, index=acc.sort_order)
 
 
 def _item_dict(i: FsItem, **extra) -> dict:

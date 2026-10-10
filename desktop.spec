@@ -2,7 +2,11 @@ import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
-root = Path(SPECPATH)
+ROOT = Path(SPECPATH)
+sys.path.insert(0, str(ROOT))
+from backend import __version__  # noqa: E402
+
+root = ROOT
 datas = [(str(root / "frontend/dist"), "frontend/dist"),
          (str(root / "LICENSE"), "."), (str(root / "docs/desktop.md"), "docs")]
 datas += collect_data_files("tzdata")
@@ -18,6 +22,6 @@ coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="XiaoPan")
 if sys.platform == "darwin":
     app = BUNDLE(coll, name="XiaoPan.app", icon=str(root / "assets/logo.png"),
                  bundle_identifier="io.github.oldxiaoxiao.xiao-pan-auto-save",
-                 info_plist={"CFBundleShortVersionString": "0.1.1", "CFBundleVersion": "0.1.1",
+                 info_plist={"CFBundleShortVersionString": __version__, "CFBundleVersion": __version__,
                              "NSHighResolutionCapable": True,
                              "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True}})

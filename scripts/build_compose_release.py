@@ -19,7 +19,7 @@ def main():
     release.mkdir(exist_ok=True)
     with zipfile.ZipFile(release / f"xiao-pan-auto-save-{__version__}-compose.zip", "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("docker-compose.yml", yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
-        archive.writestr("README.md", "# 小盘自动转存 0.1.1 · Compose\n\n复制 .env.example 为 .env，按需编辑，执行 docker compose pull 和 docker compose up -d。\n\n默认访问 http://127.0.0.1:8432。局域网访问需设置密码与 WEBUI_BIND。\n\n[部署指南](docs/deployment.md) · [配置参考](docs/configuration.md) · [功能手册](docs/features.md) · [升级日志](docs/releases.md)\n")
+        archive.writestr("README.md", f"# 小盘自动转存 {__version__} · Compose\n\n复制 .env.example 为 .env，按需编辑，执行 docker compose pull 和 docker compose up -d。\n\n默认访问 http://127.0.0.1:8432。局域网访问需设置密码与 WEBUI_BIND。\n\n[部署指南](docs/deployment.md) · [配置参考](docs/configuration.md) · [功能手册](docs/features.md) · [升级日志](docs/releases.md)\n")
         for source, target in [(".env.example", ".env.example"), ("LICENSE", "LICENSE")]:
             archive.write(ROOT / source, target)
         for path in (ROOT / "docs").glob("*.md"):

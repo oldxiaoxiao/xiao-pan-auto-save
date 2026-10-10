@@ -16,6 +16,9 @@ from ..core.router import route_driver
 from ..core.scheduler import enddate_passed, has_valid_schedule, task_due_today
 from ..database import session_scope
 from ..models import Account, Task, run_mode_of
+from .notify_center import LEVEL_ACTION, LEVEL_INFO, NotifyLine
+
+RUN_NOTIFY_TITLE = "小盘自动转存运行结果"
 
 STATUS_ICONS = {
     "updated": "✅",
@@ -120,7 +123,14 @@ def _task_spec(task: Task) -> TaskSpec:
 
 
 def _pick_account(tasks_account_id: int | None, driver_key: str) -> Account | None:
-    """任务指定账号优先，否则取第一个启用且匹配驱动、有转存权限的账号。"""
+    """任务指定账号优先，否则取「此刻可用」的第一个同驱动账号（FR-06 容灾的第一道）。
+
+    未绑定账号的任务本来就没有"必须用哪个号"的语义，主号失效时直接顺延到下一个可用的号，
+    比跑到守卫那儿报失败更符合预期。全部不可用时仍返回第一个匹配账号——
+    这样后面的守卫能给出具体原因（"Cookie 已失效"），而不是含糊的"没有可用账号"。
+    """
+    from .account_failover import account_usable
+
     with session_scope() as session:
         if tasks_account_id:
             acc = session.get(Account, tasks_account_id)
@@ -130,7 +140,52 @@ def _pick_account(tasks_account_id: int | None, driver_key: str) -> Account | No
             .where(Account.enabled, Account.driver_key == driver_key)
             .order_by(Account.sort_order)
         ).all()
-        return next((a for a in accounts if a.can_save), accounts[0] if accounts else None)
+        if not accounts:
+            return None
+        # 顺延只在任务没绑定账号时发生；绑定了账号的由主循环的守卫决定是否切换
+        cand = [a for a in accounts if a.can_save] or accounts
+        return next((a for a in cand if account_usable(a)[0]), cand[0])
+
+
+def _acc_name(acc) -> str:
+    """账号在通知里的称呼：有名字用名字，否则退回 #id。"""
+    return getattr(acc, "name", "") or f"#{acc.id}"
+
+
+def _report_account_blocked(task, account, why: str, kind: str, summary, notify_lines, tlog) -> None:
+    """账号不可用且没有可顶替的账号：按原因给出失败说明（口径与 FR-01/02 一致）。"""
+    name = _acc_name(account)
+    if kind == "backoff":
+        summary["skipped"] += 1
+        # 仅告知：退避是系统自己会恢复的事，用户不需要为此动手，不该混进"需处理"
+        notify_lines.append(_notify_line(f"⏳《{task.taskname}》：{why}，本轮跳过", LEVEL_INFO, task))
+        tlog("warn", f"《{task.taskname}》{why}")
+    elif kind == "invalid":
+        summary["failed"] += 1
+        notify_lines.append(
+            _notify_line(
+                f"🔑《{task.taskname}》：账号「{name}」{why}，该账号的任务已暂停，更新后自动恢复",
+                LEVEL_ACTION,
+                task,
+            )
+        )
+        tlog("warn", f"《{task.taskname}》账号失效（{why}），本轮跳过")
+    elif kind == "quota":
+        summary["failed"] += 1
+        notify_lines.append(
+            _notify_line(f"💾《{task.taskname}》：{why}，未开始转存", LEVEL_ACTION, task)
+        )
+        tlog("error", f"《{task.taskname}》{why}")
+    else:  # credential
+        summary["failed"] += 1
+        notify_lines.append(
+            _notify_line(
+                f"🔑《{task.taskname}》：账号「{name}」{why}，请到账号页重新录入 Cookie",
+                LEVEL_ACTION,
+                task,
+            )
+        )
+        tlog("error", f"《{task.taskname}》{why}，本轮跳过")
 
 
 async def run_tasks(task_ids: list[int] | None = None, trigger: str = "manual") -> dict:
@@ -244,7 +299,7 @@ async def _run_tasks_inner(
         cls = route_driver(task.shareurl)
         if cls is None:
             summary["failed"] += 1
-            notify_lines.append(f"❌《{task.taskname}》：没有支持该链接的网盘驱动")
+            notify_lines.append(_notify_line(f"❌《{task.taskname}》：没有支持该链接的网盘驱动", LEVEL_ACTION, task))
             continue
         if not cls.supported:
             summary["skipped"] += 1
@@ -254,18 +309,59 @@ async def _run_tasks_inner(
         account = _pick_account(task.account_id, cls.key)
         if account is None:
             summary["failed"] += 1
-            notify_lines.append(f"❌《{task.taskname}》：未配置可用的{cls.name}账号")
+            notify_lines.append(
+                _notify_line(f"❌《{task.taskname}》：未配置可用的{cls.name}账号", LEVEL_ACTION, task)
+            )
             tlog("error", f"《{task.taskname}》缺少账号")
             continue
 
+        # FR-01/02 + FR-06：先判定这个账号此刻能否干活（风控退避 / Cookie 失效 / 配额见底 / 凭据解不开），
+        # 干不了就尝试切到同驱动的另一个可用账号；实在没有可顶替的，再按原因给失败说明。
+        from .account_failover import account_usable, pick_failover
+
+        usable, why, kind = account_usable(account)
+        if not usable:
+            alt = pick_failover(cls.key, exclude={int(account.id or 0)}) if getattr(
+                task, "account_failover", True
+            ) else None
+            if alt is None:
+                _report_account_blocked(task, account, why, kind, summary, notify_lines, tlog)
+                continue
+            # 切换必须留痕：用户得知道文件转存到了另一个号，否则会以为丢了
+            notify_lines.append(
+                _notify_line(
+                    f"🔄《{task.taskname}》：账号「{_acc_name(account)}」{why}，"
+                    f"已临时切到「{_acc_name(alt)}」继续",
+                    LEVEL_ACTION,
+                    task,
+                )
+            )
+            tlog(
+                "warn",
+                f"《{task.taskname}》账号「{_acc_name(account)}」{why}，容灾切到「{_acc_name(alt)}」",
+            )
+            account = alt
+
         if account.id not in drivers:
-            drivers[account.id] = cls(cookie=account.cookie, proxy=PROXY, index=account.sort_order)
+            from .credential_store import plain_cookie
+
+            cookie = plain_cookie(account)
+            if cookie is None:
+                summary["failed"] += 1
+                notify_lines.append(
+                    f"🔑《{task.taskname}》：账号「{getattr(account, 'name', '') or account.id}」"
+                    f"凭据无法解密（密钥文件丢失），请到账号页重新录入 Cookie"
+                )
+                tlog("error", f"《{task.taskname}》凭据无法解密，本轮跳过")
+                continue
+            drivers[account.id] = cls(cookie=cookie, proxy=PROXY, index=account.sort_order)
         driver = drivers[account.id]  # type: ignore[assignment]
 
         tlog("info", f"《{task.taskname}》开始运行")
         # 转存段（engine save + DB 落库）加全局锁串行化：跨并发 run_tasks 不重叠，避免同账号并发转存与 SQLite 写冲突
-        async with _run_lock:
-            result = await run_update_task(driver, _task_spec(task), magic_regex=magic_regex, log=tlog)
+        try:
+            async with _run_lock:
+                result = await run_update_task(driver, _task_spec(task), magic_regex=magic_regex, log=tlog)
             # 运行时间落库是转存的附带记账：SQLite 无 WAL/busy_timeout（database.py），并发写会抛锁冲突。
             # 口径对齐 _settle_once（0ed6400）：失败只记 warn，绝不抛回循环拖垮整批、丢掉 notify_lines；
             # 但转存结果 result 已在上面拿到，本段失败不掩盖已成功的转存。锁的串行段不能动（项目硬约束）。
@@ -279,6 +375,39 @@ async def _run_tasks_inner(
                         session.add(row)
             except Exception as exc:  # noqa: BLE001 落库失败不影响本次转存结果与本批剩余任务
                 tlog("warn", f"《{task.taskname}》运行时间落库失败（不影响本次结果）：{exc}")
+        except Exception as exc:  # noqa: BLE001
+            # FR-01 限流退避：这里只记账，不改变原有的异常传播口径。
+            # 记下来之后，下一轮 is_in_backoff 会把该账号的任务整轮跳过，
+            # 于是"连续风控→整批中断"退化成"暂停该账号、其余任务照跑"。
+            from .resource_guard import looks_like_rate_limit, note_failure
+
+            if looks_like_rate_limit(str(exc)):
+                secs = note_failure(account.id, str(exc))
+                tlog("warn", f"《{task.taskname}》触发限流/风控，该账号退避 {secs}s 后再试")
+                # 仅告知：退避期内其余任务照跑、到期自动恢复，不需要用户动手
+                notify_lines.append(
+                    _notify_line(f"⏳《{task.taskname}》账号触发限流/风控，已退避 {secs}s", LEVEL_INFO, task)
+                )
+            # FR-03：异常也要落账本，否则"连续失败"永远数不到这一次
+            try:
+                from .task_health import record_run
+
+                record_run(int(task.id or 0), "error", str(exc)[:300])
+            except Exception:  # noqa: BLE001 账本是旁路观测
+                pass
+            raise
+        # 正常跑完就清零：退避是给连续失败用的，一次限流不该长期影响账号
+        from .resource_guard import clear_backoff
+
+        clear_backoff(account.id)
+
+        # FR-03：把这次的结论落进账本，健康度与失败归因都靠它
+        try:
+            from .task_health import record_run
+
+            record_run(int(task.id or 0), result.status, result.message or "", run_id)
+        except Exception:  # noqa: BLE001 账本写入失败绝不拖垮运行
+            tlog("warn", f"《{task.taskname}》运行账本写入失败（不影响本次结果）")
 
         icon = STATUS_ICONS.get(result.status)
         # 一次性判定要覆盖所有状态（含 no_changes / 转存失败），故计数先给默认值，
@@ -286,7 +415,10 @@ async def _run_tasks_inner(
         counts = DownloadCounts()
         if result.status == "updated":
             summary["updated"] += 1
-            notify_lines.append(f"✅《{task.taskname}》添加追更：\n{result.render()}")
+            # 仅告知：转存成功是最常见的日常消息，可按任务单独关掉
+            notify_lines.append(
+                _notify_line(f"✅《{task.taskname}》添加追更：\n{result.render()}", LEVEL_INFO, task)
+            )
             tlog("info", f"《{task.taskname}》新增 {len(result.files)} 项")
             if getattr(task, "auto_download", False):
                 # 下载在锁外：本地/aria2 可与其它任务的转存并行，不占用转存串行段
@@ -297,7 +429,7 @@ async def _run_tasks_inner(
             tlog("info", f"《{task.taskname}》没有新的转存")
         else:
             summary["failed"] += 1
-            notify_lines.append(f"{icon}《{task.taskname}》：{result.message}")
+            notify_lines.append(_notify_line(f"{icon}《{task.taskname}》：{result.message}", LEVEL_ACTION, task))
             tlog("error", f"《{task.taskname}》{result.status}：{result.message}")
         # 收口只此一处：非 once / 已停用的行由 _once_verdict 与 _settle_once 的守卫拦掉，不会多打日志；
         # 它自己吞掉写库异常（见 _settle_once 文档），所以这里裸调用也不会中断本批剩余任务与通知。
@@ -306,10 +438,12 @@ async def _run_tasks_inner(
     # spec 4.4：停用行是「按用户意愿没跑」，必须在通知里显式交代数量，否则用户会以为漏跑。
     # 只在非零时出现，避免「跳过 0 个已停用任务」这种噪音。
     if summary["disabled_skipped"]:
-        notify_lines.append(f"⏸️ 本次跳过 {summary['disabled_skipped']} 个已停用任务")
+        notify_lines.append(
+            NotifyLine(f"⏸️ 本次跳过 {summary['disabled_skipped']} 个已停用任务", level=LEVEL_INFO)
+        )
 
     if notify_lines:
-        await _push("小盘自动转存运行结果", "\n".join(notify_lines), push_config, settings, log)
+        await _push_items(notify_lines, push_config, settings, log)
 
 
 @dataclass
@@ -351,8 +485,13 @@ async def _download_for_task(driver, task, result, settings, notify_lines, tlog,
     counts.ok = sum(1 for line in lines if line.startswith("✅"))
     counts.failed = counts.attempted - counts.ok
     if lines:
+        # 有失败就是需处理（磁盘不足、下载异常都得用户去看）；全成功只是告知
         notify_lines.append(
-            f"📥《{task.taskname}》本地下载 {counts.ok}/{counts.attempted}：\n" + "\n".join(lines)
+            _notify_line(
+                f"📥《{task.taskname}》本地下载 {counts.ok}/{counts.attempted}：\n" + "\n".join(lines),
+                LEVEL_ACTION if counts.failed else LEVEL_INFO,
+                task,
+            )
         )
     return counts
 
@@ -474,7 +613,35 @@ def reset_once_budget(task_id: int) -> None:
         hub.publish("warn", f"任务 {task_id} 重置重试预算失败：{exc}")
 
 
+def _notify_line(text: str, level: str, task=None) -> NotifyLine:
+    """构造带级别与任务归属的通知行。
+
+    task 只用来取 id（静音判定用），刻意不整行传对象——通知行最后会被 join 成字符串，
+    拿 id 就够，也避免运行结束后对象还被消息内容引用着。
+    """
+    return NotifyLine(text, level=level, task_id=getattr(task, "id", None))
+
+
+async def _push_items(items, push_config: dict, settings: dict, log) -> dict:
+    """FR-04：把本轮通知行交给分级通道（分级 / 按任务静音 / 免打扰入队）。"""
+    from . import notify_center
+
+    try:
+        return await notify_center.dispatch(
+            items,
+            settings=settings,
+            push_config=push_config,
+            log=log,
+            send=_push,
+            title=RUN_NOTIFY_TITLE,
+        )
+    except Exception as exc:  # noqa: BLE001 通知出任何问题都不该拖垮运行结果
+        log("error", f"通知分发异常：{exc}")
+        return {"sent": 0, "queued": 0}
+
+
 async def _push(title: str, content: str, push_config: dict, settings: dict, log) -> None:
+    """底层单条发送：分级完成后每条消息走这里（测试与旧调用方都按这个签名）。"""
     if not settings.get("notify_enabled", True):
         return
     from .notify_service import push_all  # 延迟导入，模块由并行任务交付

@@ -21,12 +21,16 @@ export interface TaskPayload {
   download_savepath: string;
   disabled: boolean;
   account_id: number | null;
+  /** FR-06：指定账号不可用时是否允许切到同网盘的其它可用账号。 */
+  account_failover: boolean;
   sort_order: number;
   episode_start: number;
   episode_end: number;
   quality: string;
   schedule: string;
   run_mode: RunMode;
+  /** FR-04：仅告知级通知（转存成功摘要）开关；需处理级不受它影响。 */
+  notify_info: boolean;
 }
 
 export interface Task extends TaskPayload {
@@ -39,6 +43,16 @@ export interface Task extends TaskPayload {
   retry_attempts: number;
   /** 到点重试的时间，后端 `isoformat()` 出的无时区串，与 last_run_at 同一口径；null=没有待重试。 */
   next_retry_at: string | null;
+  /** FR-03 健康度：ok=正常 / attention=待处理 / stale=停摆，reason 是具体原因。 */
+  health?: TaskHealth;
+}
+
+export interface TaskHealth {
+  status: "ok" | "attention" | "stale";
+  reason: string;
+  fail_streak: number;
+  last_status: string;
+  kind: string;
 }
 
 /** GET /api/accounts 返回（无 cookie 明文，仅掩码）。 */
@@ -57,6 +71,9 @@ export interface Account {
   last_sign_at: string | null;
   sign_message: string;
   cookie_masked: string;
+  /** FR-02：最近一次健康检查结论；false = Cookie 失效，需更新 */
+  check_ok?: boolean;
+  check_message?: string;
 }
 
 /** POST/PUT /api/accounts 请求体。 */
@@ -157,6 +174,8 @@ export interface DryRunResult {
   skipped_existing?: number;
   filtered_out?: number;
   items?: { share_name: string; final_name: string; dest_path: string; is_dir: boolean }[];
+  /** FR-10：命名正则没命中的样本（最多 20 个）。有样本 = 正则写错了，为空 = 真的没更新。 */
+  unmatched_samples?: string[];
 }
 
 /** GET /api/settings/magic/expand 的响应。 */
@@ -167,12 +186,21 @@ export interface MagicExpand {
   replace: string;
 }
 
+/** FR-04：免打扰窗口。需处理级在窗口内不丢，攒到次日合成一条摘要补发。 */
+export interface NotifyQuiet {
+  enabled: boolean;
+  /** HH:mm，跨天窗口（起 > 止）按"过夜"理解。 */
+  start: string;
+  end: string;
+}
+
 export interface Settings {
   crontab: string;
   push_config: PushConfig;
   magic_regex: MagicRegex;
   source: SearchSource;
   notify_enabled: boolean;
+  notify_quiet: NotifyQuiet;
   sign_enabled: boolean;
   download: DownloadSettings;
   task_defaults: TaskDefaults;
@@ -190,6 +218,17 @@ export interface NotifyTestResult {
 export interface NotifyTestResponse {
   enabled: string[];
   results: NotifyTestResult[];
+}
+
+/** GET /api/settings/notify/pending：免打扰队列现状。 */
+export interface NotifyPending {
+  ok: boolean;
+  /** 当前时刻是否落在免打扰窗口内。 */
+  quiet: boolean;
+  count: number;
+  action: number;
+  info: number;
+  config: NotifyQuiet;
 }
 
 export interface DriverInfo {
@@ -299,6 +338,8 @@ export interface ValidateResponse {
 export interface HealthResponse {
   status: string;
   data_dir: string;
+  /** true = 桌面客户端（本机运行）；false = 服务器/NAS 容器 */
+  desktop_mode?: boolean;
 }
 
 /** GET /api/downloads 的下载任务项（内置下载队列）。 */
@@ -350,4 +391,196 @@ export interface DownloadHistoryQuery {
   status?: string;
   task_id?: number | null;
   keyword?: string;
+}
+
+/* ---------------------------------- AI 助手 ---------------------------------- */
+
+export interface AiConfig {
+  enabled: boolean;
+  provider: string;
+  base_url: string;
+  model: string;
+  has_key: boolean;
+  api_key_masked: string;
+  temperature: number;
+  timeout_ms: number;
+  mode: "chat" | "copilot";
+  monthly_token_limit: number;
+  tool_call: boolean;
+}
+
+export interface AiAction {
+  id: string;
+  kind: string;
+  summary: string;
+  params: Record<string, string | number | boolean>;
+  impact: string;
+  risk: "low" | "medium" | "high";
+  needs_confirm: boolean;
+  status: "pending" | "running" | "done" | "failed";
+  result: string;
+  edited?: boolean;
+}
+
+export interface AiSource {
+  type: string;
+  ref: string;
+  as_of: string;
+}
+
+export interface AiMessage {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  sources: AiSource[];
+  actions: AiAction[];
+  confidence: string;
+  model: string;
+  prompt_version: string;
+  tools_version: string;
+  feedback: string;
+  error: string;
+  created_at: string;
+}
+
+export interface AiSession {
+  id: number;
+  title: string;
+  mode: string;
+  last_at: string;
+}
+
+/** SSE 事件：delta=文本增量，tool=工具调用，done=收口，error=失败。 */
+export interface AgentEvent {
+  type: "delta" | "tool" | "done" | "error";
+  text?: string;
+  name?: string;
+  status?: string;
+  summary?: string;
+  message?: string;
+  kind?: string;
+  message_id?: number;
+  answer?: string;
+  sources?: AiSource[];
+  actions?: AiAction[];
+  confidence?: string;
+}
+
+export interface AiUsageModel {
+  calls: number;
+  failed: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+}
+
+export interface AiUsage {
+  since: string;
+  calls: number;
+  failed: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  by_model: Record<string, AiUsageModel>;
+}
+
+/** FR-05：备份文件结构。 */
+export interface BackupPayload {
+  meta: {
+    kind: string;
+    version: string;
+    exported_at: string;
+    mode: "safe" | "full";
+    credentials_included: boolean;
+    counts: { tasks: number; accounts: number; settings: number; downloads: number };
+  };
+  tasks: Record<string, unknown>[];
+  accounts: Record<string, unknown>[];
+  settings: Record<string, unknown>;
+  downloads: Record<string, unknown>[];
+}
+
+export interface BackupRestoreCounts {
+  tasks: number;
+  accounts: number;
+  downloads: number;
+  settings: number;
+}
+
+/* ---------------------------------- 总览 ---------------------------------- */
+
+export interface OverviewIssue {
+  id: number;
+  taskname: string;
+  status: string;
+  kind: string;
+  reason: string;
+  fail_streak: number;
+}
+
+export interface OverviewDisk {
+  known: boolean;
+  target: string;
+  free?: number;
+  total?: number;
+  free_text?: string;
+  total_text?: string;
+  used_pct?: number;
+  will_block?: boolean;
+  note?: string;
+  reason?: string;
+}
+
+export interface Overview {
+  generated_at: string;
+  level: "ok" | "attention" | "critical" | "unknown";
+  blocking: string[];
+  counts: {
+    tasks: number;
+    active_tasks: number;
+    accounts: number;
+    enabled_accounts: number;
+  };
+  issues: OverviewIssue[];
+  issues_total: number;
+  bad_accounts: { id: number | null; name: string; message: string }[];
+  downloads: {
+    in_flight: number;
+    interrupted: number;
+    failed: number;
+    done: number;
+    done_today: number;
+    failed_today: number;
+  };
+  disk: OverviewDisk;
+  last_run: {
+    task_id: number;
+    taskname: string;
+    status: string;
+    message: string;
+    at: string;
+  } | null;
+}
+
+/* -------------------------------- 命名模板（FR-10） ------------------------------- */
+
+export interface NameTemplate {
+  id: string;
+  name: string;
+  desc: string;
+  pattern: string;
+  replace: string;
+  samples?: string[];
+}
+
+export interface NameTemplatePreview {
+  before: string;
+  after: string;
+  matched: boolean;
+  changed: boolean;
+  /** 含 {I} 占位：序号要等转存时按目标目录现状推算，预览里算不出来。 */
+  pending_index: boolean;
+}
+
+/** 试跑结果里新增：命名正则没命中的样本（FR-10，用于区分"正则写错"与"真没更新"）。 */
+export interface DryRunUnmatched {
+  samples: string[];
 }

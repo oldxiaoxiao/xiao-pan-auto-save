@@ -27,6 +27,8 @@ DEFAULT_SETTINGS: dict[str, object] = {
         ]
     },
     "notify_enabled": True,
+    # FR-04：免打扰窗口。需处理级在窗口内不丢，攒到次日合成一条摘要补发
+    "notify_quiet": {"enabled": True, "start": "23:00", "end": "08:00"},
     "sign_enabled": True,
     "task_defaults": {
         "savepath_root": "/来自：分享",
