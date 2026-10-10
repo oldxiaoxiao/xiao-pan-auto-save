@@ -177,20 +177,8 @@ const health = computed(() => {
         <span class="name">{{ task.taskname }}</span>
         <span v-if="dirty" class="dot-unsaved" title="未保存" />
         <span v-if="task.shareurl_ban" class="badge badge--danger">失效</span>
-        <span
-          v-else-if="health.status === 'attention'"
-          class="badge badge--warn"
-          :title="health.reason"
-        >
-          待处理
-        </span>
-        <span
-          v-else-if="health.status === 'stale'"
-          class="badge badge--warn"
-          :title="health.reason"
-        >
-          停摆
-        </span>
+        <span v-else-if="health.status === 'attention'" class="badge badge--warn" :title="health.reason"> 待处理 </span>
+        <span v-else-if="health.status === 'stale'" class="badge badge--warn" :title="health.reason"> 停摆 </span>
         <span v-if="task.disabled && !isOnceDone" class="badge badge--muted">停用</span>
         <span v-else-if="lastRun" class="badge badge--muted">{{ lastRun }}</span>
       </div>

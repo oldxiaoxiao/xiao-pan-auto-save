@@ -52,10 +52,9 @@ const RUN_TEXT: Record<string, string> = {
 
 function kindText(kind: string) {
   return (
-    ({ banned: "分享失效", account: "账号失效", failing: "连续失败", stale: "长期未运行" } as Record<
-      string,
-      string
-    >)[kind] || kind
+    ({ banned: "分享失效", account: "账号失效", failing: "连续失败", stale: "长期未运行" } as Record<string, string>)[
+      kind
+    ] || kind
   );
 }
 
@@ -68,9 +67,7 @@ function pct(n: number) {
   <div class="page">
     <div class="head">
       <h2>总览</h2>
-      <span v-if="data" class="stamp text-muted">
-        更新于 {{ formatDateTime(data.generated_at) }}
-      </span>
+      <span v-if="data" class="stamp text-muted"> 更新于 {{ formatDateTime(data.generated_at) }} </span>
     </div>
 
     <div v-if="loading" class="text-muted">加载中…</div>
@@ -95,7 +92,9 @@ function pct(n: number) {
       <div class="grid">
         <div class="card stat">
           <div class="stat__label">追更任务</div>
-          <div class="stat__value">{{ data.counts.active_tasks }}<span class="unit">/{{ data.counts.tasks }}</span></div>
+          <div class="stat__value">
+            {{ data.counts.active_tasks }}<span class="unit">/{{ data.counts.tasks }}</span>
+          </div>
           <div class="stat__foot">
             <RouterLink v-if="data.issues_total" class="warn-link" to="/tasks">
               {{ data.issues_total }} 个待处理 →
@@ -121,9 +120,7 @@ function pct(n: number) {
           <div class="stat__label">今日下载</div>
           <div class="stat__value">{{ data.downloads.done_today }}</div>
           <div class="stat__foot">
-            <span v-if="data.downloads.in_flight" class="text-muted">
-              {{ data.downloads.in_flight }} 个进行中
-            </span>
+            <span v-if="data.downloads.in_flight" class="text-muted"> {{ data.downloads.in_flight }} 个进行中 </span>
             <span v-else-if="data.downloads.failed_today" class="warn-link">
               失败 {{ data.downloads.failed_today }}
             </span>

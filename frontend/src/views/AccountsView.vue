@@ -174,17 +174,13 @@ onMounted(async () => {
           <span class="handle">⠿</span>
           <span class="nick">{{ a.nickname || a.name || `账号 #${a.id}` }}</span>
           <span class="badge badge--primary">{{ driverName.get(a.driver_key) || a.driver_key }}</span>
-          <span v-if="isInvalid(a)" class="badge badge--danger" :title="a.check_message">
-            需更新
-          </span>
+          <span v-if="isInvalid(a)" class="badge badge--danger" :title="a.check_message"> 需更新 </span>
           <el-switch :model-value="a.enabled" size="small" class="sw" @change="toggleEnabled(a)" />
         </div>
 
         <div v-if="isInvalid(a)" class="invalid">
           {{ a.check_message || "账号不可用" }}
-          <template v-if="a.enabled">
-            — 该账号的任务已暂停执行，重新粘贴 Cookie 后自动恢复
-          </template>
+          <template v-if="a.enabled"> — 该账号的任务已暂停执行，重新粘贴 Cookie 后自动恢复 </template>
         </div>
 
         <div v-if="a.capacity_total" class="cap">

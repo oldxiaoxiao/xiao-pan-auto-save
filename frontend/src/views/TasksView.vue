@@ -43,9 +43,7 @@ const pendingPrefill = ref<Partial<TaskPayload> | undefined>(undefined);
 
 const onlyIssues = ref(false);
 
-const issueCount = computed(
-  () => sorted.value.filter((t) => (t.health?.status || "ok") !== "ok").length,
-);
+const issueCount = computed(() => sorted.value.filter((t) => (t.health?.status || "ok") !== "ok").length);
 
 const filtered = computed(() => {
   const kw = keyword.value.trim().toLowerCase();
@@ -299,9 +297,7 @@ onMounted(() => {
       <el-select v-model="pathFilter" placeholder="按保存路径筛选" clearable style="max-width: 200px">
         <el-option v-for="p in savePaths" :key="p" :label="p" :value="p" />
       </el-select>
-      <el-checkbox v-model="onlyIssues" :disabled="!issueCount">
-        只看待处理（{{ issueCount }}）
-      </el-checkbox>
+      <el-checkbox v-model="onlyIssues" :disabled="!issueCount"> 只看待处理（{{ issueCount }}） </el-checkbox>
       <span class="count text-muted">共 {{ filtered.length }} 个任务</span>
       <span class="spacer" />
       <el-button @click="importClipboard"> 📋 剪贴板导入 </el-button>

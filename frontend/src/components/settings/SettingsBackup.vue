@@ -77,8 +77,8 @@ async function onFile(ev: Event) {
   <div class="pane">
     <h3>备份与恢复</h3>
     <p class="hint">
-      导出为结构化 JSON，包含任务、账号、设置与下载记录。默认导出<b>不含凭据</b>——
-      整库快照会把 Cookie 明文一起带走，外发或存网盘就成了凭据泄露面。
+      导出为结构化 JSON，包含任务、账号、设置与下载记录。默认导出<b>不含凭据</b>—— 整库快照会把 Cookie
+      明文一起带走，外发或存网盘就成了凭据泄露面。
     </p>
 
     <div class="actions">

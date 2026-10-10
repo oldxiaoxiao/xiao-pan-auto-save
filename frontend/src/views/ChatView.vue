@@ -357,22 +357,13 @@ onUnmounted(closeLogTail);
 
         <div v-for="(m, i) in msgs" :key="i" class="msg" :class="'msg--' + m.role">
           <div class="bubble">
-            <div
-              class="content md"
-              :class="{ streaming: m.streaming }"
-              v-html="renderMd(m.content)"
-            />
+            <div class="content md" :class="{ streaming: m.streaming }" v-html="renderMd(m.content)" />
 
             <div v-if="m.tool" class="tool">正在调用 {{ m.tool }}</div>
 
             <div v-if="m.sources?.length" class="sources">
               <span class="src-label">数据来源</span>
-              <button
-                v-for="(s, k) in m.sources"
-                :key="k"
-                class="src"
-                @click="goto(s.ref)"
-              >
+              <button v-for="(s, k) in m.sources" :key="k" class="src" @click="goto(s.ref)">
                 {{ sourceLabel(s.type) }} · {{ formatDateTime(s.as_of) }}
               </button>
             </div>
@@ -404,12 +395,7 @@ onUnmounted(closeLogTail);
                       class="input"
                       :title="String(edits[a.id][String(k)] ?? '')"
                     />
-                    <button
-                      v-if="String(k) === 'savepath'"
-                      class="mini"
-                      type="button"
-                      @click.prevent="openPicker(a)"
-                    >
+                    <button v-if="String(k) === 'savepath'" class="mini" type="button" @click.prevent="openPicker(a)">
                       浏览
                     </button>
                   </template>
@@ -419,18 +405,24 @@ onUnmounted(closeLogTail);
               <div class="action__foot">
                 <template v-if="a.status === 'pending'">
                   <button class="btn btn--primary" @click="runAction(m, a)">确认执行</button>
-                  <button class="btn btn--ghost" @click="a.status = 'failed'; a.result = '用户取消'">取消</button>
+                  <button
+                    class="btn btn--ghost"
+                    @click="
+                      a.status = 'failed';
+                      a.result = '用户取消';
+                    "
+                  >
+                    取消
+                  </button>
                 </template>
-                <span v-else-if="a.status === 'running'" class="action__result running">
-                  运行中… {{ a.result }}
-                </span>
+                <span v-else-if="a.status === 'running'" class="action__result running"> 运行中… {{ a.result }} </span>
                 <div v-if="cardLogs[a.id]?.length" class="tailing">
                   <div v-for="(line, k) in cardLogs[a.id].slice(-6)" :key="k" class="tailing__line">
                     {{ line }}
                   </div>
                 </div>
                 <span v-else class="action__result">
-                  {{ a.status === 'done' ? '已执行' : '未执行' }}：{{ a.result }}
+                  {{ a.status === "done" ? "已执行" : "未执行" }}：{{ a.result }}
                 </span>
               </div>
             </div>

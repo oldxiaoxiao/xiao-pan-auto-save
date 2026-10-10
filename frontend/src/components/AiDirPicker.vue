@@ -81,12 +81,7 @@ watch(
 
     <div v-loading="loading" class="list">
       <div v-if="!items.length && !loading" class="empty">该目录下暂无子目录</div>
-      <button
-        v-for="it in items.filter((x) => x.is_dir)"
-        :key="it.fid"
-        class="row"
-        @click="enter(it)"
-      >
+      <button v-for="it in items.filter((x) => x.is_dir)" :key="it.fid" class="row" @click="enter(it)">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6">
           <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
         </svg>

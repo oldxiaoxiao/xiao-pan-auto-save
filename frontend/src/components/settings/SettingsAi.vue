@@ -28,12 +28,27 @@ const usage = ref<AiUsage | null>(null);
 const PRESETS = [
   { label: "OpenAI", provider: "openai", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
   { label: "DeepSeek", provider: "openai", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
-  { label: "通义千问（兼容模式）", provider: "openai", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
+  {
+    label: "通义千问（兼容模式）",
+    provider: "openai",
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    model: "qwen-plus",
+  },
   { label: "智谱 GLM", provider: "openai", base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" },
   { label: "Moonshot / Kimi", provider: "openai", base_url: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
-  { label: "硅基流动", provider: "openai", base_url: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen2.5-7B-Instruct" },
+  {
+    label: "硅基流动",
+    provider: "openai",
+    base_url: "https://api.siliconflow.cn/v1",
+    model: "Qwen/Qwen2.5-7B-Instruct",
+  },
   { label: "Ollama（本机）", provider: "openai", base_url: "http://localhost:11434/v1", model: "qwen2.5:7b" },
-  { label: "Anthropic", provider: "anthropic", base_url: "https://api.anthropic.com", model: "claude-3-5-sonnet-latest" },
+  {
+    label: "Anthropic",
+    provider: "anthropic",
+    base_url: "https://api.anthropic.com",
+    model: "claude-3-5-sonnet-latest",
+  },
 ];
 
 function applyPreset(p: (typeof PRESETS)[number]) {
@@ -120,8 +135,7 @@ onMounted(load);
   <div v-loading="loading" class="pane">
     <h3>AI 助手</h3>
     <p class="hint">
-      助手需要你自己的模型服务。API Key 只加密保存在本机，界面与接口永远只回显掩码。
-      未启用前不会发起任何外部请求。
+      助手需要你自己的模型服务。API Key 只加密保存在本机，界面与接口永远只回显掩码。 未启用前不会发起任何外部请求。
     </p>
 
     <div class="row">
@@ -187,8 +201,8 @@ onMounted(load);
     <div v-if="usage" class="usage">
       <h4>本月用量</h4>
       <p class="hint">
-        统计自 {{ formatDateTime(usage.since) }}：调用 {{ usage.calls }} 次（失败 {{ usage.failed }}），
-        输入 {{ usage.prompt_tokens }} / 输出 {{ usage.completion_tokens }} tokens。
+        统计自 {{ formatDateTime(usage.since) }}：调用 {{ usage.calls }} 次（失败 {{ usage.failed }}）， 输入
+        {{ usage.prompt_tokens }} / 输出 {{ usage.completion_tokens }} tokens。
       </p>
     </div>
 

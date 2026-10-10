@@ -425,9 +425,7 @@ const dryBody = computed(() => {
   // FR-10：正则没命中的样本。没有它，"0 个新增"分不清是正则写错还是真的没有更新。
   const unmatched = r.unmatched_samples ?? [];
   if (unmatched.length) {
-    lines.push(
-      `⚠️ 有 ${unmatched.length} 个文件没被匹配正则命中，它们不会被转存：` + unmatched.slice(0, 8).join("、"),
-    );
+    lines.push(`⚠️ 有 ${unmatched.length} 个文件没被匹配正则命中，它们不会被转存：` + unmatched.slice(0, 8).join("、"));
     lines.push("如果这不是你想要的，去「命名模板库」换个模板，或把匹配正则留空（留空 = 全部命中）。");
   } else if (r.new_count === 0 && (r.skipped_existing ?? 0) === 0 && (r.filtered_out ?? 0) === 0) {
     lines.push("分享里没有任何待转存条目（不是被过滤掉的），说明目标目录已经是最新的。");

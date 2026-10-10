@@ -144,16 +144,18 @@ async function removeTemplate(id: string) {
           <h4>{{ active.name }}</h4>
           <p class="desc">{{ active.desc }}</p>
           <div class="code">
-            <div><span class="k">匹配正则</span> <code>{{ active.pattern || "（留空 = 全部命中）" }}</code></div>
-            <div><span class="k">替换式</span> <code>{{ active.replace }}</code></div>
+            <div>
+              <span class="k">匹配正则</span> <code>{{ active.pattern || "（留空 = 全部命中）" }}</code>
+            </div>
+            <div>
+              <span class="k">替换式</span> <code>{{ active.replace }}</code>
+            </div>
           </div>
 
           <div class="preview">
             <div class="preview__head">
               示例效果
-              <span class="text-muted">
-                （用当前剧名「{{ taskname || "（未填）" }}」试算，与真实转存同源）
-              </span>
+              <span class="text-muted"> （用当前剧名「{{ taskname || "（未填）" }}」试算，与真实转存同源） </span>
             </div>
             <div v-loading="previewing">
               <div v-for="r in previewRows" :key="r.before" class="pr">

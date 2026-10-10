@@ -273,10 +273,10 @@ export const api = {
   exportBackup: (mode: "safe" | "full" = "safe") =>
     request<{ ok: boolean; data: BackupPayload; version: string }>(`/api/backup/export?mode=${mode}`),
   importBackup: (payload: object) =>
-    request<{ ok: boolean; message: string; restored?: BackupRestoreCounts; snapshot?: string }>(
-      "/api/backup/import",
-      { method: "POST", body: JSON.stringify({ payload }) },
-    ),
+    request<{ ok: boolean; message: string; restored?: BackupRestoreCounts; snapshot?: string }>("/api/backup/import", {
+      method: "POST",
+      body: JSON.stringify({ payload }),
+    }),
 
   // FR-09 总览
   overview: () => request<{ ok: boolean; message?: string; data: Overview }>("/api/overview"),

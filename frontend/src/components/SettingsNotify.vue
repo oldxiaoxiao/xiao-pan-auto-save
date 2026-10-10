@@ -159,7 +159,10 @@ async function test(channel?: string) {
         />
       </div>
       <ul class="quiet__hint text-muted">
-        <li><b>需处理</b>：链接失效、Cookie 过期、磁盘/配额不足、下载失败 —— 免打扰时段内<b>不丢弃</b>，攒到次日合成一条摘要补发。</li>
+        <li>
+          <b>需处理</b>：链接失效、Cookie 过期、磁盘/配额不足、下载失败 ——
+          免打扰时段内<b>不丢弃</b>，攒到次日合成一条摘要补发。
+        </li>
         <li><b>仅告知</b>：转存成功、退避跳过 —— 可在任务表单里按任务单独关掉。</li>
       </ul>
       <div class="quiet__queue">
