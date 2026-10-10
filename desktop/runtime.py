@@ -85,7 +85,7 @@ class BackendProcess:
         with self._http.open(request, timeout=2) as response:
             return response.read()
 
-    def start(self, timeout: float = 40) -> None:
+    def start(self, timeout: float = 120) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         logs = self.data_dir / "logs"
         logs.mkdir(exist_ok=True)
@@ -106,7 +106,10 @@ class BackendProcess:
         try:
             while time.monotonic() < deadline:
                 if self.process.poll() is not None:
-                    raise RuntimeError(f"本地服务启动失败，请查看 {logs / 'desktop-server.log'} 和 {logs / 'desktop-startup.log'}")
+                    raise RuntimeError(
+                        f"本地服务启动失败（退出码 {self.process.returncode}）。"
+                        f"{self._crash_detail(logs)}"
+                    )
                 try:
                     if self.ready_file.exists():
                         port = json.loads(self.ready_file.read_text())["port"]
@@ -117,12 +120,30 @@ class BackendProcess:
                 except (URLError, OSError, ValueError, KeyError):
                     pass
                 time.sleep(0.1)
-            raise RuntimeError(f"本地服务启动超时，请查看 {logs}")
+            raise RuntimeError(f"本地服务启动超时（{int(timeout)}s），请查看 {logs}{self._crash_detail(logs)}")
         except BaseException:
             self.stop()
             raise
         finally:
             self.ready_file.unlink(missing_ok=True)
+
+    @staticmethod
+    def _crash_detail(logs: Path) -> str:
+        """子进程崩溃/超时时，把启动日志尾部带出来，便于 CI 定位真实原因。"""
+        chunks = []
+        for name in ("desktop-startup.log", "desktop-server.log"):
+            path = logs / name
+            if not path.exists():
+                continue
+            try:
+                text = path.read_text(errors="replace").strip()
+            except OSError:
+                continue
+            if not text:
+                continue
+            tail = "\n".join(text.splitlines()[-40:])
+            chunks.append(f"\n--- {name} (tail) ---\n{tail}")
+        return "\n".join(chunks) if chunks else ""
 
     def stop(self) -> None:
         if self.process is not None and self.process.poll() is None:

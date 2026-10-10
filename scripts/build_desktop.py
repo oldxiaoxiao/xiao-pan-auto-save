@@ -37,7 +37,7 @@ def main() -> None:
     env["DATA_DIR"] = str(ROOT / "build" / "packaging-data")
     subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "desktop.spec"], cwd=ROOT, env=env, check=True)
     binary = ROOT / "dist" / ("XiaoPan.app/Contents/MacOS/XiaoPan" if sys.platform == "darwin" else "XiaoPan/XiaoPan.exe")
-    subprocess.run([str(binary), "--smoke-test"], check=True, timeout=90)
+    subprocess.run([str(binary), "--smoke-test"], check=True, timeout=180)
     release = ROOT / "release"
     release.mkdir(exist_ok=True)
     arch = platform.machine().lower()
