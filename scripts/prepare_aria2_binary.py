@@ -33,7 +33,14 @@ def _exe_name() -> str:
 
 
 def _log(msg: str) -> None:
-    print(f"[prepare-aria2] {msg}", flush=True)
+    """打印进度。日志含中文，Windows 控制台默认 cp1252 会抛 UnicodeEncodeError，
+    所以 main() 入口已把 stdout 改成 utf-8；这里再兜一层，编码失败就退成 ASCII 可读文本，
+    绝不让"打不出日志"变成构建失败。"""
+    line = f"[prepare-aria2] {msg}"
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        print(line.encode("ascii", "replace").decode("ascii"), flush=True)
 
 
 # --------------------------------------------------------------------- Windows
@@ -140,6 +147,12 @@ def _verify(binary: Path) -> None:
 
 
 def main() -> None:
+    # 与 scripts/build_desktop.py 同款：Windows 控制台默认 cp1252，中文日志会直接抛
+    # UnicodeEncodeError 把构建打断。子进程有自己的 stdout，必须自己重配。
+    if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True, help="产物目录，例如 assets/aria2")
     parser.add_argument("--version", default=ARIA2_VERSION)
