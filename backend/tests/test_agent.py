@@ -343,10 +343,11 @@ class _FakeClient:
 
 async def test_local_model_without_key_loads(provider_cfg):
     """本机模型（Ollama）勾了免 Key：没有 Key 也必须能加载出可用配置。"""
+    from sqlmodel import select
+
     from backend.database import session_scope
     from backend.models import AiProvider
     from backend.services import ai_agent
-    from sqlmodel import select
 
     with session_scope() as session:
         row = session.exec(select(AiProvider).where(AiProvider.key == "default")).first()
@@ -361,10 +362,11 @@ async def test_local_model_without_key_loads(provider_cfg):
 
 async def test_missing_key_still_rejected(provider_cfg):
     """仍要求 Key 的配置缺 Key 必须报错——不能因为新增开关被静默放行。"""
+    from sqlmodel import select
+
     from backend.database import session_scope
     from backend.models import AiProvider
     from backend.services import ai_agent
-    from sqlmodel import select
 
     with session_scope() as session:
         row = session.exec(select(AiProvider).where(AiProvider.key == "default")).first()
