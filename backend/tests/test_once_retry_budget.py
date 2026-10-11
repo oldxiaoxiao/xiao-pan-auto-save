@@ -601,6 +601,14 @@ async def test_overdue_retry_job_catches_up_and_drives_the_row(client, monkeypat
 
     monkeypatch.setattr(ts, "run_tasks", fake_run)
     tid = _persist(retry_attempts=1, next_retry_at=datetime.now() - timedelta(minutes=6))
+    # 换一个绑到**当前事件循环**的全新调度器：全局 scheduler 由 TestClient 的 lifespan 在另一个
+    # 线程的事件循环里启动（AsyncIOScheduler 一经 start 就绑定那个循环），到点作业能否及时触发
+    # 随线程调度而变——这条用例因此约五成概率随机红，反复阻塞发版。这里自带一个，行为确定。
+    from backend.core.scheduler import TaskScheduler
+
+    fresh = TaskScheduler()
+    fresh.start()
+    monkeypatch.setattr(main, "scheduler", fresh)
     try:
         main.apply_task_schedule(_reload(tid))
         for _ in range(50):  # 过期补跑应立刻发生；5s 只是调度抖动的上限，不是等待阈值
@@ -610,6 +618,7 @@ async def test_overdue_retry_job_catches_up_and_drives_the_row(client, monkeypat
         assert ran == [tid], "过期重试作业被静默丢弃，这一行已无任何驱动方"
         assert _reload(tid).next_retry_at is None  # 跑前清格：让位逻辑得以闭环的前提
     finally:
+        fresh.shutdown()
         _delete(tid)
 
 
