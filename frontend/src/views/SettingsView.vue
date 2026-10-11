@@ -15,6 +15,7 @@ import SettingsApi from "../components/SettingsApi.vue";
 import SettingsDrivers from "../components/SettingsDrivers.vue";
 import SettingsAi from "../components/settings/SettingsAi.vue";
 import SettingsBackup from "../components/settings/SettingsBackup.vue";
+import SettingsDesktop from "../components/settings/SettingsDesktop.vue";
 
 const store = useSettingsStore();
 const { loading, error } = storeToRefs(store);
@@ -38,6 +39,7 @@ const groups = [
   { key: "drivers", label: "驱动管理", comp: SettingsDrivers },
   { key: "ai", label: "AI 助手", comp: SettingsAi },
   { key: "backup", label: "备份与恢复", comp: SettingsBackup },
+  { key: "desktop", label: "客户端", comp: SettingsDesktop },
 ];
 
 async function toggle(key: "notify_enabled" | "sign_enabled", val: boolean) {

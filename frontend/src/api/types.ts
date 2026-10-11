@@ -170,6 +170,17 @@ export interface DownloadEngine {
   detail: string;
 }
 
+/** 桌面外壳（仅客户端有意义）：开机自启状态 */
+export interface AutostartState {
+  supported: boolean;
+  enabled: boolean;
+  /** windows | macos | linux */
+  method: string;
+  path?: string;
+  /** 不支持时的原因，界面据此隐藏开关并说明 */
+  detail: string;
+}
+
 /** GET/PUT /api/settings 的 task_defaults：只影响新建任务，绝不回写已有任务。 */
 export interface TaskDefaults {
   savepath_root: string;

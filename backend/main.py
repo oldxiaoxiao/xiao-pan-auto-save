@@ -12,6 +12,7 @@ from .api import (
     routes_accounts,
     routes_agent,
     routes_backup,
+    routes_desktop,
     routes_downloads,
     routes_external,
     routes_files,
@@ -279,6 +280,7 @@ app.include_router(routes_agent.router)
 app.include_router(routes_overview.router)
 app.include_router(routes_name_templates.router)
 app.include_router(routes_backup.router)
+app.include_router(routes_desktop.router)
 
 
 @app.get("/api/health")

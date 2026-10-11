@@ -3,6 +3,7 @@ import type {
   AccountActionResult,
   AccountPayload,
   AgentEvent,
+  AutostartState,
   AiConfig,
   BackupPayload,
   BackupRestoreCounts,
@@ -217,6 +218,19 @@ export const api = {
   aria2Install: () =>
     request<{ ok: boolean; message: string; path?: string }>("/api/downloads/aria2/install", {
       method: "POST",
+    }),
+
+  // 桌面外壳（仅客户端）：开机自启与系统通知
+  desktopAutostart: () => request<{ ok: boolean; data: AutostartState }>("/api/desktop/autostart"),
+  setDesktopAutostart: (enabled: boolean) =>
+    request<{ ok: boolean; enabled: boolean; message: string }>("/api/desktop/autostart", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  desktopNotify: (title: string, message: string) =>
+    request<{ ok: boolean; message: string }>("/api/desktop/notify", {
+      method: "POST",
+      body: JSON.stringify({ title, message }),
     }),
 
   // 搜索
