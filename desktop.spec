@@ -10,9 +10,15 @@ from backend import __version__  # noqa: E402
 
 root = ROOT
 datas = [(str(root / "frontend/dist"), "frontend/dist"),
-         (str(root / "LICENSE"), "."), (str(root / "docs/desktop.md"), "docs")]
+         (str(root / "LICENSE"), "."), (str(root / "docs/desktop.md"), "docs"),
+         # 托盘图标在运行时从 _MEIPASS/assets 读；只作为 EXE 图标嵌进去是读不到的。
+         (str(root / "assets/logo.png"), "assets")]
 datas += collect_data_files("tzdata")
 hidden = collect_submodules("backend.drivers") + ["sqlalchemy.dialects.sqlite", "webview"]
+# pystray 按平台**动态**导入后端（_darwin / _win32 / _xorg…），PyInstaller 的静态分析
+# 抓不到这些引用。不补 hiddenimports，打包后在目标机上托盘直接 ImportError。
+hidden += ["pystray", "pystray._base", "pystray._darwin", "pystray._win32",
+           "pystray._gtk", "pystray._xorg", "pystray._appindicator"]
 a = Analysis([str(root / "desktop/main.py")], pathex=[str(root)], datas=datas,
              hiddenimports=hidden, excludes=["pytest", "IPython", "matplotlib", "tkinter"],
              binaries=[], hookspath=[], hooksconfig={}, runtime_hooks=[], noarchive=False)

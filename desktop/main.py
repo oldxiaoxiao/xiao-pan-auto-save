@@ -107,14 +107,51 @@ def main() -> int:
             import webview
 
             from backend import __version__
+            from desktop import tray as desktop_tray
 
             webview.settings["ALLOW_FILE_URLS"] = False
-            webview.create_window(f"小盘自动转存 · {__version__}", backend.bootstrap_url,
-                                  width=1180, height=800, min_size=(780, 560), confirm_close=True,
-                                  text_select=True)
-            webview.start(private_mode=True, localization={
-                "global.quitConfirmation": "退出后定时追更和正在进行的下载会停止。确定退出？",
-            })
+            window = webview.create_window(
+                f"小盘自动转存 · {__version__}", backend.bootstrap_url,
+                width=1180, height=800, min_size=(780, 560),
+                # 关闭改为"隐藏到托盘"，所以不再每次弹确认框；真正的退出走托盘菜单里的「退出程序」。
+                confirm_close=False, text_select=True,
+            )
+
+            state = {"quitting": False}
+            holder: dict = {"icon": None}
+
+            def request_quit() -> None:
+                """托盘「退出程序」：停托盘 + 关窗口 → webview.start() 返回 → finally 停服务。"""
+                state["quitting"] = True
+                desktop_tray.stop(holder.get("icon"))
+                try:
+                    window.destroy()
+                except Exception:  # noqa: BLE001 托盘线程上调用 GUI 可能不合法，失败也要能退出
+                    pass
+
+            def on_closing() -> bool:
+                """关闭窗口 = 隐藏到托盘，调度与下载继续。
+
+                pywebview 的语义是反直觉的：closing 事件里**返回 False 表示取消本次关闭**
+                （events.closing.set() 收集返回值，只要有 False 就 should_cancel）。
+                所以"隐藏"必须返回 False；"允许真正关闭"则返回非 False。
+                """
+                if state["quitting"]:
+                    return True
+                try:
+                    window.hide()
+                except Exception:  # noqa: BLE001 隐藏失败就让它正常关掉，别卡在半路
+                    pass
+                return False
+
+            window.events.closing += on_closing
+            holder["icon"] = desktop_tray.start(window, on_quit=request_quit)
+            try:
+                webview.start(private_mode=True, localization={
+                    "global.quitConfirmation": "退出后定时追更和正在进行的下载会停止。确定退出？",
+                })
+            finally:
+                desktop_tray.stop(holder.get("icon"))
     except Exception as exc:
         _show_error(str(exc))
         return 1
