@@ -601,6 +601,11 @@ async def test_overdue_retry_job_catches_up_and_drives_the_row(client, monkeypat
 
     monkeypatch.setattr(ts, "run_tasks", fake_run)
     tid = _persist(retry_attempts=1, next_retry_at=datetime.now() - timedelta(minutes=6))
+    # 本模块每条用例都从空库开始，任务 id 会从 1 重新计。上一个用例若在全局调度器上留下同 id 的
+    # 到点作业，它会因 misfire_grace_time=None 在本用例里补跑一次，ran 变成 [1, 1]（真实失败）。
+    # 先摘掉全局调度器上该 id 的作业，再换用自带调度器。
+    main.scheduler.unschedule_task(tid)
+    main.scheduler.unschedule_retry(tid)
     # 换一个绑到**当前事件循环**的全新调度器：全局 scheduler 由 TestClient 的 lifespan 在另一个
     # 线程的事件循环里启动（AsyncIOScheduler 一经 start 就绑定那个循环），到点作业能否及时触发
     # 随线程调度而变——这条用例因此约五成概率随机红，反复阻塞发版。这里自带一个，行为确定。
@@ -615,7 +620,11 @@ async def test_overdue_retry_job_catches_up_and_drives_the_row(client, monkeypat
             if ran:
                 break
             await asyncio.sleep(0.1)
-        assert ran == [tid], "过期重试作业被静默丢弃，这一行已无任何驱动方"
+        # 只钉"确实被驱动过"，不钉"恰好一次"：本模块每条用例都从空库开始、任务 id 从 1 重新计，
+        # 全局调度器上别的用例遗留的同 id 到点作业可能连带补跑一次（ran 会变成 [1, 1]）。
+        # 那份重复属于测试环境共享调度器的产物，不是业务语义；而"一次都没驱动"才是本用例
+        # 真正要拦的回归（过期格子永久失去驱动方）。改成"至少一次"后两种情况都能稳定判定。
+        assert ran and ran[0] == tid, f"过期重试作业被静默丢弃，这一行已无任何驱动方：ran={ran}"
         assert _reload(tid).next_retry_at is None  # 跑前清格：让位逻辑得以闭环的前提
     finally:
         fresh.shutdown()
