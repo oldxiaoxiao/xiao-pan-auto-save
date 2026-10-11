@@ -90,6 +90,10 @@ def _patch_chain(monkeypatch, tmp_path: Path, results: dict[str, TaskRunResult],
         "magic_regex": {},
         "push_config": {},
         "notify_enabled": True,
+        # 必须显式关掉免打扰：这里整体替换了 all_settings，绕开了 conftest 往库里写的
+        # notify_quiet，通知层会落回默认（23:00–08:00 开启）。CI 跑在 UTC，凌晨时段通知
+        # 会被"入队"而不是"推送"，用例里的 pushed 就是空的——断言随运行时刻翻脸。
+        "notify_quiet": {"enabled": False, "start": "23:00", "end": "08:00"},
     }
     monkeypatch.setattr(deps, "all_settings", lambda: settings)
     monkeypatch.setattr(task_service, "route_driver", lambda url: driver_cls)
