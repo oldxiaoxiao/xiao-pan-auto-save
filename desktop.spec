@@ -17,6 +17,16 @@ a = Analysis([str(root / "desktop/main.py")], pathex=[str(root)], datas=datas,
              hiddenimports=hidden, excludes=["pytest", "IPython", "matplotlib", "tkinter"],
              binaries=[], hookspath=[], hooksconfig={}, runtime_hooks=[], noarchive=False)
 
+# v0.3.0：完整版（full）变体随包自带 aria2c，落在 _MEIPASS/aria2/，与
+# backend/services/aria2_manager.bundled_dir() 的约定对齐。目录由
+# scripts/prepare_aria2_binary.py 预置；精简版（slim）没有该目录，这里自然不产出——
+# 两个变体共用同一份 spec，行为差异只来自"有没有这份二进制"。
+aria2_root = root / "assets" / "aria2"
+if aria2_root.is_dir():
+    for path in sorted(aria2_root.rglob("*")):
+        if path.is_file():
+            a.binaries.append((str(path.relative_to(aria2_root)).replace(os.sep, "/"), str(path), "BINARY"))
+
 
 def _good_openssl_pair():
     """返回 (libssl.3.dylib, libcrypto.3.dylib) 的绝对路径。

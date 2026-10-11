@@ -622,27 +622,65 @@ def _account_for(rec: dict):
         return next((a for a in accs if a.can_save), accs[0] if accs else None)
 
 
+def retry_precheck(rec: dict) -> str:
+    """重下的廉价前置校验：返回空串表示可以起步，否则返回给用户看得懂的失败原因。
+
+    重下是 fire-and-forget 的后台任务，这些判断若只在后台里失败，用户看到的是「重下已开始」
+    然后再无动静——原因只落在日志里，界面永远解释不了。所以路由层先用它挡一道，即时报错。
+    """
+    return _retry_gate(rec)[2]
+
+
+def _retry_gate(rec: dict) -> tuple[object | None, object | None, str]:
+    """返回 (驱动类, 账号, 失败原因)；原因非空即不该起步。"""
+    from ..drivers import get_driver_class
+
+    cls = get_driver_class(rec.get("driver_key") or "")
+    if cls is None or not cls.supported:
+        return None, None, f"{rec.get('driver_key') or '未知'} 驱动不可用"
+    acc = _account_for(rec)
+    if acc is None:
+        return None, None, f"没有可用的 {rec.get('driver_key')} 账号"
+    return cls, acc, ""
+
+
+def _retry_fail_row(rec: dict, reason: str, *, log: LogFn) -> None:
+    """重下没能起步时也要落一条 failed 行。
+
+    起步前就失败的尝试不会走到 download_items 的写入点，账本上等于"这次点击从未发生"——
+    用户只看到「重下已开始」和一条毫无变化的记录。落一行带原因的失败行，界面才有交代。
+    """
+    try:
+        ref_id = f"retry-{rec.get('id') or 0}-{uuid.uuid4().hex[:8]}"
+        history.start(
+            source="builtin", ref_id=ref_id, task_id=rec.get("task_id"), taskname=rec.get("taskname") or "",
+            filename=rec.get("filename") or "", dest_path=rec["dest_path"],
+            size_total=int(rec.get("size_total") or 0), fid=rec.get("fid") or "",
+            driver_key=rec.get("driver_key") or "", account_id=rec.get("account_id"),
+        )
+        history.finish(ref_id, source="builtin", status="failed", error=reason)
+    except Exception as exc:  # noqa: BLE001 账本是旁证，写不进去也不能让重下流程崩掉
+        log("warn", f"重下失败行写入失败（不影响主流程）：{exc}")
+
+
 async def retry_record(rec: dict, cfg: DownloadSettings, *, log: LogFn) -> None:
     """按账本记录重下单个文件：目标路径原样保留，直链重新获取。
 
     不走 resolve_local：下载根目录/覆盖路径可能在首次下载后改过，重下必须打回原 dest_path。
     账本仍由 download_items 内的既有写入点落一条新行（一次尝试一行），不改写旧记录。
     """
-    from ..drivers import get_driver_class
-
-    cls = get_driver_class(rec.get("driver_key") or "")
-    if cls is None or not cls.supported:
-        log("error", f"《{rec.get('taskname') or ''}》重下失败：{rec.get('driver_key')} 驱动不可用")
-        return
-    acc = _account_for(rec)
-    if acc is None:
-        log("error", f"《{rec.get('taskname') or ''}》重下失败：没有可用的 {rec.get('driver_key')} 账号")
+    cls, acc, reason = _retry_gate(rec)
+    if reason:
+        log("error", f"《{rec.get('taskname') or ''}》重下失败：{reason}")
+        _retry_fail_row(rec, reason, log=log)
         return
     from .credential_store import plain_cookie
 
     driver = cls(cookie=plain_cookie(acc) or "", proxy=PROXY, index=acc.sort_order)
     if not driver.has("download"):
-        log("error", f"《{rec.get('taskname') or ''}》重下失败：{driver.name} 不支持下载")
+        reason = f"{driver.name} 不支持下载"
+        log("error", f"《{rec.get('taskname') or ''}》重下失败：{reason}")
+        _retry_fail_row(rec, reason, log=log)
         return
     item = DownloadItem(
         fid=rec["fid"], name=rec["filename"], size=int(rec["size_total"] or 0), local_path=Path(rec["dest_path"])

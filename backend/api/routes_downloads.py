@@ -114,7 +114,7 @@ async def history_retry(record_id: int) -> dict:
     from ..api.deps import get_setting
     from ..core.logstream import hub
     from ..services import download_history
-    from ..services.download_service import DownloadSettings, is_downloading, retry_record
+    from ..services.download_service import DownloadSettings, is_downloading, retry_precheck, retry_record
 
     rec = download_history.get_record(record_id)
     if rec is None:
@@ -126,6 +126,11 @@ async def history_retry(record_id: int) -> dict:
     # 两个写者并发写同一个 <name>.part 会交错字节、双重改名，把文件写坏。
     if download_history.has_open_for_path(rec["dest_path"]) or is_downloading(rec["dest_path"]):
         raise HTTPException(409, "该文件已有进行中的下载，请等待完成后再重下")
+    # 起步前先做廉价校验（驱动/账号）。这些若只在后台任务里失败，用户看到的就是「重下已开始」
+    # 之后再无动静——原因只进日志，界面永远解释不了。这里即时报错，让点击有明确结果。
+    why = retry_precheck(rec)
+    if why:
+        raise HTTPException(400, f"无法重下：{why}")
     cfg = DownloadSettings.from_dict(get_setting("download"))
     log = hub.make_logger("retry", task_id=rec.get("task_id"))
     task = asyncio.create_task(retry_record(rec, cfg, log=log))

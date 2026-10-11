@@ -842,3 +842,58 @@ def test_prune_with_corrupt_retention_deletes_nothing():
     _seed_finished("pc-old", age_days=400)
     assert hist.prune("auto", "days_abc") == 0
     assert _has("pc-old")
+
+
+# ---------------------------------------------- 重下失败必须可见（不再"已开始后再无动静"）
+
+
+async def test_retry_precheck_names_the_reason(tmp_path, monkeypatch):
+    """前置校验要说出原因：没有可用账号 / 驱动不可用，而不是让用户空等。"""
+    _register_fake_driver(monkeypatch)
+    rec = {
+        "driver_key": "fake", "taskname": "T", "filename": "a", "dest_path": "/d/a",
+        "size_total": 1, "fid": "F", "task_id": 1, "account_id": None,
+    }
+    monkeypatch.setattr(dl, "_account_for", lambda r: None)
+    assert "账号" in dl.retry_precheck(rec)
+    monkeypatch.setattr(dl, "_account_for", lambda r: _Acc())
+    assert dl.retry_precheck(rec) == ""
+    assert "驱动" in dl.retry_precheck(dict(rec, driver_key="压根不存在的驱动"))
+
+
+async def test_retry_failure_leaves_a_visible_failed_row(tmp_path, monkeypatch):
+    """重下起步失败必须落一条带原因的 failed 行。
+
+    修复前这些分支只写日志就 return，账本上等于"这次点击从未发生"——用户看到「重下已开始」
+    和一条毫无变化的记录，界面永远解释不了为什么什么都没下。
+    """
+    rid = hist.start(
+        source="builtin", ref_id="retry-gate", task_id=930, taskname="T", filename="a.mkv",
+        dest_path=str(tmp_path / "a.mkv"), size_total=1, fid="F", driver_key="fake", account_id=None,
+    )
+    hist.finish("retry-gate", source="builtin", status="failed", error="HTTP 500")
+    _register_fake_driver(monkeypatch)
+    monkeypatch.setattr(dl, "_account_for", lambda r: None)
+    await dl.retry_record(hist.get_record(rid), dl.DownloadSettings(dir=str(tmp_path)), log=lambda *a, **k: None)
+    rows = hist.list_records(page_size=200, task_id=930)["items"]
+    failed = [i for i in rows if i["status"] == "failed" and "账号" in (i.get("error") or "")]
+    assert failed, "起步失败必须留下一条带原因的失败行，界面才有交代"
+
+
+def test_retry_endpoint_reports_error_instead_of_silent_ok(monkeypatch):
+    """路由层即时报错，不给一句「重下已开始」让用户空等。"""
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+
+    rid = hist.start(
+        source="builtin", ref_id="retry-ep", task_id=931, taskname="T", filename="a.mkv",
+        dest_path="/tmp/xiao-pan-retry-endpoint-a.mkv", size_total=1, fid="F", driver_key="fake", account_id=None,
+    )
+    hist.finish("retry-ep", source="builtin", status="failed", error="HTTP 500")
+    _register_fake_driver(monkeypatch)
+    monkeypatch.setattr(dl, "_account_for", lambda r: None)
+    with TestClient(app) as c:
+        resp = c.post(f"/api/downloads/history/{rid}/retry")
+    assert resp.status_code == 400, resp.text
+    assert "无法重下" in resp.json()["detail"]

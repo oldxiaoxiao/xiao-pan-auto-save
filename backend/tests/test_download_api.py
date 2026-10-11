@@ -174,6 +174,8 @@ def test_retry_endpoint_returns_at_once(monkeypatch):
         await asyncio.sleep(30)
 
     monkeypatch.setattr(dl, "retry_record", slow_retry)
+    # 本用例只验"端点立刻返回"，驱动/账号闸门由 test_download_history 的专门用例覆盖
+    monkeypatch.setattr(dl, "retry_precheck", lambda rec: "")
     rid = hist.start(
         source="builtin", ref_id="api-retry", task_id=925, taskname="t", filename="f", dest_path="/d/f",
         size_total=1, fid="F", driver_key="fake", account_id=None,
@@ -219,6 +221,7 @@ def test_retry_rejected_while_same_dest_has_open_row(tmp_path, monkeypatch):
         started.append(rec["ref_id"])
 
     monkeypatch.setattr(dl, "retry_record", spy_retry)
+    monkeypatch.setattr(dl, "retry_precheck", lambda rec: "")  # 只验放行路径，闸门另有专门用例
     try:
         with TestClient(app) as c:
             # 在途行必须在启动之后落：FR-07 的启动收口会把 builtin 的开放行判成 interrupted，
@@ -244,6 +247,7 @@ def test_retry_rejected_when_record_itself_not_terminal(tmp_path, monkeypatch):
         started.append(rec["ref_id"])
 
     monkeypatch.setattr(dl, "retry_record", spy_retry)
+    monkeypatch.setattr(dl, "retry_precheck", lambda rec: "")  # 只验放行路径，闸门另有专门用例
     try:
         with TestClient(app) as c:
             # 同上：启动收口会把 builtin 开放行判成 interrupted，所以这行必须在启动之后再落
@@ -274,6 +278,7 @@ def test_retry_rejected_when_path_inflight_in_process(tmp_path, monkeypatch):
         started.append(rec["ref_id"])
 
     monkeypatch.setattr(dl, "retry_record", spy_retry)
+    monkeypatch.setattr(dl, "retry_precheck", lambda rec: "")  # 只验放行路径，闸门另有专门用例
     try:
         with TestClient(app) as c:
             resp = c.post(f"/api/downloads/history/{rid}/retry")
@@ -296,6 +301,7 @@ def test_retry_allowed_for_terminal_row_without_open_sibling(tmp_path, monkeypat
         started.append(rec["ref_id"])
 
     monkeypatch.setattr(dl, "retry_record", spy_retry)
+    monkeypatch.setattr(dl, "retry_precheck", lambda rec: "")  # 只验放行路径，闸门另有专门用例
     try:
         with TestClient(app) as c:
             resp = c.post(f"/api/downloads/history/{rid}/retry")
@@ -315,6 +321,7 @@ def test_retry_task_exception_is_logged(tmp_path, monkeypatch):
         raise RuntimeError("账号服务炸了")
 
     monkeypatch.setattr(dl, "retry_record", exploding_retry)
+    monkeypatch.setattr(dl, "retry_precheck", lambda rec: "")  # 只验异常落日志，闸门另有专门用例
     try:
         with TestClient(app) as c:
             assert c.post(f"/api/downloads/history/{rid}/retry").status_code == 200

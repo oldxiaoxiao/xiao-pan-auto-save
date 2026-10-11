@@ -38,15 +38,32 @@ import type {
 } from "./types";
 
 /** 统一 API 客户端：JSON 请求 + SSE 流。所有路径以 /api 开头，由 vite 代理到后端。 */
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+
+/**
+ * 普通请求的超时上限。没有它，一个挂起的请求会让调用方的 loading 永久为真，
+ * v-loading 的蒙层就一直盖在界面上——表现为"点任何选项都没反应，但窗口还能关"。
+ * 超时后走 catch 分支，调用方的 finally 得以复位 loading，蒙层自然撤掉。
+ */
+const REQUEST_TIMEOUT_MS = 60_000;
+
+async function request<T>(path: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
+  const { timeoutMs = REQUEST_TIMEOUT_MS, ...init } = options;
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   let resp: Response;
   try {
     resp = await fetch(path, {
-      headers: { "content-type": "application/json", ...(options.headers || {}) },
-      ...options,
+      headers: { "content-type": "application/json", ...(init.headers || {}) },
+      ...init,
+      signal: controller.signal,
     });
   } catch {
+    if (controller.signal.aborted) {
+      throw new Error(`请求超时（${Math.round(timeoutMs / 1000)} 秒），请重试或检查后端`);
+    }
     throw new Error("无法连接到后端服务，请确认已启动");
+  } finally {
+    window.clearTimeout(timer);
   }
   if (!resp.ok) {
     let detail = "";
