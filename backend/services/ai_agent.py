@@ -102,12 +102,14 @@ def load_provider_cfg() -> tuple[ProviderCfg, AiProvider]:
     with session_scope() as session:
         row = session.exec(select(AiProvider).where(AiProvider.key == "default")).first()
         if row is None or not row.enabled or not row.base_url or not row.model:
-            raise AgentError("尚未配置 AI 服务，请到「设置 → AI 助手」填写服务地址、模型与 API Key", kind="config")
+            raise AgentError("尚未配置 AI 服务，请到「设置 → AI 助手」填写服务地址与模型", kind="config")
         snapshot = AiProvider(**row.model_dump())
-    if not snapshot.api_key_enc:
-        raise AgentError("尚未配置 API Key，请到「设置 → AI 助手」填写", kind="config")
+    # 本机模型（Ollama 等）免 Key：字段为 NULL 的老数据按"仍需 Key"处理，避免静默放行。
+    key_required = snapshot.api_key_required is not False
+    if key_required and not snapshot.api_key_enc:
+        raise AgentError("尚未配置 API Key，请到「设置 → AI 助手」填写；本机模型可勾选「免 API Key」", kind="config")
     try:
-        api_key = decrypt(snapshot.api_key_enc)
+        api_key = decrypt(snapshot.api_key_enc) if snapshot.api_key_enc else ""
     except AiSecretError as exc:
         raise AgentError(str(exc), kind="config") from exc
     return (
@@ -116,6 +118,7 @@ def load_provider_cfg() -> tuple[ProviderCfg, AiProvider]:
             base_url=snapshot.base_url,
             model=snapshot.model,
             api_key=api_key,
+            api_key_required=key_required,
             temperature=snapshot.temperature,
             timeout_ms=snapshot.timeout_ms,
         ),

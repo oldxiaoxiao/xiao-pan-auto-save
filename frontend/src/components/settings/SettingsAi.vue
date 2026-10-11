@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { api } from "../../api/client";
 import { formatDateTime } from "../../utils";
@@ -12,6 +12,7 @@ const form = ref<AiConfig & { api_key?: string; clear_key?: boolean }>({
   model: "",
   has_key: false,
   api_key_masked: "",
+  api_key_required: true,
   temperature: 0.2,
   timeout_ms: 30000,
   mode: "copilot",
@@ -25,7 +26,16 @@ const testing = ref(false);
 const testResult = ref("");
 const usage = ref<AiUsage | null>(null);
 
-const PRESETS = [
+// 勾选 = 本机模型免 Key。用「免 Key」正向语义承接开关，避免界面出现"要求 Key=关"这种绕口表述。
+const noKey = computed({
+  get: () => !form.value.api_key_required,
+  set: (v: boolean) => {
+    form.value.api_key_required = !v;
+  },
+});
+
+// noKey：本机模型（如 Ollama）不需要 API Key，选中预设时自动勾上「免 API Key」。
+const PRESETS: { label: string; provider: string; base_url: string; model: string; noKey?: boolean }[] = [
   { label: "OpenAI", provider: "openai", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
   { label: "DeepSeek", provider: "openai", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
   {
@@ -42,7 +52,13 @@ const PRESETS = [
     base_url: "https://api.siliconflow.cn/v1",
     model: "Qwen/Qwen2.5-7B-Instruct",
   },
-  { label: "Ollama（本机）", provider: "openai", base_url: "http://localhost:11434/v1", model: "qwen2.5:7b" },
+  {
+    label: "Ollama（本机）",
+    provider: "openai",
+    base_url: "http://localhost:11434/v1",
+    model: "qwen2.5:7b",
+    noKey: true,
+  },
   {
     label: "Anthropic",
     provider: "anthropic",
@@ -55,6 +71,7 @@ function applyPreset(p: (typeof PRESETS)[number]) {
   form.value.provider = p.provider;
   form.value.base_url = p.base_url;
   form.value.model = p.model;
+  form.value.api_key_required = !p.noKey;
 }
 
 async function load() {
@@ -84,6 +101,7 @@ async function save() {
       model: form.value.model,
       api_key: form.value.api_key || "",
       clear_key: false,
+      api_key_required: form.value.api_key_required,
       temperature: Number(form.value.temperature),
       timeout_ms: Number(form.value.timeout_ms),
       mode: form.value.mode,
@@ -109,6 +127,7 @@ async function test() {
       base_url: form.value.base_url,
       model: form.value.model,
       api_key: form.value.api_key || "",
+      api_key_required: form.value.api_key_required,
       temperature: Number(form.value.temperature),
       timeout_ms: Number(form.value.timeout_ms),
     });
@@ -166,9 +185,23 @@ onMounted(load);
       <div class="row">
         <label>API Key</label>
         <div class="keyrow">
-          <input v-model="form.api_key" class="input" type="password" placeholder="留空表示保持原值" />
+          <input
+            v-if="form.api_key_required"
+            v-model="form.api_key"
+            class="input"
+            type="password"
+            placeholder="留空表示保持原值"
+          />
+          <span v-else class="inline-hint">本机模型无需 API Key，跳过校验且不发送鉴权头</span>
           <span v-if="form.has_key" class="masked">已保存：{{ form.api_key_masked }}</span>
           <button v-if="form.has_key" class="btn btn--ghost" @click="clearKey">清除</button>
+        </div>
+      </div>
+      <div class="row">
+        <label>免 API Key</label>
+        <div class="keyrow">
+          <input v-model="noKey" type="checkbox" />
+          <span class="inline-hint">本机模型（Ollama / LM Studio 等）不需要 Key，勾选后不必填写</span>
         </div>
       </div>
       <div class="row">
@@ -283,6 +316,11 @@ onMounted(load);
   font-size: 12px;
   color: var(--text-muted);
   white-space: nowrap;
+}
+.inline-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
 }
 .actions {
   display: flex;

@@ -297,3 +297,105 @@ async def test_action_card_prefills_savepath(provider_cfg, session_id, monkeypat
     action = next(e for e in events if e["type"] == "done")["actions"][0]
     assert action["params"]["savepath"], "动作卡里的保存目录不能为空"
     assert "卡片默认目录" in action["params"]["savepath"]
+
+
+# ---------------------------------------------------------------- 本机模型免 Key
+
+
+class _FakeResp:
+    status_code = 200
+
+    async def aread(self) -> bytes:
+        return b""
+
+    async def aiter_lines(self):
+        yield 'data: {"choices":[{"delta":{"content":"ok"}}]}'
+        yield "data: [DONE]"
+
+
+class _FakeStream:
+    def __init__(self, sink: list) -> None:
+        self.sink = sink
+
+    async def __aenter__(self):
+        return _FakeResp()
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+
+class _FakeClient:
+    """替身 httpx.AsyncClient：只记录发出的 headers，不发真实请求。"""
+
+    def __init__(self, sink: list) -> None:
+        self.sink = sink
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+    def stream(self, method: str, url: str, headers=None, json=None):  # noqa: A002
+        self.sink.append(headers or {})
+        return _FakeStream(self.sink)
+
+
+async def test_local_model_without_key_loads(provider_cfg):
+    """本机模型（Ollama）勾了免 Key：没有 Key 也必须能加载出可用配置。"""
+    from backend.database import session_scope
+    from backend.models import AiProvider
+    from backend.services import ai_agent
+    from sqlmodel import select
+
+    with session_scope() as session:
+        row = session.exec(select(AiProvider).where(AiProvider.key == "default")).first()
+        row.api_key_enc = ""
+        row.api_key_required = False
+        session.add(row)
+        session.commit()
+    cfg, _ = ai_agent.load_provider_cfg()
+    assert cfg.api_key == ""
+    assert cfg.api_key_required is False
+
+
+async def test_missing_key_still_rejected(provider_cfg):
+    """仍要求 Key 的配置缺 Key 必须报错——不能因为新增开关被静默放行。"""
+    from backend.database import session_scope
+    from backend.models import AiProvider
+    from backend.services import ai_agent
+    from sqlmodel import select
+
+    with session_scope() as session:
+        row = session.exec(select(AiProvider).where(AiProvider.key == "default")).first()
+        row.api_key_enc = ""
+        row.api_key_required = True
+        session.add(row)
+        session.commit()
+    with pytest.raises(ai_agent.AgentError):
+        ai_agent.load_provider_cfg()
+
+
+async def test_keyless_request_omits_auth_header(monkeypatch):
+    """免 Key 时不发 Authorization：本地网关会对空 Bearer 报 401。"""
+    from backend.services import ai_client
+
+    sent: list[dict] = []
+    monkeypatch.setattr(ai_client, "_client", lambda timeout_ms: _FakeClient(sent))
+
+    keyless = ai_client.ProviderCfg(base_url="http://localhost:11434/v1", model="qwen2.5:7b", api_key="", api_key_required=False)
+    try:
+        async for _ in ai_client.stream_chat(keyless, [{"role": "user", "content": "hi"}], []):
+            pass
+    except Exception:  # noqa: BLE001 只关心有没有因缺 Key 被 config 拦下，解析细节不管
+        pass
+    assert sent, "免 Key 时也应正常发起请求"
+    assert "Authorization" not in sent[0]
+
+    with_key = ai_client.ProviderCfg(base_url="https://api.openai.com/v1", model="gpt-4o-mini", api_key="sk-abc", api_key_required=True)
+    try:
+        async for _ in ai_client.stream_chat(with_key, [{"role": "user", "content": "hi"}], []):
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+    assert sent[1]["Authorization"] == "Bearer sk-abc"

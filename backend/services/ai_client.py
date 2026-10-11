@@ -27,6 +27,8 @@ class ProviderCfg:
     base_url: str = ""
     model: str = ""
     api_key: str = ""
+    # 本地模型（Ollama 等）免鉴权：False 时不校验 Key、不发送 Authorization 头。
+    api_key_required: bool = True
     temperature: float = 0.2
     timeout_ms: int = 30_000
 
@@ -82,7 +84,10 @@ async def _openai_stream(cfg: ProviderCfg, messages: list[dict], tools: list[dic
     if tools:
         body["tools"] = _openai_tools(tools)
         body["tool_choice"] = "auto"
-    headers = {"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"}
+    # 免 Key 的本机模型（Ollama）不该带空 Authorization：部分本地网关会对空 Bearer 报 401。
+    headers = {"Content-Type": "application/json"}
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
     async with _client(cfg.timeout_ms) as client:
         try:
             async with client.stream("POST", cfg.endpoint(), headers=headers, json=body) as resp:
@@ -184,10 +189,11 @@ async def _anthropic_stream(cfg: ProviderCfg, messages: list[dict], tools: list[
     if tools:
         body["tools"] = _anth_tools(tools)
     headers = {
-        "x-api-key": cfg.api_key,
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
     }
+    if cfg.api_key:
+        headers["x-api-key"] = cfg.api_key
     async with _client(cfg.timeout_ms) as client:
         try:
             async with client.stream("POST", cfg.endpoint(), headers=headers, json=body) as resp:
@@ -269,8 +275,11 @@ async def stream_chat(cfg: ProviderCfg, messages: list[dict], tools: list[dict])
     """
     if not cfg.model:
         raise AiError("未配置模型名", kind="config")
-    if not cfg.api_key:
-        raise AiError("未配置 API Key，请到「设置 → AI 助手」填写", kind="config")
+    if cfg.api_key_required and not cfg.api_key:
+        raise AiError(
+            "未配置 API Key，请到「设置 → AI 助手」填写；本机模型（如 Ollama）可勾选「免 API Key」",
+            kind="config",
+        )
     stream = _anthropic_stream(cfg, messages, tools) if cfg.provider == "anthropic" else _openai_stream(
         cfg, messages, tools
     )

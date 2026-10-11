@@ -191,7 +191,7 @@ async def test_aria2_payload_protocol(tmp_path, monkeypatch):
             return FakeResp()
 
     monkeypatch.setattr(dl.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
+    monkeypatch.setattr(dl, "ensure_running", lambda c: _ret((c, "已连接现有 aria2")))
     driver = DlDriver()
     c = cfg(
         tmp_path, mode="aria2", aria2_host_port="http://127.0.0.1:6800", aria2_secret="sec", aria2_pause=True
@@ -219,7 +219,7 @@ async def test_no_saved_files_noop(tmp_path):
 async def test_aria2_unreachable_falls_back_to_builtin(tmp_path, monkeypatch):
     """aria2 模式但连不上时，自动降级到内置下载器，保证下载落盘。"""
     driver = DlDriver()
-    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(False))
+    monkeypatch.setattr(dl, "ensure_running", lambda c: _ret((None, "aria2 不可达")))
     fetched = []
 
     async def fake_fetch(row, item, cookie_str, ua, *, job_id=None):
@@ -238,7 +238,7 @@ async def test_aria2_unreachable_falls_back_to_builtin(tmp_path, monkeypatch):
 async def test_aria2_reachable_uses_aria2(tmp_path, monkeypatch):
     """aria2 可达时仍走 aria2 投递，不降级。"""
     driver = DlDriver()
-    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
+    monkeypatch.setattr(dl, "ensure_running", lambda c: _ret((c, "已连接现有 aria2")))
     submitted = []
 
     async def fake_submit(driver_, items, cfg_, log, **identity_kw):
@@ -487,7 +487,7 @@ async def test_aria2_submit_sends_absolute_dir(tmp_path, monkeypatch):
             return R()
 
     monkeypatch.setattr(dl.httpx, "AsyncClient", C)
-    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
+    monkeypatch.setattr(dl, "ensure_running", lambda c: _ret((c, "已连接现有 aria2")))
     monkeypatch.setattr(dl, "_emby_refresh", lambda c, log: _noop())
     monkeypatch.chdir(tmp_path)  # 相对 dir 在此临时目录下解析
     c = DownloadSettings(
@@ -610,7 +610,7 @@ async def test_aria2_submit_dir_keeps_symlink_prefix(tmp_path, monkeypatch):
     link = tmp_path / "mnt"
     os.symlink(real, link)  # 任何 OS 上都构造出「配置路径带软链」的场景
     monkeypatch.setattr(dl.httpx, "AsyncClient", C)
-    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
+    monkeypatch.setattr(dl, "ensure_running", lambda c: _ret((c, "已连接现有 aria2")))
     monkeypatch.setattr(dl, "_emby_refresh", lambda c, log: _noop())
     c = DownloadSettings(mode="aria2", dir=str(link / "down"), aria2_host_port="http://127.0.0.1:6800")
     await dl.download_task_files(DlDriver(), [saved("1")], c)
@@ -661,7 +661,7 @@ def _aria2_skip_driver(monkeypatch):
     """装好「aria2 可达」与假 RPC 客户端，返回投递记录列表。"""
     posted: list = []
     monkeypatch.setattr(dl.httpx, "AsyncClient", _gid_client(posted))
-    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
+    monkeypatch.setattr(dl, "ensure_running", lambda c: _ret((c, "已连接现有 aria2")))
     return posted
 
 
@@ -906,7 +906,7 @@ async def test_unknown_size_verdict_agrees_across_both_modes(tmp_path, monkeypat
             return {"result": "gid-unknown-size"}
 
     monkeypatch.setattr(dl.httpx, "AsyncClient", Client)
-    monkeypatch.setattr(dl, "aria2_reachable", lambda c: _ret(True))
+    monkeypatch.setattr(dl, "ensure_running", lambda c: _ret((c, "已连接现有 aria2")))
 
     builtin_dest = tmp_path / "builtin" / "nolength.mkv"
     builtin_dest.parent.mkdir(parents=True)

@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { reactive, watch } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { storeToRefs } from "pinia";
 import { useSettingsStore } from "../../stores/settings";
-import type { DownloadSettings } from "../../api/types";
+import { api } from "../../api/client";
+import type { DownloadEngine, DownloadSettings } from "../../api/types";
 
 const store = useSettingsStore();
 const { settings } = storeToRefs(store);
@@ -33,10 +34,62 @@ async function save() {
   try {
     await store.save("download", { ...draft });
     ElMessage.success("下载设置已保存");
+    await refreshEngine();
   } catch (e) {
     ElMessage.error((e as Error).message);
   }
 }
+
+// ---- 引擎状态：让用户看清"到底用的 aria2 还是内置"，降级不再无声 ----
+const engine = ref<DownloadEngine | null>(null);
+const busy = ref<"" | "start" | "install">("");
+const engineMsg = ref("");
+
+const SOURCE_TEXT: Record<string, string> = {
+  bundled: "随包自带",
+  managed: "一键安装",
+  system: "系统 PATH",
+  path: "常见安装路径",
+};
+const sourceText = computed(() =>
+  engine.value?.source ? (SOURCE_TEXT[engine.value.source] ?? engine.value.source) : "",
+);
+
+async function refreshEngine() {
+  try {
+    engine.value = (await api.downloadEngine()).data;
+  } catch {
+    engine.value = null;
+  }
+}
+
+async function startAria2() {
+  busy.value = "start";
+  engineMsg.value = "";
+  try {
+    engineMsg.value = (await api.aria2Start()).message;
+  } catch (e) {
+    engineMsg.value = (e as Error).message;
+  } finally {
+    busy.value = "";
+    await refreshEngine();
+  }
+}
+
+async function installAria2() {
+  busy.value = "install";
+  engineMsg.value = "";
+  try {
+    engineMsg.value = (await api.aria2Install()).message;
+  } catch (e) {
+    engineMsg.value = (e as Error).message;
+  } finally {
+    busy.value = "";
+    await refreshEngine();
+  }
+}
+
+onMounted(refreshEngine);
 </script>
 
 <template>
@@ -51,6 +104,34 @@ async function save() {
         <el-radio-button value="aria2">Aria2 RPC</el-radio-button>
       </el-radio-group>
     </div>
+
+    <div class="row engine-row">
+      <label>引擎状态</label>
+      <div class="engine">
+        <el-tag :type="engine?.running ? 'success' : 'info'" size="small">
+          {{ engine?.running ? "aria2 已运行" : "aria2 未运行" }}
+        </el-tag>
+        <el-tag v-if="engine?.engine" :type="engine.engine === 'aria2' ? 'success' : 'warning'" size="small">
+          上次实际使用：{{ engine.engine === "aria2" ? "aria2" : "内置下载器" }}
+        </el-tag>
+        <span class="text-muted">
+          {{ engine?.installed ? `已检测到 aria2c（${sourceText}）` : "未检测到 aria2c" }} · RPC
+          {{ engine?.host_port || "127.0.0.1:6800" }}
+        </span>
+        <div class="engine-actions">
+          <el-button size="small" :loading="busy === 'start'" @click="startAria2">启动 aria2</el-button>
+          <el-button v-if="!engine?.installed" size="small" :loading="busy === 'install'" @click="installAria2">
+            一键安装 aria2c
+          </el-button>
+          <el-button size="small" @click="refreshEngine">刷新</el-button>
+        </div>
+      </div>
+    </div>
+    <p v-if="engineMsg" class="text-muted engine-msg">{{ engineMsg }}</p>
+    <p v-if="engine?.detail" class="text-muted engine-msg">上次：{{ engine.detail }}</p>
+    <p class="text-muted engine-msg">
+      选 aria2 模式后，下载时会自动拉起 aria2（未填地址则用 127.0.0.1:6800）；起不来会明确提示，并临时改用内置下载器。
+    </p>
     <div class="row">
       <label>下载根目录</label>
       <el-input v-model="draft.dir" placeholder="留空 = 当前数据目录下的 downloads；也可填写绝对路径" />
@@ -123,5 +204,24 @@ h3 {
 }
 .row .el-input {
   flex: 1;
+}
+.engine-row {
+  align-items: flex-start;
+}
+.engine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+.engine-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+.engine-msg {
+  font-size: 12px;
+  margin: -4px 0 0;
 }
 </style>

@@ -154,6 +154,22 @@ export interface DownloadSettings {
   emby: { url: string; token: string };
 }
 
+/** 下载引擎现状：装没装 aria2、跑没跑、本次实际用的谁、降级原因是什么。 */
+export interface DownloadEngine {
+  mode: string;
+  installed: boolean;
+  binary: string;
+  /** 来源：bundled=随包自带 / managed=一键安装 / system=PATH / path=常见路径 */
+  source: string;
+  host_port: string;
+  running: boolean;
+  managed_by_app: boolean;
+  /** 最近一次实际使用的下载器：aria2 或 builtin */
+  engine: string;
+  /** 对应的说明/降级原因 */
+  detail: string;
+}
+
 /** GET/PUT /api/settings 的 task_defaults：只影响新建任务，绝不回写已有任务。 */
 export interface TaskDefaults {
   savepath_root: string;
@@ -402,6 +418,8 @@ export interface AiConfig {
   model: string;
   has_key: boolean;
   api_key_masked: string;
+  /** 是否要求 API Key；本机模型（Ollama 等）为 false，免填 Key */
+  api_key_required: boolean;
   temperature: number;
   timeout_ms: number;
   mode: "chat" | "copilot";

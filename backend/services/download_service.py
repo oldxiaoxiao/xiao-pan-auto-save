@@ -28,6 +28,7 @@ from ..core.engine import SavedFile
 from ..core.logstream import LogFn
 from ..drivers.base import CloudDrive, DriveError
 from . import download_history as history
+from .aria2_manager import ensure_running, note_engine, reachable
 
 DEFAULT_DOWNLOAD_DIR = str(DATA_DIR / "downloads")
 
@@ -206,9 +207,17 @@ async def download_items(
                 account_id=account_id, driver_key=driver_key,
             )
             return [f"❌ {why}"]
-    if cfg.mode == "aria2" and not await aria2_reachable(cfg):
-        log("warn", "⚠️ aria2 不可达，自动改用内置下载器（保证下载不中断）")
-        cfg = _as_builtin(cfg)
+    # aria2 模式先让托管层"尽力让它可用"：已在跑就直接用，没跑就自动拉起（桌面端免手工安装）。
+    # 拉不起才降级内置，且必须把原因写进日志与引擎状态，不再静默切换。
+    if cfg.mode == "aria2":
+        ready, note = await ensure_running(cfg)
+        if ready is not None:
+            cfg = ready
+            log("info", f"aria2 就绪：{note}")
+        else:
+            log("warn", f"⚠️ aria2 不可用（{note}），本次改用内置下载器（下载不会中断）")
+            note_engine("builtin", f"aria2 不可用：{note}")
+            cfg = _as_builtin(cfg)
     if cfg.mode == "aria2":
         lines = await _aria2_submit(
             driver, items, cfg, log, task_id=task_id, taskname=taskname, account_id=account_id, driver_key=driver_key
@@ -254,19 +263,12 @@ def _as_builtin(cfg: DownloadSettings) -> DownloadSettings:
 
 
 async def aria2_reachable(cfg: DownloadSettings) -> bool:
-    """探测 aria2 RPC 是否可用（getVersion 有 result）。未配地址/异常一律 False。"""
-    if not cfg.aria2_host_port:
-        return False
-    url = _rpc_url(cfg.aria2_host_port)
-    token = [f"token:{cfg.aria2_secret}"] if cfg.aria2_secret else []
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.post(
-                url, json={"jsonrpc": "2.0", "id": "ping", "method": "aria2.getVersion", "params": token}
-            )
-        return bool(resp.json().get("result"))
-    except Exception:  # noqa: BLE001 任何异常都视为不可达，交由内置下载器兜底
-        return False
+    """探测 aria2 RPC 是否可用（getVersion 有 result）。未配地址/异常一律 False。
+
+    探测实现统一下沉到 aria2_manager.reachable——自动拉起同样要靠它判断"到底起没起来"。
+    这里只保留按配置对象取参的薄封装，避免两处各写一份判据。
+    """
+    return await reachable(cfg.aria2_host_port, cfg.aria2_secret)
 
 
 def _resume_offset(part: Path, size: int) -> int:

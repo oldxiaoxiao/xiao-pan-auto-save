@@ -196,6 +196,9 @@ class AiProvider(SQLModel, table=True):
     base_url: str = ""
     model: str = ""
     api_key_enc: str = ""
+    # 本地模型（Ollama / LM Studio 等）不需要 API Key，置 False 后跳过 Key 校验且不发 Authorization 头。
+    # 存量行由 _auto_add_columns 补成 NOT NULL DEFAULT 1（即"仍要 Key"），升级不改行为。
+    api_key_required: bool = Field(default=True, nullable=False)
     temperature: float = 0.2
     timeout_ms: int = 30_000
     mode: str = "copilot"  # chat 模式下不生成任何动作卡

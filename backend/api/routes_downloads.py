@@ -22,6 +22,46 @@ async def downloads() -> dict:
     return {"jobs": jobs}
 
 
+# 引擎状态与 aria2 托管端点：必须声明在 /{job_id} 之前，否则会被 /downloads/{job_id}/... 抢匹配。
+@router.get("/downloads/engine")
+async def downloads_engine() -> dict:
+    """当前下载引擎现状：aria2 装没装、谁提供的、跑没跑，以及本次实际用的是谁、降级原因。
+
+    界面靠它把"到底用的内置还是 aria2"说清楚——降级不再是无声的。
+    """
+    from ..api.deps import get_setting
+    from ..services.aria2_manager import status
+    from ..services.download_service import DownloadSettings
+
+    cfg = DownloadSettings.from_dict(get_setting("download"))
+    return {"ok": True, "data": await status(cfg.mode, cfg.aria2_host_port, cfg.aria2_secret)}
+
+
+@router.post("/downloads/aria2/start")
+async def aria2_start() -> dict:
+    """一键拉起 aria2：已在跑就直接用，没跑就按配置（未配则用 127.0.0.1:6800）起一个带 RPC 的。"""
+    from ..api.deps import get_setting
+    from ..services.aria2_manager import ensure_running
+    from ..services.download_service import DownloadSettings
+
+    cfg = DownloadSettings.from_dict(get_setting("download"))
+    if cfg.mode != "aria2":
+        return {"ok": False, "message": "当前不是 aria2 模式，请先把下载模式切到「Aria2 RPC」"}
+    ready, note = await ensure_running(cfg)
+    return {"ok": ready is not None, "message": note}
+
+
+@router.post("/downloads/aria2/install")
+async def aria2_install() -> dict:
+    """一键安装 aria2c：Windows 取官方包，macOS 走 brew，Linux 用包管理器。
+
+    安装是阻塞且耗时的（下载/brew/ apt），丢到线程里跑，别卡住事件循环。
+    """
+    from ..services.aria2_manager import install
+
+    return await asyncio.to_thread(install)
+
+
 # 注意：历史相关路由必须声明在 /{job_id} 模式之前，否则
 # POST /api/downloads/history/prune 会被 /{job_id}/{action} 抢先匹配、
 # DELETE /api/downloads/history/{id} 会把 history 当成 job_id。

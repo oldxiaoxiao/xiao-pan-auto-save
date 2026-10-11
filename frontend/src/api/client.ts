@@ -10,6 +10,7 @@ import type {
   AiSession,
   AiUsage,
   DirList,
+  DownloadEngine,
   DownloadHistoryQuery,
   DownloadJob,
   DownloadRecord,
@@ -191,6 +192,14 @@ export const api = {
     request<{ ok: boolean; removed: number }>("/api/downloads/history/prune", {
       method: "POST",
       body: JSON.stringify({ mode }),
+    }),
+
+  // 下载引擎状态与 aria2 托管（自动启动 / 一键安装）
+  downloadEngine: () => request<{ ok: boolean; data: DownloadEngine }>("/api/downloads/engine"),
+  aria2Start: () => request<{ ok: boolean; message: string }>("/api/downloads/aria2/start", { method: "POST" }),
+  aria2Install: () =>
+    request<{ ok: boolean; message: string; path?: string }>("/api/downloads/aria2/install", {
+      method: "POST",
     }),
 
   // 搜索

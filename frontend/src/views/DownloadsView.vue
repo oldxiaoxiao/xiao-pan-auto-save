@@ -4,7 +4,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { api } from "../api/client";
 import { formatDateTime } from "../utils";
 import { useTasksStore } from "../stores/tasks";
-import type { DownloadJob, DownloadRecord } from "../api/types";
+import type { DownloadEngine, DownloadJob, DownloadRecord } from "../api/types";
 
 const tab = ref<"active" | "history">("active");
 const tasks = useTasksStore();
@@ -13,6 +13,30 @@ const tasks = useTasksStore();
 const jobs = ref<DownloadJob[]>([]);
 const error = ref("");
 let timer: number | undefined;
+
+/* ---------- 引擎状态：明确告诉用户当前用的是 aria2 还是内置下载器 ---------- */
+const engine = ref<DownloadEngine | null>(null);
+
+const engineText = computed(() => {
+  if (!engine.value) return "未知";
+  if (engine.value.engine === "aria2") return "aria2";
+  if (engine.value.engine === "builtin") return "内置下载器（aria2 未启用或不可用）";
+  return engine.value.mode === "aria2" ? "aria2（尚未触发下载）" : "内置下载器";
+});
+
+const engineTagType = computed(() => {
+  if (engine.value?.engine === "aria2") return "success";
+  if (engine.value?.engine === "builtin") return "warning";
+  return "info";
+});
+
+async function refreshEngine() {
+  try {
+    engine.value = (await api.downloadEngine()).data;
+  } catch {
+    engine.value = null;
+  }
+}
 
 async function refresh() {
   if (document.hidden) return;
@@ -220,6 +244,7 @@ function fmtTime(iso: string | null): string {
 
 onMounted(() => {
   refresh();
+  refreshEngine();
   tasks.fetchTasks();
   timer = window.setInterval(refresh, 1500);
   document.addEventListener("visibilitychange", onVisible);
@@ -246,6 +271,11 @@ function onVisible() {
 
     <el-tabs v-model="tab">
       <el-tab-pane name="active" :label="`进行中 (${jobs.length})`">
+        <div class="engine-bar">
+          <el-tag :type="engineTagType" size="small">当前下载器：{{ engineText }}</el-tag>
+          <span v-if="engine?.detail" class="sub">{{ engine.detail }}</span>
+          <el-button size="small" link @click="refreshEngine">刷新</el-button>
+        </div>
         <el-table :data="jobs" empty-text="暂无进行中的下载" row-key="id">
           <el-table-column prop="taskname" label="任务" min-width="120" show-overflow-tooltip />
           <el-table-column prop="filename" label="文件" min-width="200" show-overflow-tooltip />
@@ -267,6 +297,13 @@ function onVisible() {
                 size="small"
               >
                 {{ statusText(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="下载器" width="90">
+            <template #default="{ row }">
+              <el-tag :type="row.source === 'aria2' ? 'success' : 'info'" size="small">
+                {{ row.source === "aria2" ? "aria2" : "内置" }}
               </el-tag>
             </template>
           </el-table-column>
@@ -394,6 +431,12 @@ function onVisible() {
 .sub {
   font-size: 12px;
   color: var(--text-muted);
+}
+.engine-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 .filters {
   display: flex;

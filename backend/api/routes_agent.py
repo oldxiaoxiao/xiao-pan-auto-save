@@ -28,6 +28,8 @@ class ConfigIn(BaseModel):
     model: str = ""
     api_key: str = ""  # 留空表示保持原值
     clear_key: bool = False
+    # 本机模型（Ollama 等）不需要 Key：False 时保存/连通性测试都不再要求 Key。
+    api_key_required: bool = True
     temperature: float = 0.2
     timeout_ms: int = 30_000
     mode: str = "copilot"
@@ -79,6 +81,7 @@ def _masked_row(row: AiProvider) -> dict:
         "model": row.model,
         "has_key": bool(row.api_key_enc),
         "api_key_masked": api_key,
+        "api_key_required": row.api_key_required is not False,
         "temperature": row.temperature,
         "timeout_ms": row.timeout_ms,
         "mode": row.mode,
@@ -117,6 +120,7 @@ async def save_config(body: ConfigIn) -> dict:
             row.api_key_enc = ""
         elif body.api_key.strip():
             row.api_key_enc = encrypt(body.api_key.strip())
+        row.api_key_required = bool(body.api_key_required)
         row.updated_at = datetime.now()
         session.add(row)
         session.commit()
@@ -142,6 +146,7 @@ async def test(body: ConfigIn) -> dict:
             base_url=body.base_url.strip(),
             model=body.model.strip(),
             api_key=key,
+            api_key_required=bool(body.api_key_required),
             temperature=body.temperature,
             timeout_ms=max(1000, min(body.timeout_ms, 300_000)),
         )

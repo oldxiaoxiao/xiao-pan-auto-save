@@ -183,10 +183,10 @@ async def test_aria2_concurrent_same_dest_duplicate_is_rejected(tmp_path, monkey
     posts: list = []
     monkeypatch.setattr(dl.httpx, "AsyncClient", _aria2_race_client(posts))
 
-    async def reachable(_c):
-        return True
+    async def ensure(_c):
+        return _c, "已连接现有 aria2"
 
-    monkeypatch.setattr(dl, "aria2_reachable", reachable)
+    monkeypatch.setattr(dl, "ensure_running", ensure)
     dest = tmp_path / "剧" / "S01E194.mkv"
     task_id = 943
     c = dl.DownloadSettings(
