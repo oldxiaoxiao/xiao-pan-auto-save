@@ -123,3 +123,32 @@ def test_menu_action_failure_does_not_propagate(fake_pystray, capsys):
     icon = tray.start(BadWindow(), on_quit=lambda: None)
     icon.menu.items[0].action()  # 不应抛出
     assert "失败" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------------- 打包自检
+
+
+def test_self_check_passes_in_dev_environment(fake_pystray):
+    """打包自检的三项在开发环境都应通过（pystray 可导入、logo 在、菜单可构造）。"""
+    assert tray.self_check() == {"pystray": True, "logo": True, "menu": True}
+
+
+def test_self_check_reports_missing_pystray(monkeypatch):
+    """pystray 平台后端漏收是典型的打包缺陷，自检必须把它报成 False 而不是静默放行。"""
+    monkeypatch.setitem(sys.modules, "pystray", None)
+    result = tray.self_check()
+    assert result["pystray"] is False
+
+
+def test_self_check_reports_logo_not_bundled(monkeypatch, fake_pystray):
+    """logo.png 没作为数据文件入包时，托盘会默默退回占位色块——自检要能发现。"""
+    monkeypatch.setattr(tray, "_logo_path", lambda: None)
+    result = tray.self_check()
+    assert result["logo"] is False
+
+
+def test_self_check_tolerates_corrupted_logo(monkeypatch, fake_pystray):
+    """图标文件损坏时代码会退回占位，但自检的 logo 项应如实为 False（资源确实没取到有效图）。"""
+    monkeypatch.setattr(tray, "_logo_path", lambda: None)
+    assert tray.self_check()["logo"] is False
+    assert tray._icon_image().size == (64, 64), "即便如此也不能起不来，退回占位图"

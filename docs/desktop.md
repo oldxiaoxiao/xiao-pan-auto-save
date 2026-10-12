@@ -6,13 +6,13 @@
 
 ## 下载与启动
 
-从 [GitHub Releases](https://github.com/oldxiaoxiao/xiao-pan-auto-save/releases) 下载匹配平台的 0.1.1 附件：
+从 [GitHub Releases](https://github.com/oldxiaoxiao/xiao-pan-auto-save/releases) 下载匹配平台的附件（下表以 0.3.x 为例，实际文件名随版本变化）：
 
 | 平台 | 制品 | 启动方式 |
 |---|---|---|
-| Windows x64 | `xiao-pan-auto-save-0.1.1-windows-x64.zip` | 完整解压文件夹，双击 `XiaoPan/XiaoPan.exe` |
-| macOS Apple Silicon | `xiao-pan-auto-save-0.1.1-macos-arm64.zip` | 解压后将 `XiaoPan.app` 拖入应用程序，双击打开 |
-| macOS Intel | `xiao-pan-auto-save-0.1.1-macos-x64.zip` | 同上 |
+| Windows x64 | `xiao-pan-auto-save-<版本>-windows-x64.zip` | 完整解压文件夹，双击 `XiaoPan/XiaoPan.exe` |
+| macOS Apple Silicon | `xiao-pan-auto-save-<版本>-macos-arm64.zip` | 解压后将 `XiaoPan.app` 拖入应用程序，双击打开 |
+| macOS Intel | `xiao-pan-auto-save-<版本>-macos-x64.zip` | 同上 |
 
 Windows 依赖系统 WebView2 Runtime；缺少时安装 [Microsoft 官方运行时](https://developer.microsoft.com/microsoft-edge/webview2/)。Windows ZIP 中的 `_internal` 目录必须与 exe 一起保留。
 
@@ -32,7 +32,7 @@ Windows 依赖系统 WebView2 Runtime；缺少时安装 [Microsoft 官方运行�
 两个变体共用同一份代码与数据目录，换包不会改动已有任务与数据。设置页会显示当前实际使用的
 下载器；aria2 起不来时会给出具体原因并临时改用内置下载器，不会静默降级。
 
-0.1.1 的客户端没有发行者代码签名和 Apple 公证。系统可能提示未知开发者；确认下载来源和 SHA256 后，使用系统提供的允许打开入口。此版本不承诺覆盖所有旧系统；原生构建平台和已执行验证见[验收记录](verification-0.1.1.md)。
+当前版本的客户端没有发行者代码签名和 Apple 公证。系统可能提示未知开发者；确认下载来源和 SHA256 后，使用系统提供的允许打开入口。此版本不承诺覆盖所有旧系统；原生构建平台和已执行验证见[验收记录](verification-0.1.1.md)。
 
 ## 首次使用
 
@@ -56,11 +56,14 @@ Windows 依赖系统 WebView2 Runtime；缺少时安装 [Microsoft 官方运行�
 
 - 同一个数据目录只允许启动一个客户端实例。
 - 客户端服务使用随机端口，仅监听 `127.0.0.1`，每次启动使用随机密码和一次性凭证，窗口自动登录。
-- 关闭窗口会提示退出，并停止本地服务、调度和当前下载。内置下载可能留下 `.part`；下次重新下载会重取完整文件，并非跨重启断点续传。
+- **关闭窗口 = 隐藏到托盘**：定时追更与正在进行的下载继续运行，窗口从任务栏/程序坞消失，系统托盘（Windows 通知区 / macOS 菜单栏）保留本程序图标。
+- **退出程序**：在托盘图标上点「退出程序」。这才真正停止本地服务、调度和当前下载。内置下载可能留下 `.part`；下次重新下载会重取完整文件，并非跨重启断点续传。
+- 在托盘图标上点「打开界面」（Windows 下单击图标同效）可随时把窗口调回来。
+- 开机自启与桌面通知在「设置 → 客户端」里开关。这两项只在客户端生效；Compose 版会显示不可用并说明原因。
 - 电脑关机、休眠或客户端退出时不会执行追更。需要全天运行时使用 Compose 版。
-- 0.1.1 没有托盘驻留、开机自启、自动更新、桌面通知或远程服务器切换。后续按[路线](roadmap.md)推进。
+- 暂不支持自动更新与远程服务器切换，按[路线](roadmap.md)推进。
 
-默认使用内置下载器。客户端可以连接已有 Aria2 RPC，但不自带 Aria2；远程 Aria2 的下载路径和客户端可访问路径需自行对齐。暂停/继续只适用于 Aria2，内置下载支持停止。
+默认使用内置下载器。完整版客户端随包自带 aria2c（见上文「两个变体」）；精简版可连接已有的 Aria2 RPC。远程 Aria2 的下载路径和客户端可访问路径需自行对齐。暂停/继续只适用于 Aria2，内置下载支持停止。
 
 ## 故障排查
 

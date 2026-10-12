@@ -74,9 +74,17 @@ def smoke_test() -> None:
                 raise RuntimeError("打包后的夸克驱动缺失")
             if b"<html" not in backend.request("/"):
                 raise RuntimeError("打包后的界面缺失")
+            # 托盘只在 GUI 模式下才启动，冒烟测试的服务路径碰不到它——这里显式自检，
+            # 否则 pystray 平台后端漏收（动态导入）这类打包缺陷会一路带到用户机器上才发现。
+            from desktop import tray as desktop_tray
+
+            tray_check = desktop_tray.self_check()
+            if not all(tray_check.values()):
+                raise RuntimeError(f"打包后的托盘自检未通过：{tray_check}")
             # 无控制台的 Windows 程序也通过退出码向 CI 提供验证结果。
             if sys.stdout:
-                print(json.dumps({"status": "ok", "version": health["version"], "drivers": len(drivers)}))
+                print(json.dumps({"status": "ok", "version": health["version"],
+                                  "drivers": len(drivers), "tray": tray_check}))
         finally:
             backend.stop()
 
