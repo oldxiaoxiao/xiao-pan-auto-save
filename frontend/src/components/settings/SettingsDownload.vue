@@ -4,6 +4,7 @@ import { ElMessage } from "element-plus";
 import { storeToRefs } from "pinia";
 import { useSettingsStore } from "../../stores/settings";
 import { api } from "../../api/client";
+import DirPicker from "../DirPicker.vue";
 import type { DownloadEngine, DownloadSettings } from "../../api/types";
 
 const store = useSettingsStore();
@@ -134,7 +135,7 @@ onMounted(refreshEngine);
     </p>
     <div class="row">
       <label>下载根目录</label>
-      <el-input v-model="draft.dir" placeholder="留空 = 当前数据目录下的 downloads；也可填写绝对路径" />
+      <DirPicker v-model="draft.dir" placeholder="留空 = 当前数据目录下的 downloads；也可填写绝对路径" />
     </div>
     <div class="row">
       <label>并发数</label>

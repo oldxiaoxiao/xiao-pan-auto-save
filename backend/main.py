@@ -16,6 +16,7 @@ from .api import (
     routes_downloads,
     routes_external,
     routes_files,
+    routes_fs,
     routes_logs,
     routes_migrate,
     routes_name_templates,
@@ -271,6 +272,7 @@ app.include_router(routes_accounts.router)
 app.include_router(routes_settings.router)
 app.include_router(routes_logs.router)
 app.include_router(routes_files.router)
+app.include_router(routes_fs.router)
 app.include_router(routes_search.router)
 app.include_router(routes_external.router)
 app.include_router(routes_tokens.router)

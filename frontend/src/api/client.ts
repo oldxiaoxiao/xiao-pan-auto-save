@@ -14,6 +14,9 @@ import type {
   DownloadEngine,
   DownloadHistoryQuery,
   DownloadJob,
+  FsDirListing,
+  FsRevealResult,
+  FsRoot,
   DownloadRecord,
   DriverInfo,
   EngineTypeSpec,
@@ -232,6 +235,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ title, message }),
     }),
+
+  // 本机文件系统：浏览目录选“下到哪里”，以及在文件管理器里打开某项所在目录
+  fsRoots: () => request<{ ok: boolean; data: { roots: FsRoot[]; default: string } }>("/api/fs/roots"),
+  fsDirs: (path = "") => request<{ ok: boolean; data: FsDirListing }>(`/api/fs/dirs?path=${encodeURIComponent(path)}`),
+  fsReveal: (path: string) =>
+    request<FsRevealResult>("/api/fs/reveal", { method: "POST", body: JSON.stringify({ path }) }),
 
   // 搜索
   suggestions: (q: string, d = false, engine = "") =>

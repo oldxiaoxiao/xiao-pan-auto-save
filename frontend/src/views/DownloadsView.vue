@@ -66,6 +66,24 @@ async function del(row: DownloadJob) {
   }
 }
 
+/**
+ * 在本机文件管理器里定位到这条记录的目标路径。
+ * 桌面客户端即用户本机；Compose 部署时后端在容器内，reveal 会失败——如实报错，不假装成功。
+ */
+async function revealDest(path?: string) {
+  const target = (path || "").trim();
+  if (!target) {
+    ElMessage.warning("这条记录还没有本地路径（任务可能尚未开始写盘）");
+    return;
+  }
+  try {
+    const r = await api.fsReveal(target);
+    if (!r.select_supported) ElMessage.info("已打开所在目录（当前系统不支持直接选中文件）");
+  } catch (e) {
+    ElMessage.error((e as Error).message);
+  }
+}
+
 /* ---------- 历史 ---------- */
 const rows = ref<DownloadRecord[]>([]);
 const total = ref(0);
@@ -307,7 +325,19 @@ function onVisible() {
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="dest_path" label="目标路径" min-width="220" show-overflow-tooltip />
+          <el-table-column label="目标路径" min-width="220">
+            <template #default="{ row }">
+              <span class="dest">{{ row.dest_path || "-" }}</span>
+              <el-button
+                v-if="row.dest_path"
+                size="small"
+                text
+                title="在本机文件管理器中打开"
+                @click="revealDest(row.dest_path)"
+                >打开目录</el-button
+              >
+            </template>
+          </el-table-column>
           <el-table-column label="操作" width="220">
             <template #default="{ row }">
               <template v-if="row.status === 'downloading' || row.status === 'queued' || row.status === 'paused'">
@@ -393,9 +423,17 @@ function onVisible() {
           <el-table-column label="完成时间" width="160">
             <template #default="{ row }">{{ fmtTime(row.finished_at) }}</template>
           </el-table-column>
-          <el-table-column prop="dest_path" label="目标路径" min-width="220" show-overflow-tooltip>
+          <el-table-column label="目标路径" min-width="220">
             <template #default="{ row }">
-              <span class="sub">{{ row.dest_path }}</span>
+              <span class="dest">{{ row.dest_path || "-" }}</span>
+              <el-button
+                v-if="row.dest_path"
+                size="small"
+                text
+                title="在本机文件管理器中打开"
+                @click="revealDest(row.dest_path)"
+                >打开目录</el-button
+              >
             </template>
           </el-table-column>
           <el-table-column label="操作" width="170">
@@ -431,6 +469,17 @@ function onVisible() {
 .sub {
   font-size: 12px;
   color: var(--text-muted);
+}
+/* 只撑到列宽就省略，把横向留给按钮：长路径靠 title 兜底 */
+.dest {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: middle;
 }
 .engine-bar {
   display: flex;

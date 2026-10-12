@@ -154,6 +154,36 @@ export interface DownloadSettings {
   emby: { url: string; token: string };
 }
 
+/** 本机目录浏览：一个子目录条目。 */
+export interface FsEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+/** 本机目录浏览结果。path 为后端规范化后的绝对路径（可能与传入值不同，如解析符号链接）。 */
+export interface FsDirListing {
+  path: string;
+  exists: boolean;
+  writable: boolean;
+  parent: string | null;
+  entries: FsEntry[];
+  truncated: boolean;
+}
+
+/** 本机目录快捷入口。 */
+export interface FsRoot {
+  name: string;
+  path: string;
+}
+
+/** 打开文件管理器的结果；select_supported 为假表示平台无"选中文件"语义，退化为打开所在目录。 */
+export interface FsRevealResult {
+  ok: boolean;
+  path: string;
+  select_supported: boolean;
+}
+
 /** 下载引擎现状：装没装 aria2、跑没跑、本次实际用的谁、降级原因是什么。 */
 export interface DownloadEngine {
   mode: string;
