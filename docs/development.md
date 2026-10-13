@@ -83,7 +83,7 @@ python scripts/build_desktop.py
 
 可以在前端已经重新构建后使用 `python scripts/build_desktop.py --skip-frontend`。不要用旧 dist 打包新代码。`dist/` 是冻结应用，`release/` 是 ZIP 和校验和，均被 Git 忽略。
 
-Windows x64、macOS arm64 和 macOS x64 在各自原生 runner 编译；PyInstaller 不用于跨平台生成二进制。当前没有发行者签名，后续签名密钥应放 CI secrets，不提交到代码库。[GitHub runner 架构](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)、[PyInstaller 构建选项](https://pyinstaller.org/en/stable/usage.html)。
+Windows x64、macOS arm64 和 macOS x64 在各自原生 runner 编译；PyInstaller 不用于跨平台生成二进制。发行包**不做代码签名**（开源分发，见[路线图](roadmap.md)第 3 节），因此 CI 里不存在任何签名密钥；若将来改变这个决定，密钥也只能放 CI secrets，绝不提交到代码库。[GitHub runner 架构](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)、[PyInstaller 构建选项](https://pyinstaller.org/en/stable/usage.html)。
 
 ## 发布流程
 
