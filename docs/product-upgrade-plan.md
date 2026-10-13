@@ -435,9 +435,9 @@ Reach = 受影响目标用户占比（估算，取 0–100）；Impact 档位 3/
 
 | 需求    | 本方案章节 | 现状代码落点                                                                                        | 验收用例          | 状态  |
 | ----- | ----- | --------------------------------------------------------------------------------------------- | ------------- | --- |
-| FR-01 | 七     | `services/download_service.py`、`core/engine.py`                                               | TC-FR01-01/02 | 待排期 |
-| FR-02 | 七     | `drivers/base.py: account_info`、`models.py: account`                                          | TC-FR02-01/02 | 待排期 |
-| FR-03 | 七     | `models.py: task.shareurl_ban`、`engine.py` 结果状态                                               | TC-FR03-01/02 | 待排期 |
+| FR-01 | 七     | `services/download_service.py`、`core/engine.py`、`services/resource_guard.py`                 | TC-FR01-01/02 | 已实现（v0.2.0，磁盘/配额预检与限流退避） |
+| FR-02 | 七     | `drivers/base.py: account_info`、`models.py: account`、`services/account_service.py`           | TC-FR02-01/02 | 已实现（v0.2.0，账号到期预警与"需更新"徽标） |
+| FR-03 | 七     | `models.py: task.shareurl_ban`、`engine.py` 结果状态、`services/task_health.py`                 | TC-FR03-01/02 | 已实现（v0.2.0，任务健康度与失败归因） |
 | FR-04 | 七     | `services/notify_center.py`、`notify_service.py`                                               | TC-FR04-01/02 | 已实现 |
 | FR-05 | 七     | `services/backup_service.py`、`api/routes_backup.py`、`settings/SettingsBackup.vue`             | TC-FR05-01/02 | 已实现 |
 | FR-06 | 七     | `services/account_failover.py`、`models.py: task.account_failover`                             | TC-FR06-01/02 | 已实现 |
