@@ -2,14 +2,60 @@
 
 用于防止误操作（如早期测试清空真实库）导致数据丢失。应用启动时自动快照一次，
 也可用 scripts/backup_db.sh 挂 cron 定期备份。
+
+FR-11：备份走**一致性快照**，不再直接复制 db 文件。WAL 模式下主库旁边还有一个
+`-wal` 文件，尚未 checkpoint 的提交只在里面——下载高峰期连写下，复制主库会得到一份
+"少了最后几十条"的库，而且**打开时不报错**，等你真要恢复才发现。所以：
+
+1. 首选 `VACUUM INTO`：SQLite 自己产出完整、一致、且顺带整理过的新库；
+2. 退而求其次用官方 online backup API（同样是事务一致的快照）；
+3. 两者都不成（比如目标文件不是 SQLite 库）才复制文件，并留一条 warn——
+   保底拿到点东西比什么都拿不到强，但要说清楚它不可信。
 """
 
 from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+
+
+def _snapshot_vacuum(db_path: Path, dest: Path) -> bool:
+    """VACUUM INTO 产出一致性快照。目标文件必须不存在。"""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        conn.execute("VACUUM INTO ?", (str(dest),))
+        return True
+    finally:
+        conn.close()
+
+
+def _snapshot_backup_api(db_path: Path, dest: Path) -> bool:
+    """sqlite3 官方 online backup API：事务一致的快照，不要求目标不存在。"""
+    src = sqlite3.connect(str(db_path))
+    try:
+        dst = sqlite3.connect(str(dest))
+        try:
+            src.backup(dst)
+            return True
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+
+def _snapshot_consistent(db_path: Path, dest: Path) -> bool:
+    """一致性快照优先；失败逐级降级。返回是否拿到了可信快照。"""
+    for step in (_snapshot_vacuum, _snapshot_backup_api):
+        try:
+            if step(db_path, dest):
+                return True
+        except (sqlite3.Error, OSError):
+            dest.unlink(missing_ok=True)  # 别留下半截文件冒充备份
+            continue
+    return False
 
 
 def backup_db(db_path: Path, backup_dir: Path, keep: int = 14) -> Path | None:
@@ -19,11 +65,25 @@ def backup_db(db_path: Path, backup_dir: Path, keep: int = 14) -> Path | None:
     backup_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     dest = backup_dir / f"{db_path.stem}-{ts}.db"
-    shutil.copy2(db_path, dest)
+
+    if not _snapshot_consistent(db_path, dest):
+        # 降级到文件复制：至少留个东西，但它可能缺最后几次提交
+        shutil.copy2(db_path, dest)
+        _warn(f"一致性快照失败，{dest.name} 为文件复制，可能缺最近的提交")
+
     snaps = sorted(backup_dir.glob(f"{db_path.stem}-*.db"), key=lambda p: p.name, reverse=True)
     for old in snaps[keep:]:
         old.unlink(missing_ok=True)
     return dest
+
+
+def _warn(message: str) -> None:
+    try:
+        from ..core.logstream import hub
+
+        hub.make_logger("backup")("warn", message)
+    except Exception:  # noqa: BLE001 日志不可用时不该让备份失败
+        pass
 
 
 BACKUP_KIND = "xiao-pan-backup"

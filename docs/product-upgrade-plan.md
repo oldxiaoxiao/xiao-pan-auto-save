@@ -6,7 +6,7 @@
 | 分析对象 | xiao-pan-auto-save 0.2.0（Compose/Web + Windows/macOS 客户端） |
 | 编写日期 | 2026-10-10                                                |
 | 编写角色 | 产品（司南）                                                    |
-| 状态   | v0.2 已完成（FR-01~FR-10 已落地）；FR-11 推迟至 v0.3/v0.4          |
+| 状态   | v0.2 已完成（FR-01~FR-10 已落地）；FR-11 已于 v0.4.1 实现          |
 | 变更记录 | v0.1 初稿：现状盘点、六维诊断、三期路线、v0.2 需求清单、优先级评分卡、风险登记册；v0.2 收口：FR-09/FR-10 标记为已实现，FR-11 移至 v0.3/v0.4 |
 
 ---
@@ -309,9 +309,9 @@
 
 - **Given** 新手用户选择"国产剧 SxxExx"模板，**When** 执行试跑，**Then** 预览中 `第01集.mp4` 被规范为可预期命名，且不匹配文件被单独列出。
 
-### FR-11 SQLite 写保护（Should，技术底座 · 推迟至 v0.3/v0.4）
+### FR-11 SQLite 写保护（Should，技术底座 · **已于 v0.4.1 实现**）
 
-> **状态**：按用户决策，本项不在 v0.2 交付。替代方案：v0.2 的备份功能已采用一致性导出（`VACUUM`-style 快照）而非高峰期直接复制 db 文件，规避了主要风险。FR-11 的完整 WAL / `busy_timeout` 改造随 v0.3「好用」或 v0.4 技术底座一并推进。
+> **状态**：v0.2 未交付（当时以一致性导出规避主要风险），**v0.4.1 已落地**：WAL + `busy_timeout=5000ms` + `synchronous=NORMAL`，备份改走 `VACUUM INTO`（失败降级 online backup API）。实测：数据仍在 `-wal` 未 checkpoint 时，文件复制出来的副本**整张表都不存在**，一致性快照则完整。
 
 业务规则：启用 WAL、`busy_timeout` ≥5s、备份走 `VACUUM INTO` 或一致性快照；**禁止**在下载写入高峰期直接复制 db 文件作为备份。
 
@@ -359,7 +359,7 @@ Reach = 受影响目标用户占比（估算，取 0–100）；Impact 档位 3/
 | 桶      | 内容                                   |
 | ------ | ------------------------------------ |
 | Must   | FR-01 ~ FR-08（可信八项）                  |
-| Should | FR-09 仪表盘、FR-10 模板库（均已实现）；FR-11 SQLite 写保护按用户决策推迟至 v0.3/v0.4 |
+| Should | FR-09 仪表盘、FR-10 模板库（均已实现）；FR-11 SQLite 写保护已于 v0.4.1 实现 |
 | Could  | 通知渠道真实样例测试工具、驱动能力矩阵页增强               |
 | Won't  | 见第七节"本期明确不做"                         |
 
@@ -445,7 +445,7 @@ Reach = 受影响目标用户占比（估算，取 0–100）；Impact 档位 3/
 | FR-08 | 七     | `services/credential_store.py`、`models.py: account.cookie_enc`                                | TC-FR08-01/02 | 已实现 |
 | FR-09 | 七、十   | `services/overview_service.py`、`api/routes_overview.py`、`views/OverviewView.vue`              | TC-FR09-01    | 已实现 |
 | FR-10 | 七     | `services/name_template_service.py`、`routes_name_templates.py`、`NameTemplatePicker.vue`、`TaskForm.vue` | TC-FR10-01    | 已实现 |
-| FR-11 | 七     | `backend/database.py`                                                                         | TC-FR11-01    | 推迟（v0.3/v0.4 技术底座） |
+| FR-11 | 七     | `backend/database.py`、`services/backup_service.py`                                            | TC-FR11-01    | 已实现（v0.4.1）       |
 
 
 *本方案为产品设计参考，具体实施请结合公司合规与法务要求确认。*

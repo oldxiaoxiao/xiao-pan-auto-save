@@ -31,7 +31,7 @@ from .api.auth import WebAuthMiddleware
 from .api.auth import router as auth_router
 from .core.logstream import hub
 from .core.scheduler import TaskScheduler
-from .database import init_db
+from .database import db_pragmas, init_db
 from .drivers import driver_matrix
 from .services.backup_service import backup_db
 
@@ -294,7 +294,17 @@ async def health() -> dict:
         "version": __version__,
         "data_dir": str(config.DATA_DIR),
         "desktop_mode": config.DESKTOP_MODE,
+        # FR-11：WAL 开没开要能当场自查（网络盘上会被拒绝切换），不必翻日志猜
+        "db": _db_mode(),
     }
+
+
+def _db_mode() -> dict:
+    try:
+        pragmas = db_pragmas()
+        return {"journal_mode": pragmas["journal_mode"], "busy_timeout": pragmas["busy_timeout"]}
+    except Exception:  # noqa: BLE001 探活端点不能因为查不到 pragma 就 500
+        return {}
 
 
 @app.get("/api/drivers")

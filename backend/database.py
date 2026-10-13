@@ -1,19 +1,76 @@
-"""SQLite 数据库：engine、建表、会话。"""
+"""SQLite 数据库：engine、建表、会话。
+
+FR-11（技术底座）：这里统一开启 WAL 与 busy_timeout。
+- **WAL**：读写不再互相阻塞——下载高峰期一边写账本、一边刷界面列表，是常态而非巧合。
+- **busy_timeout ≥ 5s**：WAL 下写写仍会冲突，超时等待让"并发写"退化成排队，而不是立刻
+  抛 `database is locked`。
+- **synchronous=NORMAL**：WAL 模式下这是官方推荐的搭配（FULL 在 WAL 下收益有限、代价不小）。
+
+WAL 在部分网络文件系统（NAS / 某些 SMB 挂载）上不受支持。那种情况下 SQLite 会**拒绝切换**，
+此时如实降级：沿用原日志模式并记一条 warn，绝不因为一个 pragma 让程序起不来。
+"""
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
+from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 
 from .config import DB_PATH
+
+# WAL 下写写冲突的等待上限（毫秒）。FR-11 要求 ≥5s。
+BUSY_TIMEOUT_MS = 5000
 
 engine = create_engine(
     f"sqlite:///{DB_PATH}",
     connect_args={"check_same_thread": False},
     echo=False,
 )
+
+
+def _apply_pragmas(dbapi_conn: Any, _record: Any = None) -> None:
+    cur = dbapi_conn.cursor()
+    try:
+        cur.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+        cur.execute("PRAGMA synchronous = NORMAL")
+        mode = cur.execute("PRAGMA journal_mode = WAL").fetchone()
+        if not mode or str(mode[0]).lower() != "wal":
+            # 网络盘等不支持 WAL 的场景：降级即可，但要留下痕迹，别让排障的人瞎猜
+            _warn(f"journal_mode 未能切到 WAL（实际 {mode[0] if mode else '未知'}），沿用默认模式")
+    except sqlite3.Error as exc:  # pragma 失败不该连累启动
+        _warn(f"设置 SQLite pragma 失败：{exc}")
+    finally:
+        cur.close()
+
+
+def _warn(message: str) -> None:
+    try:
+        from .core.logstream import hub
+
+        hub.make_logger("startup")("warn", message)
+    except Exception:  # noqa: BLE001 日志系统本身不可用时至少不崩
+        pass
+
+
+event.listens_for(engine, "connect")(_apply_pragmas)
+
+
+def db_pragmas() -> dict:
+    """当前实际的 pragma 取值。给排障与测试用：说"开了 WAL"要有办法当场验证。"""
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        cur = conn.cursor()
+        return {
+            "journal_mode": cur.execute("PRAGMA journal_mode").fetchone()[0],
+            "busy_timeout": cur.execute("PRAGMA busy_timeout").fetchone()[0],
+            "synchronous": cur.execute("PRAGMA synchronous").fetchone()[0],
+        }
+    finally:
+        conn.close()
 
 
 def init_db() -> None:

@@ -48,7 +48,7 @@ Windows 依赖系统 WebView2 Runtime；缺少时安装 [Microsoft 官方运行�
 | Windows | `%LOCALAPPDATA%\XiaoPan` |
 | macOS | `~/Library/Application Support/XiaoPan` |
 
-目录包含 `xiao_pan.db`、`logs/`、`backups/`、`downloads/`。内置下载默认写入其中的 `downloads/`，也可在设置页填写其他绝对路径。升级只替换程序，不覆盖这些数据。数据库包含账号凭证，备份和迁移时按私人文件保管。
+目录包含 `xiao_pan.db`、`logs/`、`backups/`、`downloads/`。数据库自 v0.4.1 起启用 WAL，旁边会出现 `xiao_pan.db-wal` 与 `xiao_pan.db-shm` 两个文件，**这是正常的**——未及写入主库的提交暂存在这里，程序退出时会收回。不要手动删除它们，也不要只复制 `xiao_pan.db` 去"备份"（会漏数据，见下文升级前备份）。内置下载默认写入其中的 `downloads/`，也可在设置页填写其他绝对路径。升级只替换程序，不覆盖这些数据。数据库包含账号凭证，备份和迁移时按私人文件保管。
 
 开发或测试可用 `XIAO_PAN_DESKTOP_DATA_DIR` 指定独立数据目录。桌面数据与源码目录下的 `data/` 默认分开；如需迁移，在两端停止后复制数据库，并重新确认下载目录。直接复制数据库不会搬运下载文件，也不会改写历史记录中的路径。
 
