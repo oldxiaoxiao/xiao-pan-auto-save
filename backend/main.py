@@ -25,6 +25,7 @@ from .api import (
     routes_settings,
     routes_tasks,
     routes_tokens,
+    routes_update,
 )
 from .api.auth import WebAuthMiddleware
 from .api.auth import router as auth_router
@@ -283,6 +284,7 @@ app.include_router(routes_overview.router)
 app.include_router(routes_name_templates.router)
 app.include_router(routes_backup.router)
 app.include_router(routes_desktop.router)
+app.include_router(routes_update.router)
 
 
 @app.get("/api/health")

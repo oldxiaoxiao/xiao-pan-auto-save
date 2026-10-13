@@ -201,6 +201,41 @@ export interface DownloadEngine {
 }
 
 /** 桌面外壳（仅客户端有意义）：开机自启状态 */
+/** 某个发布包。variant=full 表示随包自带 aria2c（产物名带 -aria2）。 */
+export interface UpdateAsset {
+  name: string;
+  size: number;
+  /** slim | full */
+  variant: string;
+  url: string;
+}
+
+/** 版本检测结果。查不到时 has_update 为 false 且 reason 说明原因——后端不抛错。 */
+export interface UpdateCheck {
+  current: string;
+  latest: string;
+  has_update: boolean;
+  /** 发布页地址 */
+  url: string;
+  notes: string;
+  published_at: string;
+  assets: UpdateAsset[];
+  /** 校验和文件；为 null 表示这次没拿到 */
+  sums: { name: string; url: string } | null;
+  /** windows-x64 | macos-arm64 | macos-x64 | linux */
+  platform: string;
+  variant: string;
+  reason: string;
+  checked_at: number;
+}
+
+export interface PrebackupResult {
+  ok: boolean;
+  path: string;
+  size: number;
+  message: string;
+}
+
 export interface AutostartState {
   supported: boolean;
   enabled: boolean;

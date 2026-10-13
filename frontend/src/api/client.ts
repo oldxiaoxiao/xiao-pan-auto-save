@@ -4,6 +4,8 @@ import type {
   AccountPayload,
   AgentEvent,
   AutostartState,
+  PrebackupResult,
+  UpdateCheck,
   AiConfig,
   BackupPayload,
   BackupRestoreCounts,
@@ -235,6 +237,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ title, message }),
     }),
+
+  // 版本检测与升级前备份：只告知不代劳，是否升级由人决定
+  updateCheck: (force = false) =>
+    request<{ ok: boolean; data: UpdateCheck }>(`/api/update/check?force=${force ? 1 : 0}`),
+  updatePrebackup: () => request<PrebackupResult>("/api/update/prebackup", { method: "POST" }),
 
   // 本机文件系统：浏览目录选“下到哪里”，以及在文件管理器里打开某项所在目录
   fsRoots: () => request<{ ok: boolean; data: { roots: FsRoot[]; default: string } }>("/api/fs/roots"),

@@ -2,11 +2,71 @@
 import { computed, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { api } from "../../api/client";
-import type { AutostartState } from "../../api/types";
+import type { AutostartState, UpdateCheck } from "../../api/types";
 
 const state = ref<AutostartState | null>(null);
 const busy = ref(false);
 const msg = ref("");
+
+/* ---------- 版本 ---------- */
+const update = ref<UpdateCheck | null>(null);
+const upLoading = ref(false);
+const upMsg = ref("");
+const backupBusy = ref(false);
+
+async function checkUpdate(force = false) {
+  upLoading.value = true;
+  upMsg.value = "";
+  try {
+    update.value = (await api.updateCheck(force)).data;
+  } catch (e) {
+    // 页面加载时的那次静默检查也不该弹窗打扰：失败只留一行说明
+    upMsg.value = `检查更新失败：${(e as Error).message}`;
+  } finally {
+    upLoading.value = false;
+  }
+}
+
+const primary = computed(() => update.value?.assets?.[0] ?? null);
+
+function variantLabel(v: string): string {
+  return v === "full" ? "完整版（自带 aria2）" : "精简版";
+}
+
+function fmtSize(n: number): string {
+  return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`;
+}
+
+/** 各平台的原生校验命令：ZIP 用户手上没有源码，给 python 脚本等于没给。 */
+function verifyCmd(name: string): string {
+  const p = update.value?.platform ?? "";
+  if (p.startsWith("windows")) return `certutil -hashfile ${name} SHA256`;
+  if (p.startsWith("macos")) return `shasum -a 256 ${name}`;
+  return `sha256sum ${name}`;
+}
+
+async function copyCmd() {
+  const cmd = primary.value ? verifyCmd(primary.value.name) : "";
+  if (!cmd) return;
+  try {
+    await navigator.clipboard.writeText(cmd);
+    ElMessage.success("已复制校验命令");
+  } catch {
+    ElMessage.info("浏览器拒绝了剪贴板访问，请手动复制");
+  }
+}
+
+async function backupNow() {
+  backupBusy.value = true;
+  try {
+    const r = await api.updatePrebackup();
+    ElMessage.success(r.message);
+  } catch (e) {
+    ElMessage.error((e as Error).message);
+  } finally {
+    backupBusy.value = false;
+  }
+}
 
 const METHOD_LABEL: Record<string, string> = {
   windows: "Windows 启动目录",
@@ -57,7 +117,11 @@ async function testNotify() {
   }
 }
 
-onMounted(load);
+// 进页面顺手查一次（后端有 6 小时缓存，失败静默）；想立刻知道结果就点「检查更新」
+onMounted(() => {
+  load();
+  void checkUpdate();
+});
 </script>
 
 <template>
@@ -79,6 +143,41 @@ onMounted(load);
       <label>桌面通知</label>
       <el-button size="small" :disabled="busy" @click="testNotify"> 发送测试通知 </el-button>
       <span class="text-muted"> 走系统通知机制（macOS 通知中心 / Windows 托盘气泡 / Linux notify-send） </span>
+    </div>
+
+    <div class="block">
+      <div class="row">
+        <label>版本</label>
+        <span class="ver">{{ update?.current || "-" }}</span>
+        <el-button size="small" :loading="upLoading" @click="checkUpdate(true)"> 检查更新 </el-button>
+        <el-button v-if="update?.has_update" size="small" :loading="backupBusy" @click="backupNow">
+          升级前备份
+        </el-button>
+      </div>
+
+      <p v-if="update?.has_update" class="hint">
+        有新版本 <b>{{ update.latest }}</b>
+        <template v-if="primary">
+          ：
+          <el-link v-for="a in update.assets" :key="a.url" :href="a.url" target="_blank" type="primary">
+            {{ variantLabel(a.variant) }}（{{ fmtSize(a.size) }}）
+          </el-link>
+        </template>
+        <template v-else> ——当前平台没有对应的桌面包（{{ update.platform }}）。Compose 部署请更换镜像 tag。 </template>
+      </p>
+      <p v-else-if="update?.latest" class="text-muted">已是最新（{{ update.latest }}）</p>
+
+      <!-- 下载完先校验再解压：校验不过的包一律不装 -->
+      <div v-if="update?.has_update && primary" class="cmd">
+        <code>{{ verifyCmd(primary.name) }}</code>
+        <el-button size="small" link @click="copyCmd">复制</el-button>
+        <span class="text-muted">
+          与发布页 {{ update.sums ? update.sums.name : "SHA256SUMS" }} 里那一行比对，一致再解压替换
+        </span>
+      </div>
+
+      <p v-if="update?.reason" class="text-muted">{{ update.reason }}</p>
+      <p v-if="upMsg" class="text-muted">{{ upMsg }}</p>
     </div>
 
     <p v-if="msg" class="text-muted">{{ msg }}</p>
@@ -105,5 +204,35 @@ h3 {
   flex: none;
   font-size: 13px;
   color: #5b6270;
+}
+.block {
+  border-top: 1px solid var(--border, #e6e8ee);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ver {
+  font-size: 13px;
+}
+.hint {
+  margin: 0;
+  font-size: 13px;
+}
+.hint .el-link {
+  margin-left: 8px;
+  font-size: 13px;
+}
+.cmd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cmd code {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--hover, rgba(127, 127, 127, 0.12));
 }
 </style>
