@@ -1,12 +1,12 @@
 # 0.1.1 产品优化与升级设计方案
 
-| 项    | 内容                                                        |
-| ---- | --------------------------------------------------------- |
-| 文档版本 | v0.2（已落地，持续维护）                                          |
-| 分析对象 | xiao-pan-auto-save 0.2.0（Compose/Web + Windows/macOS 客户端） |
-| 编写日期 | 2026-10-10                                                |
-| 编写角色 | 产品（司南）                                                    |
-| 状态   | v0.2 已完成（FR-01~FR-10 已落地）；FR-11 已于 v0.4.1 实现          |
+| 项    | 内容                                                                                          |
+| ---- | ------------------------------------------------------------------------------------------- |
+| 文档版本 | v0.2（已落地，持续维护）                                                                              |
+| 分析对象 | xiao-pan-auto-save 0.2.0（Compose/Web + Windows/macOS 客户端）                                   |
+| 编写日期 | 2026-10-10                                                                                  |
+| 编写角色 | 产品（司南）                                                                                      |
+| 状态   | v0.2 已完成（FR-01~FR-10 已落地）；FR-11 已于 v0.4.1 实现                                                |
 | 变更记录 | v0.1 初稿：现状盘点、六维诊断、三期路线、v0.2 需求清单、优先级评分卡、风险登记册；v0.2 收口：FR-09/FR-10 标记为已实现，FR-11 移至 v0.3/v0.4 |
 
 ---
@@ -54,7 +54,7 @@
 | 网盘支持        | 仅夸克；迅雷/123/百度/阿里/115/天翼/移动/AList 为未实现骨架                                                                          |
 | 真机验证        | 夸克真实转存与签到、公开搜索源、真实通知渠道、真实 Emby 扫描均未做真机验证                                                                         |
 | 桌面能力        | 无托盘、无开机自启、无自动更新、无远程模式；随机端口使油猴脚本不可用                                                                               |
-| 签名          | 不做发行者代码签名与 Apple 公证（**已定为长期不做**：开源分发，详见[路线图](roadmap.md)第 3 节）                                                            |
+| 签名          | 未做发行者代码签名与 Apple 公证                                                                                              |
 | Windows GUI | 未在原生 runner 上人工检查                                                                                                |
 | 并发模型        | 全局 `_run_lock` 串行转存（`services/task_service.py:31`）、下载内存注册表重启即清空（`core/download_registry.py`）、仅支持单 uvicorn worker |
 
@@ -79,7 +79,7 @@
 | B 可信可靠 | 弱（最大短板） | Cookie 失效、磁盘写满、链接失效、客户端退出四类中断均需用户自查；内置下载无断点续传；队列不持久化 |
 | C 体验可用 | 中       | 无总览页；通知无分级（结果刷屏掩盖"要你处理"）；正则/魔法变量对小白门槛高；无暗色主题         |
 | D 扩展生态 | 中（潜力最大） | 8 驱动未实现；无事件钩子/插件；无失效自动换源；媒体库集成仅 Emby                 |
-| E 多端分发 | 弱       | 桌面"退出即停"与核心价值冲突；未签名公证（已定为长期不做）；无远程模式；随机端口切断脚本接入 |
+| E 多端分发 | 弱       | 桌面"退出即停"与核心价值冲突；未签名公证；无远程模式；随机端口切断脚本接入               |
 | F 运营增长 | 弱       | 无本地统计看板（无法自证价值）；缺上手引导与反馈闭环；迁移卖点未在首页曝光                |
 
 **诊断排序（按对核心承诺的破坏程度）**：B > A > E > C > D > F。
@@ -349,19 +349,19 @@ Reach = 受影响目标用户占比（估算，取 0–100）；Impact 档位 3/
 | 11 | AList 桥接（v0.3） | 50  | 2 | 70% | 3   | 23      | 依赖 AList 版本与接口稳定性                     |
 | 12 | 失效换源（v0.3）     | 60  | 3 | 50% | 4   | 23      | 相似度判据与内容风险待验证                         |
 | 13 | 托盘/自启（v0.3）    | 30  | 2 | 75% | 2.5 | 18      | pywebview 能力边界待确认                     |
-| 14 | ~~签名公证（v0.3）~~  | 30  | 2 | 50% | 2   | 15      | **已关闭**：决定长期不做，开源分发以 SHA256SUMS + 公开构建承担可信度（v0.4.1 决策） |
+| 14 | 签名公证（v0.3）     | 30  | 2 | 50% | 2   | 15      | 依赖证书资质，外部阻塞                           |
 | 15 | 115 深度驱动（v0.3） | 40  | 3 | 60% | 6   | 12      | 协议与风控不确定性高                            |
 
 **RICE 适用边界说明**：FR-07 与 FR-08 分数不高但**必须进 v0.2**——前者是"放着不管"承诺的硬底线（分区间不可比，按战略项处理）；后者是安全底线，按资金/安全优先于成本的原则处理。115 驱动分数低但属战略项，独立按技术可行性验证后决策，不按分数淘汰。
 
 **MoSCoW 收口（v0.2）**
 
-| 桶      | 内容                                   |
-| ------ | ------------------------------------ |
-| Must   | FR-01 ~ FR-08（可信八项）                  |
+| 桶      | 内容                                                     |
+| ------ | ------------------------------------------------------ |
+| Must   | FR-01 ~ FR-08（可信八项）                                    |
 | Should | FR-09 仪表盘、FR-10 模板库（均已实现）；FR-11 SQLite 写保护已于 v0.4.1 实现 |
-| Could  | 通知渠道真实样例测试工具、驱动能力矩阵页增强               |
-| Won't  | 见第七节"本期明确不做"                         |
+| Could  | 通知渠道真实样例测试工具、驱动能力矩阵页增强                                 |
+| Won't  | 见第七节"本期明确不做"                                           |
 
 ---
 
@@ -369,7 +369,7 @@ Reach = 受影响目标用户占比（估算，取 0–100）；Impact 档位 3/
 
 | 版本      | 主题    | 关键需求                                                                                                                   |
 | ------- | ----- | ---------------------------------------------------------------------------------------------------------------------- |
-| v0.3 好用 | 门槛与覆盖 | AList 桥接驱动；1 个深度网盘驱动样板；失效分享候选换源（人工确认）；桌面托盘/自启/关闭语义/桌面通知/原生目录选择；版本检测与升级前自动备份（~~签名与公证~~ 已决定不做）；暗色主题与首屏拆包；客户端固定端口或 mDNS 发现（恢复油猴脚本接入） |
+| v0.3 好用 | 门槛与覆盖 | AList 桥接驱动；1 个深度网盘驱动样板；失效分享候选换源（人工确认）；桌面托盘/自启/关闭语义/桌面通知/原生目录选择；签名与公证、版本检测与升级前自动备份；暗色主题与首屏拆包；客户端固定端口或 mDNS 发现（恢复油猴脚本接入） |
 | v0.4 开放 | 平台化   | 事件总线与插件/脚本钩子（转存后/下载后/失败时）；Jellyfin/Plex 集成与可选 STRM 生成；远程连接模式（客户端连 Compose）；只读角色用于家庭共享；i18n 骨架（中/英）                     |
 
 ---
@@ -395,8 +395,8 @@ Reach = 受影响目标用户占比（估算，取 0–100）；Impact 档位 3/
 
 | 依赖项             | 所属     | 就绪状态    | 分级              | 最晚就绪时限       | 影响与替代                                                 |
 | --------------- | ------ | ------- | --------------- | ------------ | ----------------------------------------------------- |
-| ~~代码签名证书（Windows）~~ | ~~外部采购~~ | 已取消     | 不适用             | —         | **不再依赖**：已决定长期不做签名（v0.4.1），系统拦截属预期行为并在文档给出绕过步骤                    |
-| ~~Apple 开发者账号与公证~~  | ~~外部~~  | 已取消     | 不适用             | —         | 同上                                                    |
+| 代码签名证书（Windows） | 外部采购   | 未启动     | 可绕过             | v0.3 开发中期    | 缺失则继续未签名分发，在文档明示；不阻塞 v0.2                             |
+| Apple 开发者账号与公证  | 外部     | 未启动     | 可绕过             | v0.3 开发中期    | 同上                                                    |
 | 第二网盘协议可行性验证     | 内部技术验证 | 未启动     | 阻塞（仅对 v0.3 网盘项） | v0.3 启动前 2 周 | 不通过则改为 AList 桥接为主路径                                   |
 | 凭据加密密钥方案        | 内部设计   | 未定      | 阻塞（对 FR-08）     | v0.2 开发第 2 周 | 备选：使用系统钥匙串（macOS Keychain / DPAPI），失败则退回本地密钥文件 + 权限控制 |
 | AList 版本与接口     | 外部开源   | 可用（需验证） | 并行              | v0.3 联调前     | 版本不兼容则自定义适配层                                          |
@@ -433,19 +433,18 @@ Reach = 受影响目标用户占比（估算，取 0–100）；Impact 档位 3/
 
 ## 十四、需求追踪矩阵（简化版）
 
-| 需求    | 本方案章节 | 现状代码落点                                                                                        | 验收用例          | 状态  |
-| ----- | ----- | --------------------------------------------------------------------------------------------- | ------------- | --- |
-| FR-01 | 七     | `services/download_service.py`、`core/engine.py`、`services/resource_guard.py`                 | TC-FR01-01/02 | 已实现（v0.2.0，磁盘/配额预检与限流退避） |
-| FR-02 | 七     | `drivers/base.py: account_info`、`models.py: account`、`services/account_service.py`           | TC-FR02-01/02 | 已实现（v0.2.0，账号到期预警与"需更新"徽标） |
-| FR-03 | 七     | `models.py: task.shareurl_ban`、`engine.py` 结果状态、`services/task_health.py`                 | TC-FR03-01/02 | 已实现（v0.2.0，任务健康度与失败归因） |
-| FR-04 | 七     | `services/notify_center.py`、`notify_service.py`                                               | TC-FR04-01/02 | 已实现 |
-| FR-05 | 七     | `services/backup_service.py`、`api/routes_backup.py`、`settings/SettingsBackup.vue`             | TC-FR05-01/02 | 已实现 |
-| FR-06 | 七     | `services/account_failover.py`、`models.py: task.account_failover`                             | TC-FR06-01/02 | 已实现 |
-| FR-07 | 七     | `services/download_service.py: _fetch_one/_resume_offset`、`download_history.mark_interrupted` | TC-FR07-01/02 | 已实现 |
-| FR-08 | 七     | `services/credential_store.py`、`models.py: account.cookie_enc`                                | TC-FR08-01/02 | 已实现 |
-| FR-09 | 七、十   | `services/overview_service.py`、`api/routes_overview.py`、`views/OverviewView.vue`              | TC-FR09-01    | 已实现 |
-| FR-10 | 七     | `services/name_template_service.py`、`routes_name_templates.py`、`NameTemplatePicker.vue`、`TaskForm.vue` | TC-FR10-01    | 已实现 |
-| FR-11 | 七     | `backend/database.py`、`services/backup_service.py`                                            | TC-FR11-01    | 已实现（v0.4.1）       |
-
+| 需求    | 本方案章节 | 现状代码落点                                                                                                 | 验收用例          | 状态                         |
+| ----- | ----- | ------------------------------------------------------------------------------------------------------ | ------------- | -------------------------- |
+| FR-01 | 七     | `services/download_service.py`、`core/engine.py`、`services/resource_guard.py`                           | TC-FR01-01/02 | 已实现（v0.2.0，磁盘/配额预检与限流退避）   |
+| FR-02 | 七     | `drivers/base.py: account_info`、`models.py: account`、`services/account_service.py`                     | TC-FR02-01/02 | 已实现（v0.2.0，账号到期预警与"需更新"徽标） |
+| FR-03 | 七     | `models.py: task.shareurl_ban`、`engine.py` 结果状态、`services/task_health.py`                              | TC-FR03-01/02 | 已实现（v0.2.0，任务健康度与失败归因）     |
+| FR-04 | 七     | `services/notify_center.py`、`notify_service.py`                                                        | TC-FR04-01/02 | 已实现                        |
+| FR-05 | 七     | `services/backup_service.py`、`api/routes_backup.py`、`settings/SettingsBackup.vue`                      | TC-FR05-01/02 | 已实现                        |
+| FR-06 | 七     | `services/account_failover.py`、`models.py: task.account_failover`                                      | TC-FR06-01/02 | 已实现                        |
+| FR-07 | 七     | `services/download_service.py: _fetch_one/_resume_offset`、`download_history.mark_interrupted`          | TC-FR07-01/02 | 已实现                        |
+| FR-08 | 七     | `services/credential_store.py`、`models.py: account.cookie_enc`                                         | TC-FR08-01/02 | 已实现                        |
+| FR-09 | 七、十   | `services/overview_service.py`、`api/routes_overview.py`、`views/OverviewView.vue`                       | TC-FR09-01    | 已实现                        |
+| FR-10 | 七     | `services/name_template_service.py`、`routes_name_templates.py`、`NameTemplatePicker.vue`、`TaskForm.vue` | TC-FR10-01    | 已实现                        |
+| FR-11 | 七     | `backend/database.py`、`services/backup_service.py`                                                     | TC-FR11-01    | 已实现（v0.4.1）                |
 
 *本方案为产品设计参考，具体实施请结合公司合规与法务要求确认。*
