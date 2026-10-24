@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onErrorCaptured } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { storeToRefs } from "pinia";
 import { useTasksStore } from "../stores/tasks";
@@ -330,6 +330,20 @@ async function onDragEnd() {
   }
 }
 
+/**
+ * 表单渲染出错时**不要把整个页面带走**。
+ *
+ * 展开任务详情就是挂载 TaskForm；它一旦在渲染里抛错，默认会让 TasksView 乃至整个应用
+ * 渲染失败——用户看到的就是"从这里开始，点什么都没反应"。这里就地截住：说清错误、
+ * 收起编辑态回到能用的列表，页面其余部分照常工作。
+ */
+onErrorCaptured((err) => {
+  ElMessage.error(`任务表单加载失败：${err instanceof Error ? err.message : String(err)}`);
+  editingId.value = null;
+  newDirty.value = false;
+  return false; // 不再向上冒泡，避免整个应用被这一处错误拖垮
+});
+
 onMounted(() => {
   tasks.fetchTasks();
   accountsStore.fetchAccounts();
@@ -374,24 +388,21 @@ onMounted(() => {
 
     <div v-else v-loading="tasks.loading" class="list">
       <p v-if="!canDrag" class="hint text-muted">搜索/筛选状态下已暂停拖拽排序</p>
-      <div
-        v-for="(t, i) in filtered"
-        :key="t.id"
-        class="dragwrap"
-        :draggable="canDrag && editingId !== t.id"
-        @dragstart="onDragStart(t.id)"
-        @dragover="onDragOver($event, t.id)"
-        @dragend="onDragEnd"
-      >
+      <!-- 拖拽起点是 TaskRow 里那枚手柄（见那里的注释），行本身不 draggable：
+           整行可拖会让带一点位移的普通点击被内核判成拖拽，click 直接不来。 -->
+      <div v-for="(t, i) in filtered" :key="t.id" class="dragwrap" @dragover="onDragOver($event, t.id)">
         <TaskRow
           :task="t"
           :index="i"
           :dirty="dirty.has(t.id)"
           :expanded="editingId === t.id"
+          :can-drag="canDrag && editingId !== t.id"
           @toggle="toggleExpand(t.id)"
           @run="openRun(t)"
           @position="onPosition(t, $event)"
           @copy="startCopy(t)"
+          @dragstart="onDragStart(t.id)"
+          @dragend="onDragEnd"
         />
         <!-- 编辑已有任务不依赖 task_defaults：表单每个字段都由那一行自己提供，设置没读到也照样要能编辑，
              否则点行只是"箭头动了一下"的死点击。新建（下面 editingId === 'new'）才需要那份真默认值。 -->
@@ -444,9 +455,6 @@ onMounted(() => {
 }
 .dragwrap {
   position: relative;
-}
-.dragwrap[draggable="true"] {
-  cursor: grab;
 }
 .hint {
   font-size: 12px;

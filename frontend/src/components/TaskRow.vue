@@ -3,12 +3,21 @@ import { computed } from "vue";
 import type { Task } from "../api/types";
 import { formatTime, relativeTime, weekText } from "../utils";
 
-const props = defineProps<{ task: Task; index: number; dirty: boolean; expanded: boolean }>();
+const props = defineProps<{
+  task: Task;
+  index: number;
+  dirty: boolean;
+  expanded: boolean;
+  /** 是否允许拖拽排序（搜索/筛选、本行正在编辑时为 false）。 */
+  canDrag: boolean;
+}>();
 const emit = defineEmits<{
   (e: "toggle"): void;
   (e: "run", id: number): void;
   (e: "position", where: "top" | "bottom"): void;
   (e: "copy"): void;
+  (e: "dragstart"): void;
+  (e: "dragend"): void;
 }>();
 
 function onPosition(where: "top" | "bottom") {
@@ -169,8 +178,23 @@ const health = computed(() => {
 
 <template>
   <div class="row card" :class="{ expanded }" @click="emit('toggle')">
-    <div class="idx">
-      {{ index + 1 }}
+    <!--
+      拖拽只挂在这枚手柄上，不再挂在整行。
+      整行 draggable 时，Windows 的 WebView2（Chromium 内核）会把"按下鼠标后手抖了几像素"
+      判定为拖拽开始：click 事件根本不触发，用户看到的就是"点了没反应"——而且此后每次点击都一样。
+      手柄是唯一能起步拖拽的地方，行主体永远只是点击。
+    -->
+    <div
+      class="idx"
+      :class="{ 'idx--grab': canDrag }"
+      :draggable="canDrag"
+      :title="canDrag ? '按住这里上下拖动排序' : ''"
+      @click.stop
+      @dragstart="emit('dragstart')"
+      @dragend="emit('dragend')"
+    >
+      <span v-if="canDrag" class="grip" aria-hidden="true">⋮⋮</span>
+      <span>{{ index + 1 }}</span>
     </div>
     <div class="main">
       <div class="title-line">
@@ -238,6 +262,20 @@ const health = computed(() => {
   font-size: 13px;
   text-align: right;
   padding-top: 2px;
+}
+.idx--grab {
+  cursor: grab;
+  user-select: none;
+}
+.idx--grab:active {
+  cursor: grabbing;
+}
+.grip {
+  display: block;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: -2px;
+  opacity: 0.55;
 }
 .main {
   flex: 1;

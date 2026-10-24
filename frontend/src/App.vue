@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
+import { ElMessage } from "element-plus";
 import { api } from "./api/client";
+import { useErrorsStore } from "./stores/errors";
 
 const nav = [
   { to: "/overview", label: "总览", icon: "M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z" },
@@ -14,6 +16,19 @@ const nav = [
 
 const backendDown = ref(false);
 const appVersion = __APP_VERSION__;
+
+// 界面自己捕获到的错误：打包后的客户端没有控制台，这是把它们送到用户眼前的唯一通道。
+const errors = useErrorsStore();
+const errorsOpen = ref(false);
+
+async function copyErrors() {
+  try {
+    await navigator.clipboard.writeText(errors.asText);
+    ElMessage.success("已复制错误详情");
+  } catch {
+    ElMessage.info("浏览器拒绝了剪贴板访问，请展开后手动选中复制");
+  }
+}
 
 async function checkHealth() {
   try {
@@ -73,6 +88,17 @@ onMounted(() => {
       </div>
       <RouterView />
     </main>
+
+    <!-- 有错误就常驻显示：不能让"点了没反应"变成一个无线索的黑洞。 -->
+    <div v-if="errors.items.length" class="errbar">
+      <span class="errbar__count">界面出现 {{ errors.items.length }} 个错误</span>
+      <button class="errbar__btn" @click="errorsOpen = !errorsOpen">
+        {{ errorsOpen ? "收起" : "详情" }}
+      </button>
+      <button class="errbar__btn" @click="copyErrors">复制</button>
+      <button class="errbar__btn" @click="errors.clear">清空</button>
+      <pre v-if="errorsOpen" class="errbar__log">{{ errors.asText }}</pre>
+    </div>
   </div>
 </template>
 
@@ -181,6 +207,50 @@ onMounted(() => {
   background: #fff;
   padding: 1px 6px;
   border-radius: 4px;
+}
+/* 错误条固定在左下：右下角已经被「退出登录」占着。 */
+.errbar {
+  position: fixed;
+  left: 16px;
+  bottom: 12px;
+  z-index: 60;
+  max-width: min(560px, calc(100vw - 32px));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid #f7cbc9;
+  border-left: 3px solid var(--danger);
+  border-radius: 8px;
+  background: #fdeceb;
+  color: var(--danger);
+  font-size: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+}
+.errbar__count {
+  font-weight: 600;
+}
+.errbar__btn {
+  border: 1px solid #f7cbc9;
+  background: #fff;
+  color: var(--danger);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.errbar__log {
+  flex: 1 0 100%;
+  margin: 4px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #5b6270;
+  background: #fff;
+  border-radius: 6px;
+  padding: 8px;
 }
 
 @media (max-width: 767px) {

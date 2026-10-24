@@ -11,6 +11,30 @@ const shareurl = defineModel<string>("shareurl", { default: "" });
 const PREF_KEY = "search.engine-pref";
 const settings = useSettingsStore();
 
+/**
+ * 记住上次挑的引擎只是个偏好，**读不到就当没挑过**，绝不能让界面挂掉。
+ *
+ * 桌面客户端跑在原生 WebView 里，存储能不能用由内核与运行模式说了算：
+ * macOS 的 WKWebView 在私有模式下仍给 localStorage，Windows 的 WebView2（Chromium）
+ * 开了 InPrivate 后则可能直接抛 SecurityError。这里一旦抛错，整个组件 setup 失败 →
+ * 任务表单渲染不出来 → 用户看到的就是"点了没反应"。所以两处访问都包起来。
+ */
+function readPref(): string {
+  try {
+    return localStorage.getItem(PREF_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writePref(id: string): void {
+  try {
+    localStorage.setItem(PREF_KEY, id);
+  } catch {
+    /* 存不下就算了，本次会话里仍然记得（engine 还在内存里） */
+  }
+}
+
 const engineOptions = computed(() =>
   (settings.settings?.source?.engines ?? [])
     .filter((e) => e.enable !== false)
@@ -18,11 +42,11 @@ const engineOptions = computed(() =>
 );
 
 // "" = 全部启用引擎聚合；记住上次挑的那个，只服务于下次建表单，不写进任务
-const engine = ref(String(localStorage.getItem(PREF_KEY) || ""));
+const engine = ref(readPref());
 
 function rememberEngine(id: string) {
   engine.value = id;
-  localStorage.setItem(PREF_KEY, id);
+  writePref(id);
 }
 
 watch(
