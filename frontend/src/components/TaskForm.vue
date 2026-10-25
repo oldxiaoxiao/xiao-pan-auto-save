@@ -498,7 +498,9 @@ const hasId = computed(() => props.task?.id ?? null);
         <label class="field-label">分享链接</label>
         <div class="row">
           <el-input v-model="draft.shareurl" placeholder="https://pan.quark.cn/s/..." />
-          <el-button :icon="'🔍'" :disabled="!draft.shareurl.trim()" @click="openSelector('preview')"> 浏览 </el-button>
+          <!-- icon prop 只认组件；传 emoji 字符串会走 createElement('🔍') 直接抛
+               InvalidCharacterError，整个 TaskForm 渲染失败——就是"点了没反应"的真凶。 -->
+          <el-button :disabled="!draft.shareurl.trim()" @click="openSelector('preview')">🔍 浏览</el-button>
         </div>
       </div>
 
@@ -507,7 +509,7 @@ const hasId = computed(() => props.task?.id ?? null);
         <div class="row">
           <!-- 占位符只是提示文字：task_defaults 没到手时留空，不前端猜一个保存根目录给用户看。 -->
           <el-input v-model="draft.savepath" :placeholder="defaults?.savepath_root" @input="pathTouched = true" />
-          <el-button :icon="'📁'" @click="openSelector('savepath')"> 选择 </el-button>
+          <el-button @click="openSelector('savepath')">📁 选择</el-button>
         </div>
         <!-- pathTouched 只在这两处置真：这条输入框的 @input、以及选择器回传 payload.path；程序代填不置真。 -->
         <small class="hint">{{ pathHint }}</small>

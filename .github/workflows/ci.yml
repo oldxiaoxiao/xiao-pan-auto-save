@@ -25,6 +25,29 @@ jobs:
         working-directory: frontend
       - run: npm run lint:check
         working-directory: frontend
+      # Element Plus 的 icon prop 只接受组件对象；写成 :icon="'🔍'" 会走
+      # createElement('🔍')，Blink 内核（Windows WebView2）直接抛 InvalidCharacterError，
+      # 整个 TaskForm 渲染失败，看起来就是"点了没反应"。v0.4.4 修过一次，这里守住别再写回来。
+      - name: 守卫 icon prop 不得传字符串
+        working-directory: frontend
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          # 命中 :icon="'🔍'" 这类"字符串当组件"的写法；:icon="Search"（组件变量）不受影响
+          pattern = re.compile(r""":icon\s*=\s*["']\s*['"]""")
+          bad = []
+          for path in pathlib.Path("src").rglob("*.vue"):
+              for no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                  if pattern.search(line):
+                      bad.append(f"{path}:{no}: {line.strip()}")
+          if bad:
+              print("\n".join(bad))
+              print("::error::icon prop 只接受组件（如 @element-plus/icons-vue），传字符串会 createElement(emoji) 崩溃")
+              sys.exit(1)
+          PY
       - run: npm run build
         working-directory: frontend
       - run: python -m pytest backend/tests -q
