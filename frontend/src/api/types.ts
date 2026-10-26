@@ -129,11 +129,19 @@ export interface EngineFieldSpec {
 }
 
 /** GET /api/search/engine-types：协议自描述，引擎表单按它渲染。 */
+export interface EnginePreset {
+  label: string;
+  server: string;
+  note: string;
+}
+
 export interface EngineTypeSpec {
   type: string;
   label: string;
   default_server: string;
   fields: EngineFieldSpec[];
+  /** 实测可用的公共实例：点一下就填好地址，不用去别处抄 URL。 */
+  presets?: EnginePreset[];
 }
 
 export interface SearchSource {
@@ -417,6 +425,15 @@ export interface SuggestionResponse {
   data: Suggestion[];
   /** 逐源失败说明：哪些引擎没出结果、为什么。 */
   errors?: SearchError[];
+  /** 探活统计：过滤掉多少条已失效的分享（公共源只管收录、不管死活）。 */
+  stats?: SearchStats;
+}
+
+export interface SearchStats {
+  checked: number;
+  dead: number;
+  unknown: number;
+  skipped: number;
 }
 
 export interface ValidateResponse {

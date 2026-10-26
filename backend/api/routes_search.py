@@ -24,7 +24,10 @@ async def suggestions(q: str, d: str = "0", engine: str = "") -> dict:
     if not q.strip():
         return {"ok": True, "data": [], "errors": []}
     engines = normalize_source_cfg(get_setting("source"))
-    result = await search_all(q.strip(), d == "1", {"engines": engines}, engine_id=engine)
+    # 6 秒是给"输入框"定的：公共源里总有一个不响应的实例，按默认 10 秒等会让用户对着空白发呆。
+    result = await search_all(
+        q.strip(), d == "1", {"engines": engines}, engine_id=engine, engine_timeout=6.0
+    )
     written = False
     for engine_id, token in result["token_updates"].items():
         hit = next((item for item in engines if item["id"] == engine_id), None)
@@ -33,7 +36,7 @@ async def suggestions(q: str, d: str = "0", engine: str = "") -> dict:
             written = True
     if written:
         set_setting("source", {"engines": engines})
-    return {"ok": True, "data": result["data"], "errors": result["errors"]}
+    return {"ok": True, "data": result["data"], "errors": result["errors"], "stats": result.get("stats", {})}
 
 
 class ValidateIn(BaseModel):

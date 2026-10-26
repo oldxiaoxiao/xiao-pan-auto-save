@@ -11,6 +11,7 @@ seed 的过期终态行（执行顺序敏感的静默串扰）；每日/手动�
 import atexit
 import os
 import shutil
+import sys
 import tempfile
 
 import pytest
@@ -40,3 +41,37 @@ def _no_quiet_hours():
 
     set_setting("notify_quiet", {"enabled": False, "start": "23:00", "end": "08:00"})
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_network_probe():
+    """搜索会拿夸克接口探活，测试里一律不许联网。
+
+    默认探针换成"一律 unknown"：既不访问外网，也不改变结果条数，
+    这样只关心"搜到什么"的用例断言依旧成立；探活逻辑本身在 test_search_verify.py
+    里用注入的假探针单独测。想验证真探针的用例自己传 probe= 覆盖。
+
+    两点讲究：
+    - **只改已加载的模块**（sys.modules 取，不 import）：这里主动 import
+      backend.services.search_service 会把 ORM/engine 绑到当时的库上，
+      让自己换库的用例（test_once_retry_budget）在收尾时找不到表。
+    - **不请求 monkeypatch**：多一个 autouse 夹具会让 monkeypatch 提前实例化、
+      收尾顺序整体后移，结果 clean_db 在 db.engine 被换回之前就执行 DELETE。
+    """
+    module = sys.modules.get("backend.services.search_service")
+    if module is None:  # 这个用例压根没碰搜索，不必操心
+        yield
+        return
+
+    async def fake_probe(url: str, timeout: float) -> str:
+        return module.VERDICT_UNKNOWN
+
+    original = module._default_probe
+    module._default_probe = fake_probe
+    module.reset_verify_cache()
+    try:
+        yield
+    finally:
+        module._default_probe = original
+        module.reset_verify_cache()
+

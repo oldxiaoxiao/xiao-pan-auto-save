@@ -80,6 +80,15 @@ function removeEngine(index: number) {
   engines.splice(index, 1);
 }
 
+/** 点推荐实例 = 填地址 + 顺手改个能认出来的名字（用户自己命名过就尊重原名）。 */
+function applyPreset(engine: SearchEngine, preset: { label: string; server: string }) {
+  engine.server = preset.server;
+  const specLabel = specOf(engine.type)?.label ?? "";
+  if (!engine.name || /^(PanSou|夸克搜)/.test(engine.name) || /^\S+ \d+$/.test(engine.name)) {
+    engine.name = `${specLabel} ${preset.server.replace(/^https?:\/\//, "")}`;
+  }
+}
+
 function missingRequired(engine: SearchEngine): string {
   const spec = specOf(engine.type);
   if (!spec) return "";
@@ -153,6 +162,20 @@ async function save() {
           />
         </div>
       </div>
+
+      <div v-if="specOf(engine.type)?.presets?.length" class="presets">
+        <span class="presets__label text-muted">推荐实例（公共站各有个性，多配一条互为备份）：</span>
+        <el-tag
+          v-for="p in specOf(engine.type)?.presets ?? []"
+          :key="p.server"
+          class="presets__tag"
+          :type="engine.server === p.server ? 'primary' : 'info'"
+          :title="p.note"
+          @click="applyPreset(engine, p)"
+        >
+          {{ p.label }}
+        </el-tag>
+      </div>
     </div>
 
     <el-button size="small" :disabled="!types.length" @click="addEngine"> 新增引擎 </el-button>
@@ -202,5 +225,15 @@ async function save() {
 .warn {
   font-size: 12px;
   color: var(--warn);
+}
+.presets {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.presets__tag {
+  cursor: pointer;
 }
 </style>

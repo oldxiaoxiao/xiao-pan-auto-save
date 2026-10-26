@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import html
 import re
+import time
 from datetime import UTC, datetime, timedelta, timezone
 from urllib.parse import quote
 
@@ -42,7 +43,7 @@ async def _json(resp: httpx.Response) -> dict:
 
 
 def _reason(exc: BaseException) -> str:
-    if isinstance(exc, httpx.TimeoutException):
+    if isinstance(exc, (httpx.TimeoutException, TimeoutError, asyncio.TimeoutError)):
         return "请求超时"
     return str(exc) or type(exc).__name__
 
@@ -212,6 +213,110 @@ ADAPTERS: dict = {
 }
 
 
+# ----------------------------------------------------------------------
+# 链接探活：搜索结果里失效链接太多（公共源只管收录、不管死活），
+# 所以在展示前用夸克的 sharepage/token 逐个换 stoken 判定真伪。
+# ----------------------------------------------------------------------
+_VERIFY_TTL = 30 * 60  # 判定结果的缓存时长：同一个关键词反复搜不重复探活
+_verify_cache: dict[str, tuple[float, str]] = {}
+VERDICT_OK = "ok"
+VERDICT_DEAD = "dead"
+VERDICT_UNKNOWN = "unknown"
+
+
+def reset_verify_cache() -> None:
+    """仅供测试：清掉探活缓存，避免用例之间互相污染。"""
+    _verify_cache.clear()
+
+
+def _verdict_from_exc(exc: BaseException) -> str:
+    """ShareBanned=永久失效；其余（网络抖动、5xx）一律 unknown，宁可留着也不误杀。"""
+    from ..drivers.base import ShareBanned
+
+    return VERDICT_DEAD if isinstance(exc, ShareBanned) else VERDICT_UNKNOWN
+
+
+async def _default_probe(url: str, timeout: float) -> str:
+    """匿名换 stoken：不需要登录态，失效链接在这里就会抛 ShareBanned。"""
+    from ..drivers.quark import QuarkDriver
+
+    driver = QuarkDriver(cookie="")
+    try:
+        ref = driver.parse_share(url)
+        await asyncio.wait_for(driver._get_stoken(ref), timeout=timeout)
+        return VERDICT_OK
+    except BaseException as exc:  # noqa: BLE001 判定口径统一交给 _verdict_from_exc
+        return _verdict_from_exc(exc)
+    finally:
+        await driver.close()
+
+
+async def verify_links(
+    rows: list[dict],
+    *,
+    limit: int = 12,
+    concurrency: int = 6,
+    timeout: float = 4.0,
+    probe=None,
+) -> tuple[list[dict], dict]:
+    """并发探活前 limit 条，丢掉确认失效的，返回 (保留结果, 统计)。
+
+    - 只探夸克链接：本项目只转存夸克，别的盘的结果探了也没用，标 unknown 保留。
+    - 超过 limit 的条目不探（unknown 保留）：探活不能把搜索拖成十秒级等待。
+    - 网络异常不判死：公共源本来就抖，宁可留一条待用户点选时再校验。
+    """
+    probe = probe or _default_probe
+    stats = {"checked": 0, "dead": 0, "unknown": 0, "skipped": 0}
+    if not rows:
+        return [], stats
+
+    targets: list[int] = []
+    verdicts: dict[int, str] = {}
+    now = time.monotonic()
+    for idx, row in enumerate(rows):
+        url = str(row.get("shareurl") or "")
+        if "pan.quark.cn" not in url:
+            verdicts[idx] = VERDICT_UNKNOWN
+            continue
+        cached = _verify_cache.get(_share_key(url))
+        if cached and cached[0] > now:
+            verdicts[idx] = cached[1]
+            stats["checked"] += 1
+            continue
+        if len(targets) >= limit:
+            stats["skipped"] += 1
+            continue
+        targets.append(idx)
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def run(idx: int) -> tuple[int, str]:
+        url = str(rows[idx]["shareurl"])
+        async with sem:
+            try:
+                verdict = await probe(url, timeout)
+            except Exception as exc:  # noqa: BLE001 探针怎么炸都不能拖垮搜索，一律按"不确定"处理
+                verdict = _verdict_from_exc(exc)
+        _verify_cache[_share_key(url)] = (time.monotonic() + _VERIFY_TTL, verdict)
+        return idx, verdict
+
+    if targets:
+        for idx, verdict in await asyncio.gather(*(run(i) for i in targets)):
+            verdicts[idx] = verdict
+            stats["checked"] += 1
+
+    kept: list[dict] = []
+    for idx, row in enumerate(rows):
+        verdict = verdicts.get(idx, VERDICT_UNKNOWN)
+        if verdict == VERDICT_DEAD:
+            stats["dead"] += 1
+            continue
+        if verdict == VERDICT_UNKNOWN:
+            stats["unknown"] += 1  # 探过但结论不明 / 没来得及探 / 非夸克链接，统一算"未验证"
+        kept.append(row)
+    return kept, stats
+
+
 def _share_key(url: str) -> str:
     """去重键：忽略尾斜杠与 #片段，但保留 query —— ?pwd= 提取码不同就是两条不同的分享。"""
     return url.strip().rstrip("/").split("#", 1)[0]
@@ -245,23 +350,30 @@ async def search_all(
     engine_id: str = "",
     timeout: float = 15.0,
     client: httpx.AsyncClient | None = None,
+    verify: bool = True,
+    probe=None,
+    engine_timeout: float = 10.0,
 ) -> dict:
-    """并发搜各引擎并合并去重。
+    """并发搜各引擎并合并去重，再探活过滤失效链接。
 
-    返回 {data, errors, token_updates}：errors 逐源说明谁没出结果，
-    token_updates 是 {引擎 id: 新 token}，由调用方写回该引擎。
+    返回 {data, errors, token_updates, stats}：errors 逐源说明谁没出结果，
+    token_updates 是 {引擎 id: 新 token}，stats 是探活统计（过滤掉多少条死链）。
     """
     targets, errors = resolve_engines(source_cfg, engine_id)
     if not targets:
-        return {"data": [], "errors": errors, "token_updates": {}}
+        return {"data": [], "errors": errors, "token_updates": {}, "stats": {}}
 
     own_client = client is None
     client = client or httpx.AsyncClient(timeout=timeout, follow_redirects=True)
     rows: list[dict] = []
     token_updates: dict[str, str] = {}
     try:
+        # 每个引擎单独设上限：某个公共站卡住时不能拖住其它引擎的结果（也不该拖住输入框）
         outs = await asyncio.gather(
-            *(ADAPTERS[engine["type"]](client, engine, query, deep) for engine in targets),
+            *(
+                asyncio.wait_for(ADAPTERS[engine["type"]](client, engine, query, deep), timeout=engine_timeout)
+                for engine in targets
+            ),
             return_exceptions=True,
         )
     finally:
@@ -278,4 +390,17 @@ async def search_all(
         for row in got_rows:
             row["source"] = engine["name"]
         rows.extend(got_rows)
-    return {"data": _merge(rows), "errors": errors, "token_updates": token_updates}
+
+    merged = _merge(rows)
+    stats: dict = {}
+    if verify and merged:
+        merged, stats = await verify_links(merged, probe=probe)
+        if stats.get("dead") and not merged:
+            # 全死不能只显示"未搜到"：用户会以为关键词不对，实际是这批结果集体过期了
+            errors.append(
+                {
+                    "engine": "链接校验",
+                    "reason": f"{stats['dead']} 条结果全部已失效（公共源收录了死链），请换个关键词或稍后重试",
+                }
+            )
+    return {"data": merged, "errors": errors, "token_updates": token_updates, "stats": stats}

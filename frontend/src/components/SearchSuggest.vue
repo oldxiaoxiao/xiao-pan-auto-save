@@ -2,7 +2,7 @@
 import { ref, watch, computed } from "vue";
 import { api } from "../api/client";
 import { useSettingsStore } from "../stores/settings";
-import type { SearchError, Suggestion } from "../api/types";
+import type { SearchError, SearchStats, Suggestion } from "../api/types";
 
 // taskname = 用户输入的关键词/任务名；选中结果不再覆盖它（仅在输入为空时用资源标题兜底）。
 const taskname = defineModel<string>("taskname", { default: "" });
@@ -60,6 +60,8 @@ watch(
 
 const suggestions = ref<Suggestion[]>([]);
 const searchErrors = ref<SearchError[]>([]);
+/** 探活统计：后端在返回前已经把死链剔掉了，这里只负责告诉用户剔了几条。 */
+const searchStats = ref<SearchStats | null>(null);
 const open = ref(false);
 const searching = ref(false);
 const searched = ref(false);
@@ -70,30 +72,41 @@ const validateOk = ref(false);
 const validatePending = ref(false);
 let timer: ReturnType<typeof setTimeout> | undefined;
 let suppressWatch = false; // 兜底回填 taskname 时，跳过一次自动搜索
+// 请求序号：输入快时前一次请求可能后到，旧结果绝不能盖掉新结果
+let seq = 0;
 
 function doSearch() {
   if (timer) clearTimeout(timer);
   const q = (taskname.value || "").trim();
   if (q.length < 2) {
     suggestions.value = [];
+    searchStats.value = null;
     open.value = false;
     return;
   }
+  const mine = ++seq;
   searching.value = true;
   open.value = true;
   api
     .suggestions(q, false, engine.value)
     .then((r) => {
+      if (mine !== seq) return;
       suggestions.value = r.data.slice(0, 12);
       searchErrors.value = r.errors ?? [];
+      searchStats.value = r.stats ?? null;
     })
     .catch(() => {
+      if (mine !== seq) return;
       suggestions.value = [];
       searchErrors.value = [];
+      searchStats.value = null;
     })
     .finally(() => {
+      if (mine !== seq) return;
       searching.value = false;
       searched.value = true;
+      // 有条目要展示、一条没有也要给个交代：否则用户只看到一片空白，以为点了没反应
+      open.value = true;
     });
 }
 
@@ -112,6 +125,7 @@ watch(taskname, () => {
   const q = (taskname.value || "").trim();
   if (q.length < 2) {
     suggestions.value = [];
+    searchStats.value = null;
     open.value = false;
     return;
   }
@@ -120,6 +134,7 @@ watch(taskname, () => {
 
 function pick(s: Suggestion) {
   if (timer) clearTimeout(timer);
+  seq++; // 选中即作废在途请求：不然它回来会把面板重新弹开
   shareurl.value = s.shareurl;
   pickedTitle.value = s.taskname;
   if (!(taskname.value || "").trim()) {
@@ -128,6 +143,7 @@ function pick(s: Suggestion) {
   }
   suggestions.value = [];
   open.value = false;
+  searched.value = false; // 收起后不该再顶着"未搜到资源"那行提示
   runValidate();
 }
 
@@ -196,6 +212,9 @@ defineExpose({ runValidate });
     <div v-if="searchErrors.length && suggestions.length" class="hint text-muted">
       {{ searchErrors.map((e) => `${e.engine}：${e.reason}`).join("；") }}
     </div>
+    <div v-if="searchStats && searchStats.dead > 0" class="hint text-muted">
+      已过滤 {{ searchStats.dead }} 条失效链接（公共源收录了死链，选之前先探过活）
+    </div>
 
     <ul v-if="open && suggestions.length" class="panel">
       <li v-for="(s, i) in suggestions" :key="i" class="item" @click="pick(s)">
@@ -211,7 +230,7 @@ defineExpose({ runValidate });
         </div>
       </li>
     </ul>
-    <div v-else-if="open && !searching && searched" class="panel panel--empty">
+    <div v-else-if="searched && !searching && !suggestions.length" class="panel panel--empty">
       <template v-if="!engineOptions.length"> 还没有启用中的搜索引擎，请到「设置 → 资源搜索源」添加 </template>
       <template v-else-if="searchErrors.length">
         <div v-for="(e, i) in searchErrors" :key="i">{{ e.engine }}：{{ e.reason }}</div>

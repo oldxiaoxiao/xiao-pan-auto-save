@@ -15,6 +15,20 @@ SEARCH_ENGINES: dict[str, dict] = {
     "pansou": {
         "label": "PanSou",
         "default_server": "https://so.252035.xyz",
+        # 实测可用的公共实例：公共站各有各的脾气（一个收录量大但常超时、另一个量小但新），
+        # 配两条以上互为备份比只配一条稳得多。预设只是快捷填充，随时可以改。
+        "presets": [
+            {
+                "label": "so.252035.xyz（收录量最大）",
+                "server": "https://so.252035.xyz",
+                "note": "条目最多，高峰期容易超时",
+            },
+            {
+                "label": "pansou.app（结果较新）",
+                "server": "https://pansou.app",
+                "note": "条目少，但实测存活率更高",
+            },
+        ],
         "fields": [
             {"key": "server", "label": "服务器地址", "required": False, "secret": False},
         ],
@@ -42,13 +56,14 @@ _OLD_KEYS = ("pansou", "cloudsaver")
 
 
 def engine_type_specs() -> list[dict]:
-    """给前端的协议清单：每种协议怎么填、哪些必填、哪个是密钥。"""
+    """给前端的协议清单：每种协议怎么填、哪些必填、哪个是密钥、有哪些推荐实例。"""
     return [
         {
             "type": type_key,
             "label": spec["label"],
             "default_server": spec["default_server"],
             "fields": [dict(field) for field in spec["fields"]],
+            "presets": [dict(item) for item in spec.get("presets", [])],
         }
         for type_key, spec in SEARCH_ENGINES.items()
     ]
